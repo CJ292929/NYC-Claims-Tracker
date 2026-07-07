@@ -1,0 +1,1 @@
+ALTER TABLE `visit_records` ADD `authPeriod` int DEFAULT 1 NOT NULL;

@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1781191440962,
+      "tag": "0000_plain_nocturne",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1781194438885,
+      "tag": "0001_fine_junta",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1781239291678,
+      "tag": "0002_opposite_kabuki",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1781266909547,
+      "tag": "0003_cool_morlocks",
+      "breakpoints": true
+    }
+  ]
+}
