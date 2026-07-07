@@ -1,0 +1,182 @@
+[
+  {
+    "name": "Khim Tan",
+    "insurance": "Aetna",
+    "total_authorized": 12,
+    "sessions_remaining": 13,
+    "completed_visits": 29,
+    "visits": [
+      {
+        "Authorization Date": "2026-04-21 00:00:00",
+        "# of sessions authorized": 12,
+        "#of sessions remaining": 11,
+        "Session number": 1,
+        "Dates of Service": "2026-04-01 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 10,
+        "Session number": 2,
+        "Dates of Service": "2026-04-06 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 9,
+        "Session number": 3,
+        "Dates of Service": "2026-04-13 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 8,
+        "Session number": 4,
+        "Dates of Service": "2026-04-17 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 7,
+        "Session number": 5,
+        "Dates of Service": "2026-04-20 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 6,
+        "Session number": 6,
+        "Dates of Service": "2026-05-02 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 5,
+        "Session number": 7,
+        "Dates of Service": "2026-05-02 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 4,
+        "Session number": 8,
+        "Dates of Service": "2026-05-04 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 3,
+        "Session number": 9,
+        "Dates of Service": "2026-05-11 00:00:00",
+        "New authorization?": "YES",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 2,
+        "Session number": 10,
+        "Dates of Service": "2026-05-16 00:00:00",
+        "New authorization?": "YES",
+        "Date ASH submitted": "RE"
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 1,
+        "Session number": 11,
+        "Dates of Service": "2026-05-18 00:00:00",
+        "New authorization?": "YES",
+        "Date ASH submitted": null
+      }
+    ]
+  },
+  {
+    "name": "Thomas Heck",
+    "insurance": "Aetna",
+    "total_authorized": 12,
+    "sessions_remaining": 5,
+    "completed_visits": 12,
+    "visits": [
+      {
+        "Authorization Date": "2026-04-15 00:00:00",
+        "# of sessions authorized": 12,
+        "#of sessions remaining": 11,
+        "Session number": 1,
+        "Dates of Service": "2026-04-06 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 10,
+        "Session number": 2,
+        "Dates of Service": "2026-04-13 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 9,
+        "Session number": 3,
+        "Dates of Service": "2026-04-27 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 8,
+        "Session number": 4,
+        "Dates of Service": "2026-05-04 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 7,
+        "Session number": 5,
+        "Dates of Service": "2026-05-11 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 6,
+        "Session number": 6,
+        "Dates of Service": "2026-05-18 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      },
+      {
+        "Authorization Date": null,
+        "# of sessions authorized": null,
+        "#of sessions remaining": 5,
+        "Session number": 7,
+        "Dates of Service": "2026-06-01 00:00:00",
+        "New authorization?": "NO",
+        "Date ASH submitted": null
+      }
+    ]
+  }
+]
