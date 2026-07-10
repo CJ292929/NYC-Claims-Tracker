@@ -115,3 +115,5 @@ api/server.js
 # Manus version file (auto-generated, not part of source)
 client/public/__manus__/version.json
 .project-config.json
+.vercel
+.env*
