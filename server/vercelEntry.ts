@@ -8,16 +8,22 @@
  * The frontend static files are served from the `dist/` directory
  * which Vite builds into. Vercel serves them automatically via the
  * outputDirectory setting in vercel.json.
+ *
+ * This file is bundled by esbuild into api/server.js (see the "build"
+ * script in package.json). It intentionally does NOT live under api/
+ * itself — Vercel's zero-config routing treats any file under api/ as
+ * its own route by basename, so a TS source file here would collide
+ * with the compiled api/server.js output of the same name.
  */
 import "dotenv/config";
 import express from "express";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { registerOAuthRoutes } from "../server/_core/oauth";
-import { registerStorageProxy } from "../server/_core/storageProxy";
-import { registerClaimUploadRoute } from "../server/claimUpload";
-import { appRouter } from "../server/routers";
-import { createContext } from "../server/_core/context";
-import { serveStatic } from "../server/_core/vite";
+import { registerOAuthRoutes } from "./_core/oauth";
+import { registerStorageProxy } from "./_core/storageProxy";
+import { registerClaimUploadRoute } from "./claimUpload";
+import { appRouter } from "./routers";
+import { createContext } from "./_core/context";
+import { serveStatic } from "./_core/vite";
 
 const app = express();
 
