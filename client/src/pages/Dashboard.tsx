@@ -2062,7 +2062,8 @@ export default function Dashboard() {
                                 </thead>
                                 <tbody>
                                   {claims.map((claim: any, claimIdx: number) => {
-                                    // Check if this is the first row or if the date is different from the previous row
+                                    // Show the date once per group of consecutive rows that share it,
+                                    // instead of repeating it on every CPT line for the same visit.
                                     const prevClaim = claimIdx > 0 ? claims[claimIdx - 1] : null;
                                     const isSameDateAsPrev = prevClaim && prevClaim.date_of_service === claim.date_of_service;
                                     const isEditing = (field: string) =>

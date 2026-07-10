@@ -121,17 +121,18 @@ export interface DateClaimGroup extends ExtractedClaim {
 
 /** Parse Meritain EOB and return claims grouped by patient name, then by date */
 export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: string; claims: DateClaimGroup[] }> {
-  // Extract document-level payment date and EPC Draft #
-  // Structure in PDF text:
-  //   EPC Draft #:\nPayment Week:\nPayment Date:\n\n393777582\n1241757320\n\n...\n16\n04/24/2026
-  // Tax ID (9 digits) appears first, then EPC Draft # (10 digits), then Payment Week, then Payment Date
-  const epcBlockMatch = text.match(/EPC Draft #:\nPayment Week:\nPayment Date:\n\n(\d{9})\n(\d{10})\n\n[\s\S]{0,100}?\n(\d{1,3})\n(\d{1,2}\/\d{1,2}\/\d{4})/);
-  const docPaymentDate = epcBlockMatch ? parseDate(epcBlockMatch[4]) : null;
-  const epcDraftNo = epcBlockMatch ? epcBlockMatch[2].trim() : null;
+  // Extract document-level payment date and EPC Draft # (from pdftotext -layout output).
+  // Layout mode wraps a value onto the next line when it's too wide for its column,
+  // so each field is extracted independently rather than assuming a fixed number of
+  // newlines between the label block and the value block.
+  const epcDraftMatch = text.match(/EPC Draft #:\s*\n?\s*(\d+)/);
+  const paymentDateMatch = text.match(/Payment Date:\s*\n?\s*(\d{1,2}\/\d{1,2}\/\d{4})/);
+  const docPaymentDate = paymentDateMatch ? parseDate(paymentDateMatch[1]) : null;
+  const epcDraftNo = epcDraftMatch ? epcDraftMatch[1].trim() : null;
 
-  // Accumulate all flat claims per patient name (merge duplicate patient sections)
+  // Accumulate all flat claims per patient name (merge duplicate patient sections —
+  // the same patient can have multiple Claim #s, e.g. one per visit date)
   const patientClaimsMap = new Map<string, ExtractedClaim[]>();
-  const patientClaimMetaMap = new Map<string, { claimNo: string | null; shortGroupName: string; checkEftNumber: string | null }>();
 
   // Split by patient blocks: look for "Patient:   NAME" followed by "Claim #:"
   const patientSections = text.split(/(?=Patient:\s+[A-Z])/g);
@@ -144,49 +145,53 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
       section = section.slice(0, claimTotalIdx);
     }
 
-    // Extract patient name
-    // pdftotext format: "Patient: ALLISON AUYEUNG\n" (name ends at newline)
-    const nameMatch = section.match(/Patient:\s+([A-Z][A-Z\s]+?)(?=\n)/);
+    // Extract patient name — stops at either a newline (pdftotext plain mode) or a run
+    // of 2+ spaces (pdftotext -layout mode, where "Member #:"/"Claim #:" share the same
+    // physical line as the name, separated by wide column padding).
+    const nameMatch = section.match(/Patient:\s+([A-Z][A-Z\s]+?)(?=\s{2,}|\n)/);
     const patientName = nameMatch ? nameMatch[1].trim() : 'UNKNOWN';
 
-    // Extract Claim #
+    // Extract Claim # — specific to this section/visit (each date group has its own claim #)
     const claimMatch = section.match(/Claim #:\s+([A-Z0-9]+)/);
     const claimNo = claimMatch ? claimMatch[1].trim() : null;
 
-    // Extract Group Name/Check (format: "16404/137040261" — group/check number)
-    // pdftotext format: "Group Name/Check: 16404/137040261\n"
-    const groupMatch = section.match(/Group Name\/Check:\s+([^\n]+)/);
-    const groupName = groupMatch ? groupMatch[1].trim() : 'Meritain Health';
-    const shortGroupName = groupName.length > 50 ? groupName.split(/\s+/)[0] : groupName;
+    // Extract Group Name/Check (format: "16404/137040261" — group/check number).
+    // Captures a single token (\S+), not the rest of the line, since in -layout mode
+    // trailing columns like "Customer Service:..." share the same physical line.
+    const groupMatch = section.match(/Group Name\/Check:\s+(\S+)/);
+    const groupName = groupMatch ? groupMatch[1].trim() : null;
     // Extract EFT/Check number: the part after the slash (e.g. "137040261" from "16404/137040261")
-    const checkEftMatch = groupName.match(/\/([\d]+)$/);
+    const checkEftMatch = groupName ? groupName.match(/\/([\d]+)$/) : null;
     const checkEftNumber = checkEftMatch ? checkEftMatch[1] : null;
 
     if (!patientClaimsMap.has(patientName)) {
       patientClaimsMap.set(patientName, []);
-      patientClaimMetaMap.set(patientName, { claimNo, shortGroupName, checkEftNumber });
     }
     const patientClaims = patientClaimsMap.get(patientName)!;
-    const meta = patientClaimMetaMap.get(patientName)!;
 
-    // Extract service lines
-    // pdftotext plain format: each field on its own line, blank lines between
+    // Extract service lines from pdftotext -layout output, where each service row stays
+    // on one physical line with its charge/allowed/discount/co-ins/co-pay/deductible/
+    // non-cov columns aligned (unlike plain mode, which scatters all amounts for the
+    // whole claim into one flat block separate from their CPT codes).
     // Meritain EOB columns (in order):
     //   date_range (e.g. 04/11/26-04/11/26)  <- group 1 (start date)
-    //   CPT code (e.g. 97110)                <- group 2
+    //   CPT code (e.g. 97110)                <- group 3
     //   explanation code (e.g. 395)          <- skipped
-    //   total charge (e.g. 175.00)           <- group 3
-    //   allowed amount/QPA (e.g. 135.00)     <- group 4 (insurance reimbursement)
-    //   provider discount (e.g. 40.00)       <- group 5 (skipped — not patient obligation)
-    //   other plan payment (e.g. 0.00)       <- group 6
-    //   other adjustment (e.g. 0.00)         <- group 7
-    //   co-insurance (e.g. 0.00)             <- group 8 (patient obligation)
-    //   co-pay (e.g. 0.00)                   <- group 9 (patient obligation)
-    //   deductible (e.g. 0.00)               <- group 10 (patient obligation)
-    //   non-covered (e.g. 0.00)              <- group 11 (patient obligation)
-    //   net payment amount (e.g. 135.00)     <- group 12
-    // Match service lines with flexible whitespace (1+ newlines between fields)
-    const serviceLinePattern = /(\d{1,2}\/\d{1,2}\/\d{2,4})-(\d{1,2}\/\d{1,2}\/\d{2,4})\s+([A-Z0-9]+)\s+\d+\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)/g;
+    //   total charge (e.g. 175.00)           <- group 4
+    //   allowed amount/QPA (e.g. 135.00)     <- group 5 (insurance reimbursement)
+    //   provider discount (e.g. 40.00)       <- group 6 (skipped — not patient obligation)
+    //   other plan payment (e.g. 0.00)       <- group 7
+    //   other adjustment (e.g. 0.00)         <- group 8
+    //   co-insurance (e.g. 0.00)             <- group 9 (patient obligation)
+    //   co-pay (e.g. 0.00)                   <- group 10 (patient obligation)
+    //   deductible (e.g. 0.00)               <- group 11 (patient obligation)
+    //   non-covered (e.g. 0.00)              <- group 12 (patient obligation)
+    //   net payment amount (e.g. 135.00)     <- group 13, OPTIONAL and unused: in
+    //                                            -layout mode this column sometimes
+    //                                            wraps onto its own line when a nearby
+    //                                            row's value pushes the page width, so
+    //                                            it can be absent from the CPT line itself
+    const serviceLinePattern = /(\d{1,2}\/\d{1,2}\/\d{2,4})-(\d{1,2}\/\d{1,2}\/\d{2,4})\s+([A-Z0-9]+)\s+\d+\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)(?:\s+(\d+\.\d+))?/g;
     let lineMatch: RegExpExecArray | null;
     let visitNum = patientClaims.length + 1;
     while ((lineMatch = serviceLinePattern.exec(section)) !== null) {
@@ -213,13 +218,13 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
         chargeAmount: totalCharge,
         insuranceReimbursement: notPaymentAmount,
         patientAmountPaid: coPayAmountFromLine,
-        insuranceBilled: meta.shortGroupName,
-        oaClaimNumber: meta.claimNo,
+        insuranceBilled: 'Meritain Health',
+        oaClaimNumber: claimNo,
         claimStatus,
         checkDate: docPaymentDate,
         dateReceived: docPaymentDate,
         referenceNo: epcDraftNo,
-        checkNumberVirtualCard: meta.checkEftNumber,
+        checkNumberVirtualCard: checkEftNumber,
         visitNumber: visitNum++,
         placeOfService: null,
         unitsBilled: null,
@@ -393,9 +398,6 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
     // Find service date: look for pattern like "06 I 10 I 26" or "06  10  26" in layout text
     // In layout mode dates appear as: "06 I   I" "10 II 26" or "I 10 I 26 I 06 I 10 I 26 I 11 I"
     const dateFragRe = /(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{1,2})\s*(?:I\s*)?/;
-    const chargeRe = /([\d,]+\.\d{2})/;
-    const unitsRe = /\b(\d{1,2})\b.*NPI/;
-    const modifierRe = /\b([A-Z]{2}(?:\s+\d{2})?)\b/;
 
     for (let i = 0; i < lines.length; i++) {
       const cptMatch = lines[i].match(cptLineRe);
@@ -463,18 +465,38 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
       const modMatch = modWindow.match(/\b(GP|59|25|51|76|77|KX|CO|GN|GO|GT|95|AT)\b/);
       if (modMatch) modifier = modMatch[1];
 
-      // Extract charge amount
+      // Extract charge amount + units. Both can land on the line BEFORE, ON, or
+      // AFTER the CPT code's own line — the exact vertical position of these form
+      // fields in pdftotext -layout output varies per row, not just per document
+      // (confirmed against two independently-generated real CMS-1500 PDFs). Digits
+      // are also frequently interleaved with stray "I" characters left over from
+      // the form's printed field-separator marks (e.g. "175II.00" for $175.00,
+      // "1I" for 1 unit) — plain `[\d,]+\.\d{2}` never matches those.
       let chargeAmount: number | null = null;
-      const chargeWindow = lines.slice(i, Math.min(lines.length - 1, i + 10)).join(' ');
-      const chargeMatch = chargeWindow.match(chargeRe);
-      if (chargeMatch) chargeAmount = parseMoney(chargeMatch[1]);
-
-      // Extract units — number before NPI (may have 'I' separator: "2  I  NPI" or "2  NPI")
       let units: number | null = null;
-      const unitsWindow = lines.slice(i, Math.min(lines.length - 1, i + 12)).join(' ');
-      // Match: digit(s) optionally followed by whitespace/I chars before NPI
-      const unitsMatch = unitsWindow.match(/(\d{1,2})\s*[I\s]*\s*NPI/);
-      if (unitsMatch) units = parseInt(unitsMatch[1], 10);
+      const rowWindowStart = Math.max(0, i - 2);
+      const rowWindowEnd = Math.min(lines.length - 1, i + 3);
+      const rowWindow = lines.slice(rowWindowStart, rowWindowEnd + 1).join(' ');
+      // (?<!\d) keeps this from matching mid-way through a longer digit run
+      // (e.g. an NPI number), since those never contain a decimal point anyway.
+      const chargeMatch = rowWindow.match(/(?<!\d)(\d{2,4})\s*I{0,3}\s*\.(\d{2})\b/);
+      if (chargeMatch) {
+        chargeAmount = parseFloat(`${chargeMatch[1]}.${chargeMatch[2]}`);
+        const chargeEnd = chargeMatch.index! + chargeMatch[0].length;
+        // Units usually immediately follows the charge ("350.00 2", "175II.00 1I").
+        const afterCharge = rowWindow.slice(chargeEnd, chargeEnd + 20);
+        const afterUnitsMatch = afterCharge.match(/\b(\d{1,2})I?\b/);
+        if (afterUnitsMatch) {
+          units = parseInt(afterUnitsMatch[1], 10);
+        } else {
+          // Fall back to searching before the charge, taking the LAST (closest)
+          // match so an earlier date fragment on the same row isn't picked up
+          // instead of the actual units value.
+          const beforeCharge = rowWindow.slice(Math.max(0, chargeMatch.index! - 150), chargeMatch.index!);
+          const beforeMatches = Array.from(beforeCharge.matchAll(/\b(\d{1,2})I?\b/g));
+          if (beforeMatches.length > 0) units = parseInt(beforeMatches[beforeMatches.length - 1][1], 10);
+        }
+      }
 
       const dateKey = fromDate || 'no-date';
       if (!dateMap.has(dateKey)) {

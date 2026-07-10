@@ -93,18 +93,6 @@ async function extractPdfText(buffer: Buffer): Promise<string> {
   return textParts.join('\n');
 }
 
-/** Extract text from PDF using pdftotext (plain mode, preserves line structure for EOBs) */
-function extractPdfTextPlain(buffer: Buffer): string {
-  const tmpFile = join(tmpdir(), `eob_${Date.now()}.pdf`);
-  try {
-    writeFileSync(tmpFile, buffer);
-    const text = execSync(`pdftotext "${tmpFile}" -`, { maxBuffer: 10 * 1024 * 1024 }).toString();
-    return text;
-  } finally {
-    try { unlinkSync(tmpFile); } catch {}
-  }
-}
-
 /** Extract text from PDF using pdftotext -layout (better for form PDFs like CMS1500) */
 function extractPdfTextLayout(buffer: Buffer): string {
   const tmpFile = join(tmpdir(), `cms1500_${Date.now()}.pdf`);
@@ -294,12 +282,15 @@ export function registerClaimUploadRoute(app: Express) {
         }
 
         // Step 1: Try rule-based template recognition first (fast, accurate)
-        // For reimbursement PDFs, use pdftotext (plain mode) for better line structure
-        // pdfjs joins all items with spaces, losing the newline structure needed for regex
+        // For reimbursement PDFs, use pdftotext -layout so each service line's charge/
+        // allowed/co-ins/co-pay/deductible/non-cov columns stay aligned to its CPT code.
+        // Plain mode reads the underlying PDF's table column-by-column instead of
+        // row-by-row, which scatters all the dollar amounts into a block completely
+        // separate from the CPT codes/dates they belong to.
         let reimbursementText = extractedText;
         if (!isXlsx && !isCsv) {
           try {
-            reimbursementText = extractPdfTextPlain(buffer);
+            reimbursementText = extractPdfTextLayout(buffer);
           } catch {
             reimbursementText = extractedText;
           }
