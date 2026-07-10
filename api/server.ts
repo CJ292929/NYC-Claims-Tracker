@@ -14,6 +14,7 @@ import express from "express";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "../server/_core/oauth";
 import { registerStorageProxy } from "../server/_core/storageProxy";
+import { registerClaimUploadRoute } from "../server/claimUpload";
 import { appRouter } from "../server/routers";
 import { createContext } from "../server/_core/context";
 import { serveStatic } from "../server/_core/vite";
@@ -25,6 +26,7 @@ app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 registerStorageProxy(app);
 registerOAuthRoutes(app);
+registerClaimUploadRoute(app);
 
 app.use(
   "/api/trpc",
