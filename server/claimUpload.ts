@@ -232,7 +232,25 @@ export function registerClaimUploadRoute(app: Express) {
         } else if (isCsv) {
           extractedText = extractCsvText(buffer);
         } else {
-          extractedText = await extractPdfText(buffer);
+          // pdfjs-dist's text extraction can throw in serverless Node.js
+          // environments without a canvas backend (e.g. "DOMMatrix is not
+          // defined") for PDFs whose glyph rendering path touches canvas-only
+          // APIs. This initial pass is only used for the empty-file check and
+          // response metadata when uploadType is explicit (the normal case) —
+          // the actual reimbursement/CMS1500 extraction re-reads the PDF via
+          // pdftotext regardless — so fall back to that instead of failing
+          // the whole request.
+          try {
+            extractedText = await extractPdfText(buffer);
+          } catch (pdfjsError) {
+            console.error('[ClaimUpload] pdfjs-dist extraction failed, falling back to pdftotext:', pdfjsError);
+            try {
+              extractedText = extractPdfTextLayout(buffer);
+            } catch (pdftotextError) {
+              console.error('[ClaimUpload] pdftotext also failed:', pdftotextError);
+              extractedText = '';
+            }
+          }
         }
 
         if (!extractedText.trim()) {
