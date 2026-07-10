@@ -2,12 +2,15 @@
   "version": 2,
   "buildCommand": "pnpm install --frozen-lockfile && pnpm build",
   "installCommand": "pnpm install --frozen-lockfile",
+  "outputDirectory": "dist/public",
   "functions": {
     "api/server.js": {
       "maxDuration": 30
     }
   },
   "routes": [
-    { "src": "/(.*)", "dest": "/api/server" }
+    { "handle": "filesystem" },
+    { "src": "^/api/(.*)$", "dest": "/api/server" },
+    { "src": "^/(?!api/).*$", "dest": "/index.html" }
   ]
 }
