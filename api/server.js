@@ -2020,7 +2020,17 @@ function registerClaimUploadRoute(app2) {
         } else if (isCsv) {
           extractedText = extractCsvText(buffer);
         } else {
-          extractedText = await extractPdfText(buffer);
+          try {
+            extractedText = await extractPdfText(buffer);
+          } catch (pdfjsError) {
+            console.error("[ClaimUpload] pdfjs-dist extraction failed, falling back to pdftotext:", pdfjsError);
+            try {
+              extractedText = extractPdfTextLayout(buffer);
+            } catch (pdftotextError) {
+              console.error("[ClaimUpload] pdftotext also failed:", pdftotextError);
+              extractedText = "";
+            }
+          }
         }
         if (!extractedText.trim()) {
           res.status(422).json({ error: "Could not extract any text from the file. Please ensure it is a digital (not scanned) PDF, a valid CSV, or a valid Excel file." });
