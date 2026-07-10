@@ -695,7 +695,7 @@ var init_nameMatch = __esm({
   }
 });
 
-// api/server.ts
+// server/vercelEntry.ts
 import "dotenv/config";
 import express2 from "express";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
@@ -3026,7 +3026,7 @@ function serveStatic(app2) {
   });
 }
 
-// api/server.ts
+// server/vercelEntry.ts
 var app = express2();
 app.use(express2.json({ limit: "50mb" }));
 app.use(express2.urlencoded({ limit: "50mb", extended: true }));
@@ -3041,7 +3041,7 @@ app.use(
   })
 );
 serveStatic(app);
-var server_default = app;
+var vercelEntry_default = app;
 export {
-  server_default as default
+  vercelEntry_default as default
 };
