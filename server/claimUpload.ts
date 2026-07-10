@@ -16,6 +16,7 @@ import { writeFileSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { invokeLLM } from './_core/llm';
+import { ENV } from './_core/env';
 import { tryTemplateExtraction, parseCMS1500 } from './insuranceTemplates';
 import { extractClaimsWithOpenAI, detectInsuranceType } from './openaiExtractor';
 
@@ -156,6 +157,7 @@ ${trimmedText}
 Return JSON object with "claims" array:`;
 
   const response = await invokeLLM({
+    model: ENV.openaiModel,
     messages: [
       { role: 'system', content: 'You are a medical billing data extraction assistant. Always respond with valid JSON only.' },
       { role: 'user', content: prompt },
@@ -289,6 +291,44 @@ export function registerClaimUploadRoute(app: Express) {
           // CMS1500 parser: extract Date of Service, Place of Service, CPT, Modifier, Units, Diagnosis
           const patientGroups = parseCMS1500(cms1500Text);
           const flatClaims = patientGroups.flatMap(g => g.claims);
+
+          if (flatClaims.length > 0) {
+            res.json({
+              claims: flatClaims,
+              patientGroups: patientGroups.length > 0 ? patientGroups : null,
+              extractedLength: extractedText.length,
+              templateUsed: 'CMS1500',
+              uploadType: 'cms1500',
+            });
+            return;
+          }
+
+          // Fall back to AI extraction when the regex-based parser (which relies
+          // on pdftotext -layout output) finds nothing — e.g. pdftotext isn't
+          // installed in this environment (serverless platforms like Vercel
+          // don't ship it), so cms1500Text falls back to the plain pdfjs text.
+          try {
+            console.log('[ClaimUpload] CMS1500 regex parser found no claims, trying OpenAI extraction...');
+            const openaiResult = await extractClaimsWithOpenAI(cms1500Text || extractedText, 'cms1500');
+            if (openaiResult.claims.length > 0) {
+              const aiPatientGroups = openaiResult.patientName
+                ? [{ patientName: openaiResult.patientName, claims: openaiResult.claims }]
+                : null;
+              res.json({
+                claims: openaiResult.claims,
+                patientGroups: aiPatientGroups,
+                extractedLength: extractedText.length,
+                templateUsed: `OpenAI (CMS1500)`,
+                uploadType: 'cms1500',
+                confidence: openaiResult.confidence,
+                extractionNotes: openaiResult.extractionNotes,
+              });
+              return;
+            }
+          } catch (openaiError) {
+            console.error('[ClaimUpload] CMS1500 OpenAI extraction failed:', openaiError);
+          }
+
           res.json({
             claims: flatClaims,
             patientGroups: patientGroups.length > 0 ? patientGroups : null,

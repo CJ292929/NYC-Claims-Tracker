@@ -1,4 +1,5 @@
 import { invokeLLM } from "./_core/llm";
+import { ENV } from "./_core/env";
 import type { ExtractedClaim } from "./insuranceTemplates";
 
 export interface OpenAIClaimExtractionResult {
@@ -67,6 +68,7 @@ IMPORTANT:
 
   try {
     const response = await invokeLLM({
+      model: ENV.openaiModel,
       messages: [
         {
           role: "system",
@@ -210,6 +212,7 @@ export async function detectInsuranceType(pdfText: string): Promise<{
 }> {
   try {
     const response = await invokeLLM({
+      model: ENV.openaiModel,
       messages: [
         {
           role: "system",
