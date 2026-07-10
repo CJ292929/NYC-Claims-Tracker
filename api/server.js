@@ -49,7 +49,11 @@ var init_env = __esm({
       ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
       isProduction: process.env.NODE_ENV === "production",
       forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
-      forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? ""
+      forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
+      // Manus's own proxy (the default forgeApiUrl) tolerates an omitted model
+      // and picks one server-side; a real OpenAI-compatible endpoint requires
+      // one explicitly. Only needed when forgeApiUrl is overridden.
+      openaiModel: process.env.OPENAI_MODEL ?? "gpt-4o-mini"
     };
   }
 });
@@ -1300,6 +1304,9 @@ async function invokeLLM(params) {
   return await response.json();
 }
 
+// server/claimUpload.ts
+init_env();
+
 // server/insuranceTemplates.ts
 function parseDate(raw) {
   if (!raw) return null;
@@ -1632,6 +1639,7 @@ function tryTemplateExtraction(text, filename) {
 }
 
 // server/openaiExtractor.ts
+init_env();
 async function extractClaimsWithOpenAI(pdfText, uploadType) {
   const systemPrompt = uploadType === "reimbursement" ? `You are a medical claims data extraction specialist. Extract all Explanation of Benefits (EOB) claim information accurately from the provided document text.
 
@@ -1678,6 +1686,7 @@ ${pdfText}` : `Extract all CMS-1500 claims from this document. IMPORTANT: Make s
 ${pdfText}`;
   try {
     const response = await invokeLLM({
+      model: ENV.openaiModel,
       messages: [
         {
           role: "system",
@@ -1787,6 +1796,7 @@ ${pdfText}`;
 async function detectInsuranceType(pdfText) {
   try {
     const response = await invokeLLM({
+      model: ENV.openaiModel,
       messages: [
         {
           role: "system",
@@ -1961,6 +1971,7 @@ ${trimmedText}
 
 Return JSON object with "claims" array:`;
   const response = await invokeLLM({
+    model: ENV.openaiModel,
     messages: [
       { role: "system", content: "You are a medical billing data extraction assistant. Always respond with valid JSON only." },
       { role: "user", content: prompt }
@@ -2059,6 +2070,35 @@ function registerClaimUploadRoute(app2) {
           }
           const patientGroups = parseCMS1500(cms1500Text);
           const flatClaims = patientGroups.flatMap((g) => g.claims);
+          if (flatClaims.length > 0) {
+            res.json({
+              claims: flatClaims,
+              patientGroups: patientGroups.length > 0 ? patientGroups : null,
+              extractedLength: extractedText.length,
+              templateUsed: "CMS1500",
+              uploadType: "cms1500"
+            });
+            return;
+          }
+          try {
+            console.log("[ClaimUpload] CMS1500 regex parser found no claims, trying OpenAI extraction...");
+            const openaiResult = await extractClaimsWithOpenAI(cms1500Text || extractedText, "cms1500");
+            if (openaiResult.claims.length > 0) {
+              const aiPatientGroups = openaiResult.patientName ? [{ patientName: openaiResult.patientName, claims: openaiResult.claims }] : null;
+              res.json({
+                claims: openaiResult.claims,
+                patientGroups: aiPatientGroups,
+                extractedLength: extractedText.length,
+                templateUsed: `OpenAI (CMS1500)`,
+                uploadType: "cms1500",
+                confidence: openaiResult.confidence,
+                extractionNotes: openaiResult.extractionNotes
+              });
+              return;
+            }
+          } catch (openaiError) {
+            console.error("[ClaimUpload] CMS1500 OpenAI extraction failed:", openaiError);
+          }
           res.json({
             claims: flatClaims,
             patientGroups: patientGroups.length > 0 ? patientGroups : null,

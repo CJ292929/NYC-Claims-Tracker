@@ -7,4 +7,8 @@ export const ENV = {
   isProduction: process.env.NODE_ENV === "production",
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
+  // Manus's own proxy (the default forgeApiUrl) tolerates an omitted model
+  // and picks one server-side; a real OpenAI-compatible endpoint requires
+  // one explicitly. Only needed when forgeApiUrl is overridden.
+  openaiModel: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
 };
