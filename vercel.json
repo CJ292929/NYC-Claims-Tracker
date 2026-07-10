@@ -11,7 +11,7 @@
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "/api/server.js"
+      "destination": "/api/server"
     }
   ]
 }
