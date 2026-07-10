@@ -4,14 +4,14 @@
   "installCommand": "pnpm install --frozen-lockfile",
   "framework": null,
   "functions": {
-    "api/server.ts": {
+    "api/server.js": {
       "maxDuration": 30
     }
   },
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "/api/server"
+      "destination": "/api/server.js"
     }
   ]
 }
