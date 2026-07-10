@@ -3,10 +3,15 @@ import fs from "fs";
 import { type Server } from "http";
 import { nanoid } from "nanoid";
 import path from "path";
-import { createServer as createViteServer } from "vite";
-import viteConfig from "../../vite.config";
 
 export async function setupVite(app: Express, server: Server) {
+  // Dynamically imported so dev-only vite/rollup machinery never gets pulled
+  // into the production serverless bundle (api/server.js) — a top-level
+  // import here is eagerly evaluated on module load even though only
+  // setupVite (dev mode) needs it, not serveStatic (used in production).
+  const [{ createServer: createViteServer }, { default: viteConfig }] =
+    await Promise.all([import("vite"), import("../../vite.config")]);
+
   const serverOptions = {
     middlewareMode: true,
     hmr: { server },
