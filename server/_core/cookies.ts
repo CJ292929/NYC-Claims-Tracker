@@ -39,10 +39,15 @@ export function getSessionCookieOptions(
   //       ? hostname
   //       : undefined;
 
+  const secure = isSecureRequest(req);
+
   return {
     httpOnly: true,
     path: "/",
-    sameSite: "none",
-    secure: isSecureRequest(req),
+    // SameSite=None is only valid alongside Secure — browsers silently drop
+    // the cookie otherwise (e.g. on local http://localhost dev), which
+    // looked like a successful login that never actually persisted a session.
+    sameSite: secure ? "none" : "lax",
+    secure,
   };
 }
