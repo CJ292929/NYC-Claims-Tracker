@@ -2,7 +2,7 @@ import { invokeLLM } from "./_core/llm";
 import { ENV } from "./_core/env";
 import type { ExtractedClaim } from "./insuranceTemplates";
 
-export interface OpenAIClaimExtractionResult {
+export interface AIClaimExtractionResult {
   claims: ExtractedClaim[];
   confidence: number; // 0-1 score indicating extraction confidence
   detectedInsurer?: string;
@@ -16,14 +16,50 @@ export type ExtractionSource =
   | { kind: "pdf"; buffer: Buffer; filename: string };
 
 /**
- * Extract claims from PDF text using OpenAI's structured JSON capabilities
- * Handles both Reimbursement (EOB) and CMS1500 upload types
+ * Best-effort recovery for LLM responses that don't come back as clean JSON —
+ * e.g. wrapped in a markdown code fence despite instructions not to, or with
+ * leading/trailing prose. Returns null (never throws) when nothing usable is
+ * found so callers can fall back to the next extraction stage.
+ */
+function recoverJson(raw: string): any | null {
+  const attempts = [
+    raw,
+    raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, ""),
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      return JSON.parse(attempt.trim());
+    } catch {
+      // try next
+    }
+  }
+
+  const objectMatch = raw.match(/\{[\s\S]*\}/);
+  if (objectMatch) {
+    try {
+      return JSON.parse(objectMatch[0]);
+    } catch {
+      // fall through
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Extract claims from PDF text using the configured AI provider's structured
+ * JSON capabilities (see server/_core/llm.ts — Anthropic Claude by default,
+ * swappable via AI_PROVIDER). Handles both Reimbursement (EOB) and CMS1500
+ * upload types.
  * CRITICAL: Ensures patient name is extracted for each claim
  */
-export async function extractClaimsWithOpenAI(
+export async function extractClaimsWithAI(
   source: ExtractionSource,
   uploadType: "reimbursement" | "cms1500"
-): Promise<OpenAIClaimExtractionResult> {
+): Promise<AIClaimExtractionResult> {
+  console.log(`[AIExtractor] Starting ${uploadType} extraction (source: ${source.kind}, provider: ${ENV.aiProvider})`);
+
   const systemPrompt =
     uploadType === "reimbursement"
       ? `You are a medical claims data extraction specialist. Extract all Explanation of Benefits (EOB) claim information accurately from the provided document text.
@@ -74,7 +110,7 @@ IMPORTANT:
   // Two ways to hand the document to the model:
   //  - text: pre-extracted text (from pdftotext/pdfjs) — cheaper, works when
   //    local extraction succeeded.
-  //  - pdf: the raw PDF bytes, read natively by the model's own vision/file
+  //  - pdf: the raw PDF bytes, read natively by the model's own vision/document
   //    understanding — used when no local extraction method is available
   //    (e.g. serverless environments without pdftotext or a canvas backend).
   const userContent =
@@ -93,7 +129,7 @@ IMPORTANT:
 
   try {
     const response = await invokeLLM({
-      model: ENV.openaiModel,
+      model: ENV.aiModel,
       messages: [
         {
           role: "system",
@@ -149,15 +185,21 @@ IMPORTANT:
       },
     });
 
-    const content = response.choices[0].message.content;
+    const content = response.choices[0]?.message?.content;
     if (!content || typeof content !== "string") {
-      throw new Error("No response from OpenAI");
+      throw new Error("No response from AI provider");
     }
 
-    const parsed = JSON.parse(content);
+    const parsed = recoverJson(content);
+    if (!parsed) {
+      console.error("[AIExtractor] Could not parse AI response as JSON:", content.slice(0, 500));
+      throw new Error("AI provider returned malformed JSON that could not be recovered");
+    }
+
+    const claimsArray: any[] = Array.isArray(parsed.claims) ? parsed.claims : [];
 
     // Normalize the response to match ExtractedClaim format
-    const normalizedClaims: ExtractedClaim[] = (parsed.claims || []).map(
+    const normalizedClaims: ExtractedClaim[] = claimsArray.map(
       (claim: any) => ({
         dateOfService: claim.dateOfService || null,
         cptCodes: claim.cptCodes || null,
@@ -204,12 +246,14 @@ IMPORTANT:
 
     // Extract top-level patient name if all claims are for the same patient
     const uniquePatientNames = new Set(
-      parsed.claims.map((c: any) => c.patientName?.toUpperCase().trim())
+      claimsArray.map((c: any) => c.patientName?.toUpperCase().trim())
     );
     const patientName =
       uniquePatientNames.size === 1
         ? Array.from(uniquePatientNames)[0]
         : undefined;
+
+    console.log(`[AIExtractor] Extracted ${normalizedClaims.length} claim(s), confidence ${parsed.confidence ?? "n/a"}`);
 
     return {
       claims: normalizedClaims,
@@ -219,16 +263,16 @@ IMPORTANT:
       patientName: patientName as string | undefined,
     };
   } catch (error) {
-    console.error("[OpenAI Extraction Error]", error);
+    console.error("[AIExtractor] Extraction error:", error);
     throw new Error(
-      `Failed to extract claims with OpenAI: ${error instanceof Error ? error.message : String(error)}`
+      `Failed to extract claims with AI (${ENV.aiProvider}): ${error instanceof Error ? error.message : String(error)}`
     );
   }
 }
 
 /**
- * Detect if a document is likely a specific insurance format
- * Uses OpenAI to identify the insurer and document type
+ * Detect if a document is likely a specific insurance format. Uses the
+ * configured AI provider to identify the insurer and document type.
  */
 export async function detectInsuranceType(pdfText: string): Promise<{
   insurer: string;
@@ -237,7 +281,7 @@ export async function detectInsuranceType(pdfText: string): Promise<{
 }> {
   try {
     const response = await invokeLLM({
-      model: ENV.openaiModel,
+      model: ENV.aiModel,
       messages: [
         {
           role: "system",
@@ -276,14 +320,18 @@ Return ONLY valid JSON, no markdown.`,
       },
     });
 
-    const content = response.choices[0].message.content;
+    const content = response.choices[0]?.message?.content;
     if (!content || typeof content !== "string") {
-      throw new Error("No response from OpenAI");
+      throw new Error("No response from AI provider");
     }
 
-    return JSON.parse(content);
+    const parsed = recoverJson(content);
+    if (!parsed) {
+      throw new Error("AI provider returned malformed JSON for insurance detection");
+    }
+    return parsed;
   } catch (error) {
-    console.error("[Insurance Detection Error]", error);
+    console.error("[AIExtractor] Insurance detection error:", error);
     return {
       insurer: "Unknown",
       documentType: "other",
