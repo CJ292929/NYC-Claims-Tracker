@@ -233,8 +233,8 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     return (
       <div className="mb-6">
         <div className="flex items-center gap-2 mb-3">
-          <BellRing className="w-5 h-5 text-[#D9A312]" />
-          <h2 className="text-lg font-bold text-[#104163]">Authorization Alerts</h2>
+          <BellRing className="w-5 h-5 text-[#E8A93C]" />
+          <h2 className="text-lg font-bold text-[#1E3A5F]">Authorization Alerts</h2>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {[1, 2].map(i => (
@@ -261,8 +261,8 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     <>
     <div className="mb-6">
       <div className="flex items-center gap-2 mb-3">
-        <BellRing className="w-5 h-5 text-[#D9A312] animate-bounce" />
-        <h2 className="text-lg font-bold text-[#104163]">Authorization Alerts</h2>
+        <BellRing className="w-5 h-5 text-[#E8A93C] animate-bounce" />
+        <h2 className="text-lg font-bold text-[#1E3A5F]">Authorization Alerts</h2>
         <span className="ml-1 inline-flex items-center justify-center w-6 h-6 rounded-full bg-red-600 text-white text-xs font-bold">
           {urgent.length}
         </span>
@@ -287,8 +287,8 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
                 <div className="flex items-start gap-3">
                   <span className={`mt-0.5 shrink-0 ${cfg.iconClass}`}>{cfg.icon}</span>
                   <div className="min-w-0">
-                    <p className="font-bold text-[#104163] truncate">{alert.patientName}</p>
-                    <p className="text-xs text-[#4A4A4A] truncate">{alert.insurance}</p>
+                    <p className="font-bold text-[#1E3A5F] truncate">{alert.patientName}</p>
+                    <p className="text-xs text-[#6B7280] truncate">{alert.insurance}</p>
                     <div className="flex flex-wrap gap-1 mt-2">
                       <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${cfg.badgeClass}`}>
                         {alert.authExpiryWarning ? 'Auth Expiring Soon' : cfg.label}
@@ -299,11 +299,11 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-[#4A4A4A] mt-1">
+                    <p className="text-xs text-[#6B7280] mt-1">
                       {alert.authExpiryWarning ? 'Request new authorization before expiry date' : cfg.sublabel}
                     </p>
                     {alert.dateAshSubmitted && (
-                      <p className="text-xs text-[#4A4A4A] mt-0.5">
+                      <p className="text-xs text-[#6B7280] mt-0.5">
                         Last submitted: {new Date(alert.dateAshSubmitted).toLocaleDateString()}
                       </p>
                     )}
@@ -339,7 +339,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
                       e.stopPropagation();
                       markAsRequested.mutate({ patientId: alert.patientId });
                     }}
-                    className="flex-1 mt-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#104163] text-white hover:bg-[#0d3452] disabled:opacity-60 disabled:cursor-not-allowed transition-all active:scale-[0.97]"
+                    className="flex-1 mt-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#1E3A5F] text-white hover:bg-[#152A47] disabled:opacity-60 disabled:cursor-not-allowed transition-all active:scale-[0.97]"
                   >
                     {isRequesting ? (
                       <><Loader2 className="w-3 h-3 animate-spin" /> Saving…</>
@@ -388,7 +388,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     <Dialog open={!!approveDialogPatient} onOpenChange={(open) => { if (!open) { setApproveDialogPatient(null); setNewAuthValidUntil(''); } }}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="text-[#104163] flex items-center gap-2">
+          <DialogTitle className="text-[#1E3A5F] flex items-center gap-2">
             <ShieldCheck className="w-5 h-5 text-green-600" />
             New Authorization Approved
           </DialogTitle>
@@ -399,7 +399,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
         </DialogHeader>
         <div className="space-y-4 py-2">
           <div className="space-y-1.5">
-            <Label htmlFor="new-sessions" className="text-[#104163] font-semibold">
+            <Label htmlFor="new-sessions" className="text-[#1E3A5F] font-semibold">
               Sessions Authorized <span className="text-red-500">*</span>
             </Label>
             <Input
@@ -410,11 +410,11 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               placeholder="e.g. 20"
               value={newSessions}
               onChange={(e) => setNewSessions(e.target.value)}
-              className="border-[#104163]/30 focus:border-[#104163]"
+              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-auth-date" className="text-[#104163] font-semibold">
+            <Label htmlFor="new-auth-date" className="text-[#1E3A5F] font-semibold">
               Authorization Date
             </Label>
             <Input
@@ -422,18 +422,18 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               type="date"
               value={newAuthDate}
               onChange={(e) => setNewAuthDate(e.target.value)}
-              className="border-[#104163]/30 focus:border-[#104163]"
+              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-insurance" className="text-[#104163] font-semibold">
+            <Label htmlFor="new-insurance" className="text-[#1E3A5F] font-semibold">
               Insurance Company
             </Label>
             <Select
               value={newInsurance}
               onValueChange={setNewInsurance}
             >
-              <SelectTrigger id="new-insurance" className="border-[#104163]/30 focus:border-[#104163]">
+              <SelectTrigger id="new-insurance" className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]">
                 <SelectValue placeholder="Select insurance company" />
               </SelectTrigger>
               <SelectContent>
@@ -449,7 +449,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-auth-valid-until" className="text-[#104163] font-semibold">
+            <Label htmlFor="new-auth-valid-until" className="text-[#1E3A5F] font-semibold">
               Authorization Valid Until <span className="text-gray-400 font-normal">(optional)</span>
             </Label>
             <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
@@ -458,7 +458,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               type="date"
               value={newAuthValidUntil}
               onChange={(e) => setNewAuthValidUntil(e.target.value)}
-              className="border-[#104163]/30 focus:border-[#104163]"
+              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
             />
           </div>
           <div className="rounded-lg bg-blue-50 border border-blue-200 p-3 text-sm text-blue-800">
@@ -526,7 +526,7 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
       <div className="bg-white rounded-xl border border-orange-200 p-4">
         <div className="flex items-center gap-2 mb-3">
           <AlertCircle className="w-5 h-5 text-orange-500" />
-          <h2 className="text-lg font-bold text-[#104163]">Claims Follow-Up Needed</h2>
+          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up Needed</h2>
         </div>
         <div className="text-sm text-gray-500">Loading unpaid claims…</div>
       </div>
@@ -538,7 +538,7 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
       <div className="bg-white rounded-xl border border-green-200 p-4">
         <div className="flex items-center gap-2 mb-2">
           <CheckCircle2 className="w-5 h-5 text-green-500" />
-          <h2 className="text-lg font-bold text-[#104163]">Claims Follow-Up</h2>
+          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up</h2>
         </div>
         <p className="text-sm text-green-700">All billed claims have received insurance reimbursement. No follow-up needed.</p>
       </div>
@@ -550,7 +550,7 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <AlertCircle className="w-5 h-5 text-orange-500 animate-pulse" />
-          <h2 className="text-lg font-bold text-[#104163]">Claims Follow-Up Needed</h2>
+          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up Needed</h2>
           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 text-orange-800">
             {unpaidClaims.length} claim{unpaidClaims.length !== 1 ? 's' : ''}
           </span>
@@ -1062,8 +1062,8 @@ export default function Dashboard() {
   );
 
   const clinicStatusData = [
-    { name: 'Completed', value: clinicMetrics.totalCompleted, color: '#D9A312' },
-    { name: 'Remaining', value: clinicMetrics.totalRemaining, color: '#104163' },
+    { name: 'Completed', value: clinicMetrics.totalCompleted, color: '#E8A93C' },
+    { name: 'Remaining', value: clinicMetrics.totalRemaining, color: '#1E3A5F' },
   ];
 
   // ── Handlers ───────────────────────────────────────────────────────────────
@@ -1587,9 +1587,9 @@ export default function Dashboard() {
 
   if (patientsLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-[#F8F6F1] to-white flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4 text-[#104163]">
-          <Loader2 className="w-10 h-10 animate-spin text-[#D9A312]" />
+      <div className="min-h-screen bg-gradient-to-b from-[#FAF5EE] to-white flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4 text-[#1E3A5F]">
+          <Loader2 className="w-10 h-10 animate-spin text-[#E8A93C]" />
           <p className="text-lg font-semibold">Loading patient data…</p>
         </div>
       </div>
@@ -1600,13 +1600,13 @@ export default function Dashboard() {
 
   if (showDetailView && activePatient) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-[#F8F6F1] to-white">
+      <div className="min-h-screen bg-gradient-to-b from-[#FAF5EE] to-white">
         {/* Header */}
-        <div className="bg-[#104163] text-white py-6">
+        <div className="bg-[#1E3A5F] text-white py-6">
           <div className="container">
             <button
               onClick={() => setShowDetailView(false)}
-              className="flex items-center gap-2 text-[#D9A312] hover:text-white mb-4 transition-colors"
+              className="flex items-center gap-2 text-[#E8A93C] hover:text-white mb-4 transition-colors"
             >
               <ChevronLeft className="w-5 h-5" />
               Back to Dashboard
@@ -1614,7 +1614,7 @@ export default function Dashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="text-4xl font-bold">{activePatient.name}</h1>
-                <p className="text-[#D9A312] mt-2">Detailed Visit Records — {activePatient.insurance}</p>
+                <p className="text-[#E8A93C] mt-2">Detailed Visit Records — {activePatient.insurance}</p>
               </div>
               <div className="flex items-center gap-4">
                 {/* Active / Inactive toggle */}
@@ -1639,7 +1639,7 @@ export default function Dashboard() {
                 </div>
                 <button
                   onClick={() => refetchVisits()}
-                  className="flex items-center gap-2 text-[#D9A312] hover:text-white transition-colors text-sm"
+                  className="flex items-center gap-2 text-[#E8A93C] hover:text-white transition-colors text-sm"
                 >
                   <RefreshCw className="w-4 h-4" />
                   Refresh
@@ -1691,13 +1691,13 @@ export default function Dashboard() {
           {/* Summary cards */}
           <div className="grid grid-cols-3 gap-4 mb-8">
             {[
-              { label: 'Authorized', value: activeMetrics.totalAuthorized, color: 'text-[#104163]' },
-              { label: 'Completed', value: activeMetrics.completed, color: 'text-[#D9A312]' },
-              { label: 'Remaining', value: activeMetrics.remaining, color: 'text-[#104163]' },
+              { label: 'Authorized', value: activeMetrics.totalAuthorized, color: 'text-[#1E3A5F]' },
+              { label: 'Completed', value: activeMetrics.completed, color: 'text-[#E8A93C]' },
+              { label: 'Remaining', value: activeMetrics.remaining, color: 'text-[#1E3A5F]' },
             ].map(({ label, value, color }) => (
-              <Card key={label} className="border-[#E8E6E1] shadow-md">
+              <Card key={label} className="border-[#F0E9DC] shadow-md">
                 <CardContent className="pt-6">
-                  <p className="text-xs text-[#4A4A4A] font-medium">{label}</p>
+                  <p className="text-xs text-[#6B7280] font-medium">{label}</p>
                   <p className={`text-3xl font-bold mt-1 ${color}`}>{value}</p>
                 </CardContent>
               </Card>
@@ -1706,13 +1706,13 @@ export default function Dashboard() {
 
           {/* Visit Records — one Card per auth period */}
           {visitsLoading ? (
-            <div className="flex items-center justify-center py-12 text-[#104163]">
-              <Loader2 className="w-6 h-6 animate-spin mr-2 text-[#D9A312]" />
+            <div className="flex items-center justify-center py-12 text-[#1E3A5F]">
+              <Loader2 className="w-6 h-6 animate-spin mr-2 text-[#E8A93C]" />
               Loading visits…
             </div>
           ) : visits.length === 0 ? (
-            <Card className="border-[#E8E6E1] shadow-md">
-              <CardContent className="py-12 text-center text-[#4A4A4A]">No visit records yet. Log a session to get started.</CardContent>
+            <Card className="border-[#F0E9DC] shadow-md">
+              <CardContent className="py-12 text-center text-[#6B7280]">No visit records yet. Log a session to get started.</CardContent>
             </Card>
           ) : (
             <>
@@ -1729,16 +1729,16 @@ export default function Dashboard() {
                   return (
                     <div key={`period-${period}`}>
                     <Card className={`border-2 shadow-md mb-6 ${
-                      isActive ? 'border-[#D9A312]' : 'border-gray-200'
+                      isActive ? 'border-[#E8A93C]' : 'border-gray-200'
                     }`}>
                       <CardHeader className={`rounded-t-lg flex flex-row items-center justify-between ${
-                        isActive ? 'bg-[#104163] text-white' : 'bg-gray-100 text-gray-600'
+                        isActive ? 'bg-[#1E3A5F] text-white' : 'bg-gray-100 text-gray-600'
                       }`}>
                         <div>
                           <CardTitle className={`text-xl ${ isActive ? 'text-white' : 'text-gray-700'}`}>
                             Authorization Period {period} — {periodAuth} Sessions
                           </CardTitle>
-                          <CardDescription className={isActive ? 'text-[#D9A312]' : 'text-gray-500'}>
+                          <CardDescription className={isActive ? 'text-[#E8A93C]' : 'text-gray-500'}>
                             {periodInsurance && (
                               <span className="font-medium">{periodInsurance} · </span>
                             )}
@@ -1751,27 +1751,27 @@ export default function Dashboard() {
                         {isActive && (
                           <Dialog open={showLogSessionDialog} onOpenChange={setShowLogSessionDialog}>
                             <DialogTrigger asChild>
-                              <Button className="bg-[#D9A312] hover:bg-[#C89209] text-[#104163] font-semibold flex items-center gap-2">
+                              <Button className="bg-[#E8A93C] hover:bg-[#C88A20] text-[#1E3A5F] font-semibold flex items-center gap-2">
                                 <Plus className="w-4 h-4" />
                                 Log Session
                               </Button>
                             </DialogTrigger>
                             <DialogContent className="bg-white">
                               <DialogHeader>
-                                <DialogTitle className="text-[#104163]">Log New Session</DialogTitle>
+                                <DialogTitle className="text-[#1E3A5F]">Log New Session</DialogTitle>
                                 <DialogDescription>Record a therapy session for {activePatient.name}</DialogDescription>
                               </DialogHeader>
                               <div className="space-y-4">
                                 <div>
-                                  <Label className="text-[#104163] font-semibold">Date of Service</Label>
+                                  <Label className="text-[#1E3A5F] font-semibold">Date of Service</Label>
                                   <Input
                                     type="date"
                                     value={sessionDate}
                                     onChange={e => setSessionDate(e.target.value)}
-                                    className="border-[#E8E6E1] mt-2"
+                                    className="border-[#F0E9DC] mt-2"
                                   />
                                 </div>
-                                <div className="bg-[#F8F6F1] rounded-lg p-4 text-sm text-[#104163]">
+                                <div className="bg-[#FAF5EE] rounded-lg p-4 text-sm text-[#1E3A5F]">
                                   <p><strong>Sessions remaining:</strong> {activeMetrics.remaining}</p>
                                   <p><strong>After this session:</strong> {Math.max(0, activeMetrics.remaining - 1)}</p>
                                 </div>
@@ -1779,7 +1779,7 @@ export default function Dashboard() {
                                   <Button
                                     onClick={handleLogSession}
                                     disabled={createVisit.isPending}
-                                    className="flex-1 bg-[#104163] hover:bg-[#0D3A52] text-white font-semibold"
+                                    className="flex-1 bg-[#1E3A5F] hover:bg-[#152A47] text-white font-semibold"
                                   >
                                     {createVisit.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <CheckCircle2 className="w-4 h-4 mr-2" />}
                                     Confirm Session
@@ -1797,7 +1797,7 @@ export default function Dashboard() {
                         <div className="overflow-x-auto">
                           <table className="w-full text-sm">
                             <thead>
-                              <tr className="bg-[#104163] text-white">
+                              <tr className="bg-[#1E3A5F] text-white">
                                 <th className="text-left py-3 px-4 font-semibold">Auth Date</th>
                                 <th className="text-left py-3 px-4 font-semibold"># Authorized</th>
                                 <th className="text-left py-3 px-4 font-semibold"># Remaining</th>
@@ -1805,32 +1805,32 @@ export default function Dashboard() {
                                 <th className="text-left py-3 px-4 font-semibold">Date of Service</th>
                                 <th className="text-left py-3 px-4 font-semibold">
                                   Date ASH Submitted
-                                  <span className="ml-1 text-[#D9A312] text-xs font-normal">(editable)</span>
+                                  <span className="ml-1 text-[#E8A93C] text-xs font-normal">(editable)</span>
                                 </th>
                                 <th className="text-left py-3 px-4 font-semibold">Auth Status</th>
                               </tr>
                             </thead>
                             <tbody>
                       {periodVisits.map((visit) => (
-                        <tr key={visit.id} className="border-b border-[#E8E6E1] hover:bg-[#F8F6F1] transition-colors">
+                        <tr key={visit.id} className="border-b border-[#F0E9DC] hover:bg-[#FAF5EE] transition-colors">
                           {/* Auth Date */}
-                          <td className="py-3 px-4 text-[#104163]">
+                          <td className="py-3 px-4 text-[#1E3A5F]">
                             {formatDate(visit.dateOfService)}
                           </td>
                           {/* # Authorized */}
-                          <td className="py-3 px-4 text-[#104163] font-semibold">
+                          <td className="py-3 px-4 text-[#1E3A5F] font-semibold">
                             {visit.sessionsAuthorized ?? '—'}
                           </td>
                           {/* # Remaining */}
                           <td className="py-3 px-4">
                             {visit.sessionsRemaining != null ? (
-                              <span className="font-semibold text-[#D9A312]">{visit.sessionsRemaining}</span>
+                              <span className="font-semibold text-[#E8A93C]">{visit.sessionsRemaining}</span>
                             ) : '—'}
                           </td>
                           {/* Session # */}
-                          <td className="py-3 px-4 text-[#104163] font-medium">{visit.sessionNumber ?? '—'}</td>
+                          <td className="py-3 px-4 text-[#1E3A5F] font-medium">{visit.sessionNumber ?? '—'}</td>
                           {/* Date of Service */}
-                          <td className="py-3 px-4 text-[#4A4A4A]">{formatDate(visit.dateOfService)}</td>
+                          <td className="py-3 px-4 text-[#6B7280]">{formatDate(visit.dateOfService)}</td>
                           {/* Date ASH Submitted — EDITABLE */}
                           <td className="py-3 px-4">
                             {editingAshId === visit.id ? (
@@ -1839,7 +1839,7 @@ export default function Dashboard() {
                                   type="date"
                                   value={editingAshValue}
                                   onChange={e => setEditingAshValue(e.target.value)}
-                                  className="border border-[#D9A312] rounded px-2 py-1 text-sm text-[#104163] focus:outline-none focus:ring-2 focus:ring-[#D9A312]"
+                                  className="border border-[#E8A93C] rounded px-2 py-1 text-sm text-[#1E3A5F] focus:outline-none focus:ring-2 focus:ring-[#E8A93C]"
                                   autoFocus
                                 />
                                 <button
@@ -1859,11 +1859,11 @@ export default function Dashboard() {
                             ) : (
                               <button
                                 onClick={() => handleStartEditAsh(visit)}
-                                className="flex items-center gap-1.5 group text-[#4A4A4A] hover:text-[#104163] transition-colors"
+                                className="flex items-center gap-1.5 group text-[#6B7280] hover:text-[#1E3A5F] transition-colors"
                                 title="Click to edit Date ASH Submitted"
                               >
-                                <Calendar className="w-3.5 h-3.5 text-[#D9A312] group-hover:text-[#104163] transition-colors shrink-0" />
-                                <span className={visit.dateAshSubmitted ? 'text-[#104163]' : 'text-gray-400 italic'}>
+                                <Calendar className="w-3.5 h-3.5 text-[#E8A93C] group-hover:text-[#1E3A5F] transition-colors shrink-0" />
+                                <span className={visit.dateAshSubmitted ? 'text-[#1E3A5F]' : 'text-gray-400 italic'}>
                                   {visit.dateAshSubmitted ? formatDate(visit.dateAshSubmitted) : 'Click to set date'}
                                 </span>
                               </button>
@@ -1896,26 +1896,26 @@ export default function Dashboard() {
                     </Card>
 
                     {/* Claims Tracking Card — Below Authorization Period */}
-                    <Card key={`claims-${period}`} className="border-2 border-red-400 shadow-md mb-6 ml-0">
-                      <CardHeader className="bg-red-50 rounded-t-lg">
+                    <Card key={`claims-${period}`} className="border border-border border-t-4 border-t-brand-gold shadow-brand rounded-xl mb-6 ml-0">
+                      <CardHeader className="bg-white rounded-t-xl">
                         <div className="flex flex-row items-center justify-between">
                           <div>
-                            <CardTitle className="text-lg text-red-700">
+                            <CardTitle className="text-xl font-serif text-brand-blue">
                               Claims Tracker — Period {period}
                             </CardTitle>
-                            <CardDescription className="text-red-600">
+                            <CardDescription className="text-muted-foreground">
                               Comprehensive claim details and payment tracking
                             </CardDescription>
                           </div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-3">
                             {/* Column visibility toggle */}
                             <Popover>
                               <PopoverTrigger asChild>
-                                <Button variant="outline" size="sm" className="border-red-300 text-red-700 hover:bg-red-100 flex items-center gap-1.5">
+                                <Button variant="outline" size="sm" className="border-2 border-brand-blue text-brand-blue hover:bg-brand-blue hover:text-white rounded-lg flex items-center gap-2">
                                   <Columns3 className="w-4 h-4" />
                                   Columns
                                   {hiddenClaimsColumns.size > 0 && (
-                                    <span className="ml-1 bg-red-600 text-white text-[10px] rounded-full w-4 h-4 flex items-center justify-center font-bold">
+                                    <span className="ml-1 bg-brand-gold text-brand-blue text-[10px] rounded-full w-4 h-4 flex items-center justify-center font-bold">
                                       {hiddenClaimsColumns.size}
                                     </span>
                                   )}
@@ -1930,7 +1930,7 @@ export default function Dashboard() {
                                         setHiddenClaimsColumns(new Set());
                                         localStorage.removeItem('claims-hidden-columns');
                                       }}
-                                      className="text-xs text-red-600 hover:underline"
+                                      className="text-xs text-brand-blue hover:underline"
                                     >
                                       Show all
                                     </button>
@@ -1976,7 +1976,7 @@ export default function Dashboard() {
                             {/* Reimbursement Insurance Upload button */}
                             <label
                               htmlFor={`claim-upload-reimb-${period}`}
-                              className="cursor-pointer inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-semibold bg-white border border-red-300 text-red-700 hover:bg-red-50 transition-colors"
+                              className="cursor-pointer inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-white border-2 border-brand-gold text-brand-blue hover:bg-brand-gold transition-colors"
                               title="Upload Reimbursement Insurance EOB (PDF/CSV) to auto-fill insurance reimbursement, CPT codes, charge amounts"
                             >
                               {isExtractingClaims && claimUploadPeriod === period && claimUploadType === 'reimbursement'
@@ -2003,7 +2003,7 @@ export default function Dashboard() {
                             {/* CMS1500 Upload button */}
                             <label
                               htmlFor={`claim-upload-cms-${period}`}
-                              className="cursor-pointer inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-semibold bg-white border border-blue-300 text-blue-700 hover:bg-blue-50 transition-colors"
+                              className="cursor-pointer inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-white border-2 border-brand-gold text-brand-blue hover:bg-brand-gold transition-colors"
                               title="Upload CMS1500 claim form (PDF) to auto-fill dates, place of service, CPT codes, modifiers, diagnosis codes, units"
                             >
                               {isExtractingClaims && claimUploadPeriod === period && claimUploadType === 'cms1500'
@@ -2030,7 +2030,7 @@ export default function Dashboard() {
                                 setAddClaimPeriod(period);
                                 setShowAddClaimDialog(true);
                               }}
-                              className="bg-red-600 hover:bg-red-700 text-white font-semibold flex items-center gap-2"
+                              className="bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold shadow-md rounded-lg flex items-center gap-2"
                             >
                               <Plus className="w-4 h-4" />
                               Add Claim
@@ -2044,7 +2044,7 @@ export default function Dashboard() {
                           
                           if (!claims || claims.length === 0) {
                             return (
-                              <div className="p-4 text-center text-sm text-gray-500 bg-gray-50">
+                              <div className="p-6 text-center text-sm text-muted-foreground bg-brand-cream/40">
                                 No claim records yet. Click "Add Claim" to create the first record.
                               </div>
                             );
@@ -2054,9 +2054,9 @@ export default function Dashboard() {
                             <div className="overflow-x-auto">
                               <table className="w-full text-xs border-collapse">
                                 <thead>
-                                  <tr className="bg-red-100 border-b border-red-300">
+                                  <tr className="bg-brand-cream border-b border-brand-cream-dark">
                                     {[{key:'placeOfService',label:'Place of Service',align:'left'},{key:'dateOfService',label:'Date of Service',align:'left'},{key:'visitNumber',label:'Visit #',align:'left'},{key:'cptCodes',label:'CPT Codes',align:'left'},{key:'unitsBilled',label:'Units',align:'center'},{key:'diagnosisCodes',label:'Diagnosis',align:'left'},{key:'modifier',label:'Modifier',align:'left'},{key:'chargeAmount',label:'Charge',align:'right'},{key:'insuranceReimbursement',label:'Ins. Reimb.',align:'right'},{key:'patientAmountPaid',label:'Pt. Paid',align:'right'},{key:'patientAmountDue',label:'Pt. Due',align:'right'},{key:'insuranceBilled',label:'Ins. Billed',align:'left'},{key:'claimSubmittedDate',label:'Date Submitted',align:'left'},{key:'expireBcbsClaimNumber',label:'Claim #',align:'left'},{key:'claimStatus',label:'Status',align:'center'},{key:'lmn',label:'LMN Documents Date Sent',align:'left'},{key:'checkDate',label:'Check/Payment Date',align:'left'},{key:'checkNumberVirtualCard',label:'Check/EFT #',align:'left'},{key:'dateOfAppeal',label:'Appeal Date',align:'left'},{key:'referenceNo',label:'Appeal Ref #',align:'left'}].filter(c => !hiddenClaimsColumns.has(c.key)).map(c => (
-                                      <th key={c.key} className={`border border-red-200 px-2 py-2 text-${c.align} font-semibold text-red-800 whitespace-nowrap`}>{c.label}</th>
+                                      <th key={c.key} className={`border border-brand-cream-dark px-2 py-2 text-${c.align} font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap`}>{c.label}</th>
                                     ))}
                                   </tr>
                                 </thead>
@@ -2163,7 +2163,7 @@ export default function Dashboard() {
 
                                     const hide = (key: string) => hiddenClaimsColumns.has(key);
                                     return (
-                                      <tr key={claim.id} className="hover:bg-red-50 border-b border-gray-200 text-xs">
+                                      <tr key={claim.id} className="hover:bg-brand-cream/50 border-b border-gray-200 text-xs">
                                         {!hide('placeOfService') && <EditableText field="placeOfService" value={claim.place_of_service} />}
                                         {!hide('dateOfService') && (
                                           isSameDateAsPrev ? (
@@ -2394,7 +2394,7 @@ export default function Dashboard() {
                   referenceNo: claimFormData.referenceNo || null,
                 });
               }}
-              className="bg-red-600 hover:bg-red-700 text-white"
+              className="bg-brand-blue hover:bg-brand-blue-dark text-white"
             >
               {isSavingClaim ? 'Saving...' : 'Save Claim Record'}
             </Button>
@@ -2415,10 +2415,10 @@ export default function Dashboard() {
           }
         }}
       >
-        <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto rounded-2xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Upload className={`w-5 h-5 ${claimUploadType === 'cms1500' ? 'text-blue-600' : 'text-red-600'}`} />
+            <DialogTitle className="flex items-center gap-2 font-serif text-brand-blue">
+              <Upload className="w-5 h-5 text-brand-gold" />
               {eobPatientGroups
                 ? 'Bulk EOB Import — Multiple Patients'
                 : claimUploadType === 'cms1500'
@@ -2454,7 +2454,7 @@ export default function Dashboard() {
 
           {isExtractingClaims ? (
             <div className="flex flex-col items-center justify-center py-16 gap-4 text-gray-500">
-              <Loader2 className="w-10 h-10 animate-spin text-red-600" />
+              <Loader2 className="w-10 h-10 animate-spin text-brand-gold" />
               <p className="text-sm font-medium">Reading file and extracting claim data…</p>
               <p className="text-xs text-gray-400">Checking for known insurance templates, then using AI if needed.</p>
             </div>
@@ -2509,7 +2509,7 @@ export default function Dashboard() {
                         setEobPatientGroups(null);
                         setBulkImportResults(null);
                       }}
-                      className="bg-red-600 hover:bg-red-700 text-white"
+                      className="bg-brand-blue hover:bg-brand-blue-dark text-white"
                     >
                       Done
                     </Button>
@@ -2602,7 +2602,7 @@ export default function Dashboard() {
                           setIsBulkImporting(false);
                         }
                       }}
-                      className="bg-red-600 hover:bg-red-700 text-white"
+                      className="bg-brand-blue hover:bg-brand-blue-dark text-white"
                     >
                       {isBulkImporting || bulkImportFromEOB.isPending
                         ? <><Loader2 className="w-4 h-4 animate-spin mr-2" />Importing…</>
@@ -2633,22 +2633,22 @@ export default function Dashboard() {
               <div className="overflow-x-auto rounded-lg border border-gray-200">
                 <table className="w-full text-xs border-collapse">
                   <thead>
-                    <tr className="bg-red-50 border-b border-red-200">
-                      <th className="px-3 py-2 text-left font-semibold text-red-800 whitespace-nowrap border-r border-red-200">Date of Service</th>
-                      <th className="px-3 py-2 text-left font-semibold text-red-800 whitespace-nowrap border-r border-red-200">CPT Code</th>
-                      <th className="px-3 py-2 text-right font-semibold text-red-800 whitespace-nowrap border-r border-red-200">Charge</th>
-                      <th className="px-3 py-2 text-right font-semibold text-red-800 whitespace-nowrap border-r border-red-200">Ins. Reimb.</th>
-                      <th className="px-3 py-2 text-right font-semibold text-red-800 whitespace-nowrap border-r border-red-200">Pt. Paid</th>
-                      <th className="px-3 py-2 text-left font-semibold text-red-800 whitespace-nowrap border-r border-red-200">Status</th>
-                      <th className="px-3 py-2 text-left font-semibold text-red-800 whitespace-nowrap border-r border-red-200">Payment Date</th>
-                      <th className="px-3 py-2 text-left font-semibold text-red-800 whitespace-nowrap">Ins. Billed / Claim #</th>
+                    <tr className="bg-brand-cream border-b border-brand-cream-dark">
+                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Date of Service</th>
+                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">CPT Code</th>
+                      <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Charge</th>
+                      <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Ins. Reimb.</th>
+                      <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Pt. Paid</th>
+                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Status</th>
+                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Payment Date</th>
+                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap">Ins. Billed / Claim #</th>
                     </tr>
                   </thead>
                   <tbody>
                     {editingExtractedClaims.map((group: any, gIdx: number) => {
                       const lines: any[] = group.cptLines?.length > 0 ? group.cptLines : [{ _key: group._key, cptCodes: group.cptCodes, chargeAmount: group.chargeAmount, insuranceReimbursement: group.insuranceReimbursement, patientAmountPaid: group.patientAmountPaid }];
                       return lines.map((line: any, lIdx: number) => (
-                        <tr key={`${gIdx}-${lIdx}`} className={`border-b ${lIdx === lines.length - 1 ? 'border-gray-300' : 'border-gray-100'} hover:bg-red-50`}>
+                        <tr key={`${gIdx}-${lIdx}`} className={`border-b ${lIdx === lines.length - 1 ? 'border-gray-300' : 'border-gray-100'} hover:bg-brand-cream/50`}>
                           {/* Date — show only on first CPT line of each group */}
                           <td className="px-3 py-1.5 border-r border-gray-200 whitespace-nowrap font-medium text-gray-800">
                             {lIdx === 0 ? (
@@ -2706,7 +2706,7 @@ export default function Dashboard() {
                 <Button
                   disabled={isSavingExtractedClaims || editingExtractedClaims.length === 0}
                   onClick={handleSaveExtractedClaims}
-                  className="bg-red-600 hover:bg-red-700 text-white"
+                  className="bg-brand-blue hover:bg-brand-blue-dark text-white"
                 >
                   {isSavingExtractedClaims
                     ? <><Loader2 className="w-4 h-4 animate-spin mr-2" />Saving…</>
@@ -2726,13 +2726,13 @@ export default function Dashboard() {
   // ── Main Dashboard View ────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-[#F8F6F1] to-white">
+    <div className="min-h-screen bg-gradient-to-b from-[#FAF5EE] to-white">
       {/* Header */}
       <div
         className="relative h-48 bg-cover bg-center"
         style={{ backgroundImage: 'url(https://d2xsxph8kpxj0f.cloudfront.net/310519663716642646/GCFkA8sgJY8LWBm3u5Mirt/healthcare-header-7MYjnBJpyfHpSEz86Wupgd.webp)' }}
       >
-        <div className="absolute inset-0 bg-gradient-to-r from-[#104163]/80 to-transparent flex items-center">
+        <div className="absolute inset-0 bg-gradient-to-r from-[#1E3A5F]/80 to-transparent flex items-center">
           <div className="container flex items-center justify-between w-full">
             <div className="flex items-center gap-4">
               <img
@@ -2775,26 +2775,26 @@ export default function Dashboard() {
                 </DialogTrigger>
                 <DialogContent className="bg-white max-w-md">
                   <DialogHeader>
-                    <DialogTitle className="text-[#104163]">Bulk Upload Patient Data</DialogTitle>
+                    <DialogTitle className="text-[#1E3A5F]">Bulk Upload Patient Data</DialogTitle>
                     <DialogDescription>Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions</DialogDescription>
                   </DialogHeader>
                   <div className="space-y-4">
-                    <div className="border-2 border-dashed border-[#E8E6E1] rounded-lg p-6 text-center hover:border-[#D9A312] transition-colors">
+                    <div className="border-2 border-dashed border-[#F0E9DC] rounded-lg p-6 text-center hover:border-[#E8A93C] transition-colors">
                       <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" id="file-upload" />
                       <label htmlFor="file-upload" className="cursor-pointer block">
-                        <Upload className="w-8 h-8 text-[#D9A312] mx-auto mb-2" />
-                        <p className="text-[#104163] font-semibold">Click to upload CSV</p>
+                        <Upload className="w-8 h-8 text-[#E8A93C] mx-auto mb-2" />
+                        <p className="text-[#1E3A5F] font-semibold">Click to upload CSV</p>
                       </label>
                     </div>
                     {uploadProgress > 0 && uploadProgress < 100 && (
-                      <div className="w-full bg-[#E8E6E1] rounded-full h-2">
-                        <div className="bg-[#D9A312] h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
+                      <div className="w-full bg-[#F0E9DC] rounded-full h-2">
+                        <div className="bg-[#E8A93C] h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
                       </div>
                     )}
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
                       <div className="flex items-center justify-between mb-2">
                         <p className="font-semibold">CSV Format:</p>
-                        <button onClick={handleDownloadTemplate} className="flex items-center gap-1.5 bg-[#104163] hover:bg-[#0D3A52] text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors">
+                        <button onClick={handleDownloadTemplate} className="flex items-center gap-1.5 bg-[#1E3A5F] hover:bg-[#152A47] text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors">
                           <Download className="w-3.5 h-3.5" />
                           Download Template
                         </button>
@@ -2808,41 +2808,41 @@ export default function Dashboard() {
               {/* Add Patient */}
               <Dialog open={showAddPatient} onOpenChange={setShowAddPatient}>
                 <DialogTrigger asChild>
-                  <Button className="bg-[#D9A312] hover:bg-[#C89209] text-[#104163] font-semibold flex items-center gap-2">
+                  <Button className="bg-[#E8A93C] hover:bg-[#C88A20] text-[#1E3A5F] font-semibold flex items-center gap-2">
                     <Plus className="w-5 h-5" />
                     Add Patient
                   </Button>
                 </DialogTrigger>
                 <DialogContent className="bg-white">
                   <DialogHeader>
-                    <DialogTitle className="text-[#104163]">Add New Patient</DialogTitle>
+                    <DialogTitle className="text-[#1E3A5F]">Add New Patient</DialogTitle>
                     <DialogDescription>Enter patient details to add them to the clinic dashboard</DialogDescription>
                   </DialogHeader>
                   <div className="space-y-4">
                     <div>
-                      <Label htmlFor="patient-name" className="text-[#104163] font-semibold">Patient Name</Label>
-                      <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-[#E8E6E1] mt-2" />
+                      <Label htmlFor="patient-name" className="text-[#1E3A5F] font-semibold">Patient Name</Label>
+                      <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-[#F0E9DC] mt-2" />
                     </div>
                     <div>
-                      <Label htmlFor="insurance" className="text-[#104163] font-semibold">Insurance Company</Label>
-                      <select id="insurance" value={newPatientInsurance} onChange={e => setNewPatientInsurance(e.target.value)} className="w-full border border-[#E8E6E1] rounded-md px-3 py-2 mt-2 bg-white text-[#104163] font-medium">
+                      <Label htmlFor="insurance" className="text-[#1E3A5F] font-semibold">Insurance Company</Label>
+                      <select id="insurance" value={newPatientInsurance} onChange={e => setNewPatientInsurance(e.target.value)} className="w-full border border-[#F0E9DC] rounded-md px-3 py-2 mt-2 bg-white text-[#1E3A5F] font-medium">
                         {insuranceList.map(ins => <option key={ins} value={ins}>{ins}</option>)}
                       </select>
                     </div>
                     <div>
-                      <Label htmlFor="authorized-sessions" className="text-[#104163] font-semibold">Authorized Sessions (optional)</Label>
-                      <Input id="authorized-sessions" placeholder="e.g. 12" type="number" value={newPatientAuthorized} onChange={e => setNewPatientAuthorized(e.target.value)} className="border-[#E8E6E1] mt-2" />
+                      <Label htmlFor="authorized-sessions" className="text-[#1E3A5F] font-semibold">Authorized Sessions (optional)</Label>
+                      <Input id="authorized-sessions" placeholder="e.g. 12" type="number" value={newPatientAuthorized} onChange={e => setNewPatientAuthorized(e.target.value)} className="border-[#F0E9DC] mt-2" />
                     </div>
                     <div>
-                      <Label htmlFor="auth-date" className="text-[#104163] font-semibold">Authorization Date (optional)</Label>
-                      <Input id="auth-date" type="date" value={newPatientAuthDate} onChange={e => setNewPatientAuthDate(e.target.value)} className="border-[#E8E6E1] mt-2" />
+                      <Label htmlFor="auth-date" className="text-[#1E3A5F] font-semibold">Authorization Date (optional)</Label>
+                      <Input id="auth-date" type="date" value={newPatientAuthDate} onChange={e => setNewPatientAuthDate(e.target.value)} className="border-[#F0E9DC] mt-2" />
                     </div>
                     <div>
-                      <Label htmlFor="auth-valid-until" className="text-[#104163] font-semibold">Authorization Valid Until (optional)</Label>
+                      <Label htmlFor="auth-valid-until" className="text-[#1E3A5F] font-semibold">Authorization Valid Until (optional)</Label>
                       <p className="text-xs text-gray-500 mt-0.5">Staff will be alerted 1 week before this date to request a new authorization.</p>
-                      <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-[#E8E6E1] mt-2" />
+                      <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-[#F0E9DC] mt-2" />
                     </div>
-                    <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-[#104163] hover:bg-[#0D3A52] text-white font-semibold">
+                    <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-[#1E3A5F] hover:bg-[#152A47] text-white font-semibold">
                       {(createPatient.isPending || bulkCreateVisits.isPending) ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
                       Add Patient
                     </Button>
@@ -2860,20 +2860,20 @@ export default function Dashboard() {
         {/* KPI Cards */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
           {[
-            { icon: <Users className="w-4 h-4 text-[#104163]" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', color: 'text-[#104163]' },
-            { icon: <CheckCircle2 className="w-4 h-4 text-[#D9A312]" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', color: 'text-[#D9A312]' },
-            { icon: <Clock className="w-4 h-4 text-[#104163]" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Active patient', color: 'text-[#104163]' },
+            { icon: <Users className="w-4 h-4 text-[#1E3A5F]" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', color: 'text-[#1E3A5F]' },
+            { icon: <CheckCircle2 className="w-4 h-4 text-[#E8A93C]" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', color: 'text-[#E8A93C]' },
+            { icon: <Clock className="w-4 h-4 text-[#1E3A5F]" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Active patient', color: 'text-[#1E3A5F]' },
             { icon: <AlertCircle className="w-4 h-4 text-[#DC2626]" />, label: 'Utilization Rate', value: `${clinicMetrics.utilizationRate}%`, sub: 'Sessions completed', color: 'text-[#DC2626]' },
           ].map(({ icon, label, value, sub, color }) => (
-            <Card key={label} className="border-[#E8E6E1] shadow-md hover:shadow-lg transition-shadow">
+            <Card key={label} className="border-[#F0E9DC] shadow-md hover:shadow-lg transition-shadow">
               <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium text-[#4A4A4A] flex items-center gap-2">
+                <CardTitle className="text-sm font-medium text-[#6B7280] flex items-center gap-2">
                   {icon}{label}
                 </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className={`text-3xl font-bold ${color}`}>{value}</div>
-                <p className="text-xs text-[#4A4A4A] mt-1">{sub}</p>
+                <p className="text-xs text-[#6B7280] mt-1">{sub}</p>
               </CardContent>
             </Card>
           ))}
@@ -2889,10 +2889,10 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 lg:grid-cols-6 gap-6">
           {/* Insurance Filter Sidebar */}
           <div className="lg:col-span-1">
-            <Card className="border-[#E8E6E1] shadow-md h-fit">
-              <CardHeader className="bg-[#104163] text-white rounded-t-lg">
+            <Card className="border-[#F0E9DC] shadow-md h-fit">
+              <CardHeader className="bg-[#1E3A5F] text-white rounded-t-lg">
                 <CardTitle className="text-lg">Insurance</CardTitle>
-                <CardDescription className="text-[#D9A312]">Filter by provider</CardDescription>
+                <CardDescription className="text-[#E8A93C]">Filter by provider</CardDescription>
               </CardHeader>
               <CardContent className="p-0">
                 <div className="space-y-2 p-4">
@@ -2904,12 +2904,12 @@ export default function Dashboard() {
                         key={insurance}
                         onClick={() => setSelectedInsurance(insurance)}
                         className={`w-full text-left p-3 rounded-lg transition-all font-semibold text-sm ${
-                          isSelected ? 'bg-[#D9A312] text-[#104163] shadow-md' : 'bg-[#F8F6F1] text-[#104163] hover:bg-[#E8E6E1]'
+                          isSelected ? 'bg-[#E8A93C] text-[#1E3A5F] shadow-md' : 'bg-[#FAF5EE] text-[#1E3A5F] hover:bg-[#F0E9DC]'
                         }`}
                       >
                         <div className="flex items-center justify-between">
                           <span className="truncate">{insurance}</span>
-                          <Badge className="bg-[#104163] text-white text-xs ml-1 shrink-0">{count}</Badge>
+                          <Badge className="bg-[#1E3A5F] text-white text-xs ml-1 shrink-0">{count}</Badge>
                         </div>
                       </button>
                     );
@@ -2921,10 +2921,10 @@ export default function Dashboard() {
 
           {/* Claims Status Filter */}
           <div className="lg:col-span-1">
-            <Card className="border-[#E8E6E1] shadow-md h-fit">
-              <CardHeader className="bg-[#104163] text-white rounded-t-lg py-3">
+            <Card className="border-[#F0E9DC] shadow-md h-fit">
+              <CardHeader className="bg-[#1E3A5F] text-white rounded-t-lg py-3">
                 <CardTitle className="text-base">Claims Status</CardTitle>
-                <CardDescription className="text-[#D9A312] text-xs">Filter by claim</CardDescription>
+                <CardDescription className="text-[#E8A93C] text-xs">Filter by claim</CardDescription>
               </CardHeader>
               <CardContent className="p-0">
                 <div className="space-y-1 p-3">
@@ -2951,13 +2951,13 @@ export default function Dashboard() {
                         key={value}
                         onClick={() => setSelectedClaimsFilter(value)}
                         className={`w-full text-left p-2 rounded-lg transition-all text-sm ${
-                          isSelected ? 'bg-[#D9A312] text-[#104163] font-semibold shadow-md' : 'bg-[#F8F6F1] text-[#104163] hover:bg-[#E8E6E1]'
+                          isSelected ? 'bg-[#E8A93C] text-[#1E3A5F] font-semibold shadow-md' : 'bg-[#FAF5EE] text-[#1E3A5F] hover:bg-[#F0E9DC]'
                         }`}
                       >
                         <div className="flex items-center justify-between">
                           <span className="truncate">{label}</span>
                           <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ml-1 shrink-0 ${
-                            isSelected ? 'bg-[#104163] text-white' : color
+                            isSelected ? 'bg-[#1E3A5F] text-white' : color
                           }`}>{count}</span>
                         </div>
                       </button>
@@ -2970,10 +2970,10 @@ export default function Dashboard() {
 
           {/* Patient List */}
           <div className="lg:col-span-1 space-y-4">
-            <Card className="border-[#E8E6E1] shadow-md">
-              <CardHeader className="bg-[#104163] text-white rounded-t-lg">
+            <Card className="border-[#F0E9DC] shadow-md">
+              <CardHeader className="bg-[#1E3A5F] text-white rounded-t-lg">
                 <CardTitle className="text-lg">Patients</CardTitle>
-                <CardDescription className="text-[#D9A312]">{filteredPatients.length} in {selectedInsurance}</CardDescription>
+                <CardDescription className="text-[#E8A93C]">{filteredPatients.length} in {selectedInsurance}</CardDescription>
               </CardHeader>
               <CardContent className="p-0">
                 <div className="space-y-1 max-h-96 overflow-y-auto">
@@ -2982,17 +2982,17 @@ export default function Dashboard() {
                     return (
                       <div
                         key={patient.id}
-                        className={`group flex items-center border-b border-[#E8E6E1] transition-all hover:bg-[#F8F6F1] ${isActive ? 'bg-[#F8F6F1] border-l-4 border-l-[#D9A312]' : ''}`}
+                        className={`group flex items-center border-b border-[#F0E9DC] transition-all hover:bg-[#FAF5EE] ${isActive ? 'bg-[#FAF5EE] border-l-4 border-l-[#E8A93C]' : ''}`}
                       >
                         {/* Patient name — clicking selects the patient */}
                         <button
                           onClick={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
                           className="flex-1 text-left p-4 min-w-0"
                         >
-                          <p className="font-semibold text-[#104163] hover:text-[#D9A312] cursor-pointer transition-colors truncate">
+                          <p className="font-semibold text-[#1E3A5F] hover:text-[#E8A93C] cursor-pointer transition-colors truncate">
                             {patient.name}
                           </p>
-                          <p className="text-xs text-[#4A4A4A] mt-1 truncate">{patient.insurance}</p>
+                          <p className="text-xs text-[#6B7280] mt-1 truncate">{patient.insurance}</p>
                           {patient.claimsStatus && (
                             <span className={`inline-block mt-1.5 text-[10px] font-semibold px-2 py-0.5 rounded-full ${
                               patient.claimsStatus === 'approved'     ? 'bg-green-100 text-green-700' :
@@ -3023,7 +3023,7 @@ export default function Dashboard() {
                       </div>
                     );
                   }) : (
-                    <div className="p-4 text-center text-[#4A4A4A] text-sm">No patients for this insurance</div>
+                    <div className="p-4 text-center text-[#6B7280] text-sm">No patients for this insurance</div>
                   )}
                 </div>
               </CardContent>
@@ -3122,12 +3122,12 @@ export default function Dashboard() {
           <div className="lg:col-span-3 space-y-6">
             {activePatient && (
               <>
-                <Card className="border-[#E8E6E1] shadow-md">
+                <Card className="border-[#F0E9DC] shadow-md">
                   <CardHeader className="pb-3">
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <button onClick={() => setShowDetailView(true)} className="group">
-                          <CardTitle className="text-2xl text-[#104163] group-hover:text-[#D9A312] transition-colors cursor-pointer">
+                          <CardTitle className="text-2xl text-[#1E3A5F] group-hover:text-[#E8A93C] transition-colors cursor-pointer">
                             {activePatient.name}
                           </CardTitle>
                         </button>
@@ -3153,22 +3153,22 @@ export default function Dashboard() {
                   </CardHeader>
                   <CardContent>
                     <div className="grid grid-cols-3 gap-4">
-                      <div className="p-3 bg-[#F8F6F1] rounded-lg">
-                        <p className="text-xs text-[#4A4A4A] font-medium">Authorized Sessions</p>
-                        <p className="text-2xl font-bold text-[#104163] mt-1">{activeMetrics.totalAuthorized}</p>
+                      <div className="p-3 bg-[#FAF5EE] rounded-lg">
+                        <p className="text-xs text-[#6B7280] font-medium">Authorized Sessions</p>
+                        <p className="text-2xl font-bold text-[#1E3A5F] mt-1">{activeMetrics.totalAuthorized}</p>
                       </div>
-                      <div className="p-3 bg-[#F8F6F1] rounded-lg">
-                        <p className="text-xs text-[#4A4A4A] font-medium">Completed</p>
-                        <p className="text-2xl font-bold text-[#D9A312] mt-1">{activeMetrics.completed}</p>
+                      <div className="p-3 bg-[#FAF5EE] rounded-lg">
+                        <p className="text-xs text-[#6B7280] font-medium">Completed</p>
+                        <p className="text-2xl font-bold text-[#E8A93C] mt-1">{activeMetrics.completed}</p>
                       </div>
-                      <div className="p-3 bg-[#F8F6F1] rounded-lg">
-                        <p className="text-xs text-[#4A4A4A] font-medium">Remaining</p>
-                        <p className="text-2xl font-bold text-[#104163] mt-1">{activeMetrics.remaining}</p>
+                      <div className="p-3 bg-[#FAF5EE] rounded-lg">
+                        <p className="text-xs text-[#6B7280] font-medium">Remaining</p>
+                        <p className="text-2xl font-bold text-[#1E3A5F] mt-1">{activeMetrics.remaining}</p>
                       </div>
                     </div>
                     <button
                       onClick={() => setShowDetailView(true)}
-                      className="mt-4 w-full py-2 px-4 bg-[#104163] text-white rounded-lg hover:bg-[#0D3A52] transition-colors font-semibold"
+                      className="mt-4 w-full py-2 px-4 bg-[#1E3A5F] text-white rounded-lg hover:bg-[#152A47] transition-colors font-semibold"
                     >
                       View Full Records & Edit Date ASH Submitted
                     </button>
@@ -3177,19 +3177,19 @@ export default function Dashboard() {
 
                 {/* Progress Chart */}
                 {patientProgressData.length > 0 && (
-                  <Card className="border-[#E8E6E1] shadow-md">
+                  <Card className="border-[#F0E9DC] shadow-md">
                     <CardHeader>
-                      <CardTitle className="text-[#104163]">Session Progress</CardTitle>
+                      <CardTitle className="text-[#1E3A5F]">Session Progress</CardTitle>
                       <CardDescription>Sessions remaining over time</CardDescription>
                     </CardHeader>
                     <CardContent>
                       <ResponsiveContainer width="100%" height={300}>
                         <LineChart data={patientProgressData}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#E8E6E1" />
-                          <XAxis dataKey="session" stroke="#4A4A4A" />
-                          <YAxis stroke="#4A4A4A" />
-                          <Tooltip contentStyle={{ backgroundColor: '#F8F6F1', border: '1px solid #E8E6E1', borderRadius: '8px' }} />
-                          <Line type="monotone" dataKey="remaining" stroke="#104163" strokeWidth={2} dot={{ fill: '#D9A312', r: 4 }} activeDot={{ r: 6 }} />
+                          <CartesianGrid strokeDasharray="3 3" stroke="#F0E9DC" />
+                          <XAxis dataKey="session" stroke="#6B7280" />
+                          <YAxis stroke="#6B7280" />
+                          <Tooltip contentStyle={{ backgroundColor: '#FAF5EE', border: '1px solid #F0E9DC', borderRadius: '8px' }} />
+                          <Line type="monotone" dataKey="remaining" stroke="#1E3A5F" strokeWidth={2} dot={{ fill: '#E8A93C', r: 4 }} activeDot={{ r: 6 }} />
                         </LineChart>
                       </ResponsiveContainer>
                     </CardContent>
@@ -3199,9 +3199,9 @@ export default function Dashboard() {
             )}
 
             {/* Clinic Overview */}
-            <Card className="border-[#E8E6E1] shadow-md">
+            <Card className="border-[#F0E9DC] shadow-md">
               <CardHeader>
-                <CardTitle className="text-[#104163]">Clinic Overview</CardTitle>
+                <CardTitle className="text-[#1E3A5F]">Clinic Overview</CardTitle>
                 <CardDescription>Sessions for active patient</CardDescription>
               </CardHeader>
               <CardContent>
@@ -3210,7 +3210,7 @@ export default function Dashboard() {
                     <Pie data={clinicStatusData} cx="50%" cy="50%" labelLine={false} label={({ name, value }) => `${name}: ${value}`} outerRadius={80} dataKey="value">
                       {clinicStatusData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
                     </Pie>
-                    <Tooltip contentStyle={{ backgroundColor: '#F8F6F1', border: '1px solid #E8E6E1', borderRadius: '8px' }} />
+                    <Tooltip contentStyle={{ backgroundColor: '#FAF5EE', border: '1px solid #F0E9DC', borderRadius: '8px' }} />
                   </PieChart>
                 </ResponsiveContainer>
               </CardContent>
@@ -3223,33 +3223,33 @@ export default function Dashboard() {
       <Dialog open={showDischargeDialog} onOpenChange={(open) => { if (!open) { setShowDischargeDialog(false); setPendingDischargePatientId(null); } }}>
         <DialogContent className="bg-white max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-[#104163] text-xl flex items-center gap-2">
+            <DialogTitle className="text-[#1E3A5F] text-xl flex items-center gap-2">
               <UserX className="w-5 h-5 text-gray-500" />
               Discharge Patient
             </DialogTitle>
-            <DialogDescription className="text-[#4A4A4A]">
+            <DialogDescription className="text-[#6B7280]">
               Please fill in the discharge details. The patient will be moved to the Discharged Patients folder.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div>
-              <Label htmlFor="discharge-date" className="text-[#104163] font-semibold">Date of Discharge</Label>
+              <Label htmlFor="discharge-date" className="text-[#1E3A5F] font-semibold">Date of Discharge</Label>
               <Input
                 id="discharge-date"
                 type="date"
                 value={dischargeDate}
                 onChange={e => setDischargeDate(e.target.value)}
-                className="mt-1 border-[#E8E6E1] focus:border-[#104163]"
+                className="mt-1 border-[#F0E9DC] focus:border-[#1E3A5F]"
               />
             </div>
             <div>
-              <Label htmlFor="discharge-reason" className="text-[#104163] font-semibold">Reason of Discharge</Label>
+              <Label htmlFor="discharge-reason" className="text-[#1E3A5F] font-semibold">Reason of Discharge</Label>
               <Input
                 id="discharge-reason"
                 placeholder="e.g. Goals met, Moved, Insurance ended…"
                 value={dischargeReason}
                 onChange={e => setDischargeReason(e.target.value)}
-                className="mt-1 border-[#E8E6E1] focus:border-[#104163]"
+                className="mt-1 border-[#F0E9DC] focus:border-[#1E3A5F]"
               />
             </div>
           </div>
@@ -3277,14 +3277,14 @@ export default function Dashboard() {
       <AlertDialog open={deletePatientId !== null} onOpenChange={(open) => { if (!open) { setDeletePatientId(null); setDeletePatientName(''); } }}>
         <AlertDialogContent className="bg-white">
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-[#104163] text-xl">Delete Patient?</AlertDialogTitle>
-            <AlertDialogDescription className="text-[#4A4A4A]">
+            <AlertDialogTitle className="text-[#1E3A5F] text-xl">Delete Patient?</AlertDialogTitle>
+            <AlertDialogDescription className="text-[#6B7280]">
               You are about to permanently delete <strong>{deletePatientName}</strong> and all of their visit records.
               This action <strong>cannot be undone</strong>.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="border-[#E8E6E1] text-[#104163] hover:bg-[#F8F6F1]">
+            <AlertDialogCancel className="border-[#F0E9DC] text-[#1E3A5F] hover:bg-[#FAF5EE]">
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction

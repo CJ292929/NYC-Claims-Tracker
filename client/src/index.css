@@ -11,6 +11,18 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-serif: 'Playfair Display', 'Merriweather', serif;
+  --color-brand-blue: var(--navy);
+  --color-brand-blue-light: var(--navy-light);
+  --color-brand-blue-dark: var(--navy-dark);
+  --color-brand-gold: var(--gold);
+  --color-brand-gold-light: var(--gold-light);
+  --color-brand-gold-dark: var(--gold-dark);
+  --color-brand-cream: var(--cream);
+  --color-brand-cream-dark: var(--cream-dark);
+  --shadow-brand: 0 4px 20px rgba(30, 58, 95, 0.15);
+  --shadow-brand-lg: 0 10px 40px rgba(30, 58, 95, 0.2);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -46,46 +58,51 @@
 }
 
 :root {
-  /* Navy Blue & Gold Theme for Physical Therapy Clinic */
-  --navy: #104163;
-  --gold: #D9A312;
-  --cream: #F8F6F1;
+  /* NYC Home Rehab Physical Therapy brand palette */
+  --navy: #1E3A5F;
+  --navy-light: #2C5282;
+  --navy-dark: #152A47;
+  --gold: #E8A93C;
+  --gold-light: #F5C563;
+  --gold-dark: #C88A20;
+  --cream: #FAF5EE;
+  --cream-dark: #F0E9DC;
   --light-gray: #E8E6E1;
-  --dark-gray: #4A4A4A;
-  
-  --primary: #104163;
-  --primary-foreground: #F8F6F1;
-  --sidebar-primary: #104163;
-  --sidebar-primary-foreground: #F8F6F1;
-  --chart-1: #D9A312;
-  --chart-2: #104163;
-  --chart-3: #1A5A8F;
+  --dark-gray: #6B7280;
+
+  --primary: var(--navy);
+  --primary-foreground: var(--cream);
+  --sidebar-primary: var(--navy);
+  --sidebar-primary-foreground: var(--cream);
+  --chart-1: var(--gold);
+  --chart-2: var(--navy);
+  --chart-3: var(--navy-light);
   --chart-4: #0D3A52;
   --chart-5: #051F2B;
   --radius: 0.65rem;
   --background: oklch(0.98 0.001 70);
-  --foreground: #104163;
+  --foreground: var(--navy);
   --card: oklch(1 0 0);
-  --card-foreground: #104163;
+  --card-foreground: var(--navy);
   --popover: oklch(1 0 0);
-  --popover-foreground: #104163;
-  --secondary: #D9A312;
-  --secondary-foreground: #104163;
-  --muted: #E8E6E1;
-  --muted-foreground: #4A4A4A;
-  --accent: #D9A312;
-  --accent-foreground: #104163;
+  --popover-foreground: var(--navy);
+  --secondary: var(--gold);
+  --secondary-foreground: var(--navy);
+  --muted: var(--light-gray);
+  --muted-foreground: var(--dark-gray);
+  --accent: var(--gold);
+  --accent-foreground: var(--navy);
   --destructive: #DC2626;
   --destructive-foreground: oklch(0.985 0 0);
-  --border: #E8E6E1;
-  --input: #F8F6F1;
-  --ring: #D9A312;
-  --sidebar: #104163;
-  --sidebar-foreground: #F8F6F1;
-  --sidebar-accent: #D9A312;
-  --sidebar-accent-foreground: #104163;
-  --sidebar-border: #1A5A8F;
-  --sidebar-ring: #D9A312;
+  --border: var(--light-gray);
+  --input: var(--cream);
+  --ring: var(--gold);
+  --sidebar: var(--navy);
+  --sidebar-foreground: var(--cream);
+  --sidebar-accent: var(--gold);
+  --sidebar-accent-foreground: var(--navy);
+  --sidebar-border: var(--navy-light);
+  --sidebar-ring: var(--gold);
 }
 
 .dark {
@@ -154,6 +171,27 @@
   input[type="checkbox"]:not(:disabled),
   input[type="radio"]:not(:disabled) {
     @apply cursor-pointer;
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--gold) 30%, transparent);
+    color: var(--navy);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--cream);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--gold);
+    border-radius: 999px;
+    border: 2px solid var(--cream);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--gold-dark);
   }
 }
 

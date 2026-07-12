@@ -22,10 +22,10 @@ function ProtectedRoute({ component: Component }: { component: React.ComponentTy
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-[#F8F6F1] flex items-center justify-center">
+      <div className="min-h-screen bg-[#FAF5EE] flex items-center justify-center">
         <div className="text-center">
-          <div className="w-8 h-8 border-4 border-[#104163] border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-[#104163] font-medium text-sm">Loading…</p>
+          <div className="w-8 h-8 border-4 border-[#1E3A5F] border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-[#1E3A5F] font-medium text-sm">Loading…</p>
         </div>
       </div>
     );
