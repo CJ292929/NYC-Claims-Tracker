@@ -15,6 +15,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { findMatchingPatient } from '@/lib/nameMatch';
+import logoIcon from '@/assets/logos/logo-icon.png';
 
 /**
  * Dashboard Component — Database-backed
@@ -22,7 +23,7 @@ import { findMatchingPatient } from '@/lib/nameMatch';
  * "Date ASH Submitted" column is editable inline with a native date picker.
  */
 
-const LOGO_URL = '/manus-storage/nychomerehab-logo_f6012b59.png';
+const LOGO_URL = logoIcon;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -219,8 +220,8 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
 
   if (error) {
     return (
-      <div className="mb-6 flex items-center gap-3 p-4 rounded-xl bg-red-50 border border-red-200">
-        <AlertCircle className="w-6 h-6 text-red-600 shrink-0" />
+      <div className="mb-6 flex items-center gap-3 bg-red-50 border-l-4 border-red-500 rounded-lg p-4">
+        <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
         <div>
           <p className="font-semibold text-red-800">Could not load authorization alerts</p>
           <p className="text-sm text-red-700">Please refresh the page to try again.</p>
@@ -247,8 +248,8 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
 
   if (urgent.length === 0) {
     return (
-      <div className="mb-6 flex items-center gap-3 p-4 rounded-xl bg-green-50 border border-green-200">
-        <ShieldCheck className="w-6 h-6 text-green-600 shrink-0" />
+      <div className="mb-6 flex items-center gap-3 bg-green-50 border-l-4 border-green-500 rounded-lg p-4">
+        <ShieldCheck className="w-5 h-5 text-green-600 shrink-0" />
         <div>
           <p className="font-semibold text-green-800">All patients are on track</p>
           <p className="text-sm text-green-700">No authorization requests needed at this time.</p>
@@ -523,7 +524,7 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
 
   if (isLoading) {
     return (
-      <div className="bg-white rounded-xl border border-orange-200 p-4">
+      <div className="mb-6 bg-orange-50 border-l-4 border-orange-400 rounded-lg p-4">
         <div className="flex items-center gap-2 mb-3">
           <AlertCircle className="w-5 h-5 text-orange-500" />
           <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up Needed</h2>
@@ -535,7 +536,7 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
 
   if (unpaidClaims.length === 0) {
     return (
-      <div className="bg-white rounded-xl border border-green-200 p-4">
+      <div className="mb-6 bg-green-50 border-l-4 border-green-500 rounded-lg p-4">
         <div className="flex items-center gap-2 mb-2">
           <CheckCircle2 className="w-5 h-5 text-green-500" />
           <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up</h2>
@@ -546,7 +547,7 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
   }
 
   return (
-    <div className="bg-white rounded-xl border-2 border-orange-300 p-4">
+    <div className="mb-6 bg-orange-50 border-l-4 border-orange-500 rounded-lg p-4">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <AlertCircle className="w-5 h-5 text-orange-500 animate-pulse" />
@@ -2726,13 +2727,15 @@ export default function Dashboard() {
   // ── Main Dashboard View ────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-[#FAF5EE] to-white">
+    <div className="min-h-screen bg-brand-cream/30">
       {/* Header */}
-      <div
-        className="relative h-48 bg-cover bg-center"
-        style={{ backgroundImage: 'url(https://d2xsxph8kpxj0f.cloudfront.net/310519663716642646/GCFkA8sgJY8LWBm3u5Mirt/healthcare-header-7MYjnBJpyfHpSEz86Wupgd.webp)' }}
-      >
-        <div className="absolute inset-0 bg-gradient-to-r from-[#1E3A5F]/80 to-transparent flex items-center">
+      <div className="relative overflow-hidden">
+        <div
+          className="absolute inset-0 bg-cover bg-center opacity-15"
+          style={{ backgroundImage: 'url(https://d2xsxph8kpxj0f.cloudfront.net/310519663716642646/GCFkA8sgJY8LWBm3u5Mirt/healthcare-header-7MYjnBJpyfHpSEz86Wupgd.webp)' }}
+        />
+        <div className="absolute inset-0 bg-gradient-to-r from-brand-blue to-brand-blue/90" />
+        <div className="relative py-6 px-8 flex items-center">
           <div className="container flex items-center justify-between w-full">
             <div className="flex items-center gap-4">
               <img
@@ -2741,7 +2744,7 @@ export default function Dashboard() {
                 className="w-14 h-14 object-contain drop-shadow-md hidden sm:block"
               />
               <div>
-                <h1 className="text-white text-4xl font-bold">NYC HOME REHAB AUTHORIZATION AND CLAIMS TRACKER</h1>
+                <h1 className="text-white text-2xl font-serif font-bold">NYC HOME REHAB AUTHORIZATION AND CLAIMS TRACKER</h1>
               </div>
             </div>
             <div className="flex gap-3 items-center">
@@ -2749,7 +2752,7 @@ export default function Dashboard() {
               <Button
                 variant="outline"
                 size="sm"
-                className="bg-white/10 border-white/30 text-white hover:bg-white/20 hover:text-white flex items-center gap-2 font-semibold"
+                className="bg-transparent border-white/50 text-white hover:bg-white/10 hover:text-white flex items-center gap-2 font-semibold px-5 py-2.5 rounded-lg"
                 onClick={() => {
                   logoutMutation.mutate(undefined, {
                     onSuccess: () => { window.location.href = '/login'; },
@@ -2768,7 +2771,7 @@ export default function Dashboard() {
               {/* Bulk Upload */}
               <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
                 <DialogTrigger asChild>
-                  <Button className="bg-green-600 hover:bg-green-700 text-white font-semibold flex items-center gap-2">
+                  <Button className="bg-green-600 hover:bg-green-700 text-white font-semibold flex items-center gap-2 px-5 py-2.5 rounded-lg">
                     <Upload className="w-5 h-5" />
                     Bulk Upload
                   </Button>
@@ -2808,7 +2811,7 @@ export default function Dashboard() {
               {/* Add Patient */}
               <Dialog open={showAddPatient} onOpenChange={setShowAddPatient}>
                 <DialogTrigger asChild>
-                  <Button className="bg-[#E8A93C] hover:bg-[#C88A20] text-[#1E3A5F] font-semibold flex items-center gap-2">
+                  <Button className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold flex items-center gap-2 px-5 py-2.5 rounded-lg">
                     <Plus className="w-5 h-5" />
                     Add Patient
                   </Button>
@@ -2855,25 +2858,25 @@ export default function Dashboard() {
       </div>
 
       {/* Main Content */}
-      <div className="container py-8">
+      <div className="max-w-[1600px] mx-auto px-6 lg:px-8 py-6">
 
         {/* KPI Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           {[
-            { icon: <Users className="w-4 h-4 text-[#1E3A5F]" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', color: 'text-[#1E3A5F]' },
-            { icon: <CheckCircle2 className="w-4 h-4 text-[#E8A93C]" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', color: 'text-[#E8A93C]' },
-            { icon: <Clock className="w-4 h-4 text-[#1E3A5F]" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Active patient', color: 'text-[#1E3A5F]' },
-            { icon: <AlertCircle className="w-4 h-4 text-[#DC2626]" />, label: 'Utilization Rate', value: `${clinicMetrics.utilizationRate}%`, sub: 'Sessions completed', color: 'text-[#DC2626]' },
+            { icon: <Users className="w-5 h-5 text-[#1E3A5F]" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', color: 'text-[#1E3A5F]' },
+            { icon: <CheckCircle2 className="w-5 h-5 text-[#E8A93C]" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', color: 'text-[#E8A93C]' },
+            { icon: <Clock className="w-5 h-5 text-[#1E3A5F]" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Active patient', color: 'text-[#1E3A5F]' },
+            { icon: <AlertCircle className="w-5 h-5 text-[#DC2626]" />, label: 'Utilization Rate', value: `${clinicMetrics.utilizationRate}%`, sub: 'Sessions completed', color: 'text-[#DC2626]' },
           ].map(({ icon, label, value, sub, color }) => (
-            <Card key={label} className="border-[#F0E9DC] shadow-md hover:shadow-lg transition-shadow">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium text-[#6B7280] flex items-center gap-2">
+            <Card key={label} className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition">
+              <CardHeader className="p-0 pb-3">
+                <CardTitle className="text-sm text-gray-600 font-medium flex items-center gap-2">
                   {icon}{label}
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className={`text-3xl font-bold ${color}`}>{value}</div>
-                <p className="text-xs text-[#6B7280] mt-1">{sub}</p>
+              <CardContent className="p-0">
+                <div className={`text-4xl font-bold ${color}`}>{value}</div>
+                <p className="text-xs text-gray-500 mt-1">{sub}</p>
               </CardContent>
             </Card>
           ))}
@@ -2889,112 +2892,101 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 lg:grid-cols-6 gap-6">
           {/* Insurance Filter Sidebar */}
           <div className="lg:col-span-1">
-            <Card className="border-[#F0E9DC] shadow-md h-fit">
-              <CardHeader className="bg-[#1E3A5F] text-white rounded-t-lg">
-                <CardTitle className="text-lg">Insurance</CardTitle>
-                <CardDescription className="text-[#E8A93C]">Filter by provider</CardDescription>
-              </CardHeader>
-              <CardContent className="p-0">
-                <div className="space-y-2 p-4">
-                  {insuranceList.map(insurance => {
-                    const count = activePatients.filter(p => p.insurance === insurance).length;
-                    const isSelected = selectedInsurance === insurance;
-                    return (
-                      <button
-                        key={insurance}
-                        onClick={() => setSelectedInsurance(insurance)}
-                        className={`w-full text-left p-3 rounded-lg transition-all font-semibold text-sm ${
-                          isSelected ? 'bg-[#E8A93C] text-[#1E3A5F] shadow-md' : 'bg-[#FAF5EE] text-[#1E3A5F] hover:bg-[#F0E9DC]'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="truncate">{insurance}</span>
-                          <Badge className="bg-[#1E3A5F] text-white text-xs ml-1 shrink-0">{count}</Badge>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </CardContent>
-            </Card>
+            <div className="bg-white rounded-xl shadow-sm p-4 max-h-[600px] overflow-y-auto">
+              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-[#F0E9DC]">Insurance</h3>
+              <div className="space-y-1">
+                {insuranceList.map(insurance => {
+                  const count = activePatients.filter(p => p.insurance === insurance).length;
+                  const isSelected = selectedInsurance === insurance;
+                  return (
+                    <button
+                      key={insurance}
+                      onClick={() => setSelectedInsurance(insurance)}
+                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md cursor-pointer transition font-semibold text-sm ${
+                        isSelected ? 'bg-brand-gold text-white' : 'text-brand-blue hover:bg-brand-cream'
+                      }`}
+                    >
+                      <span className="truncate">{insurance}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
+                        isSelected ? 'bg-white/25 text-white' : 'bg-gray-100 text-gray-700'
+                      }`}>{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
           {/* Claims Status Filter */}
           <div className="lg:col-span-1">
-            <Card className="border-[#F0E9DC] shadow-md h-fit">
-              <CardHeader className="bg-[#1E3A5F] text-white rounded-t-lg py-3">
-                <CardTitle className="text-base">Claims Status</CardTitle>
-                <CardDescription className="text-[#E8A93C] text-xs">Filter by claim</CardDescription>
-              </CardHeader>
-              <CardContent className="p-0">
-                <div className="space-y-1 p-3">
-                  {[
-                    { value: 'all', label: 'All Claims', color: 'bg-gray-100 text-gray-800' },
-                    { value: 'submitted', label: 'Submitted', color: 'bg-blue-100 text-blue-800' },
-                    { value: 'approved', label: 'Approved', color: 'bg-green-100 text-green-800' },
-                    { value: 'pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800' },
-                    { value: 'denied', label: 'Denied', color: 'bg-red-100 text-red-800' },
-                    { value: 'pended', label: 'Pended', color: 'bg-orange-100 text-orange-800' },
-                    { value: 'rejected', label: 'Rejected', color: 'bg-gray-900 text-white' },
-                    { value: 'resubmitted', label: 'Resubmitted', color: 'bg-violet-100 text-violet-800' },
-                    { value: 'none', label: 'No Status', color: 'bg-gray-50 text-gray-500' },
-                  ].map(({ value, label, color }) => {
-                    const count = value === 'all'
-                      ? activePatients.filter(p => selectedInsurance ? p.insurance === selectedInsurance : true).length
-                      : activePatients.filter(p =>
-                          (selectedInsurance ? p.insurance === selectedInsurance : true) &&
-                          (p.claimsStatus ?? 'none') === value
-                        ).length;
-                    const isSelected = selectedClaimsFilter === value;
-                    return (
-                      <button
-                        key={value}
-                        onClick={() => setSelectedClaimsFilter(value)}
-                        className={`w-full text-left p-2 rounded-lg transition-all text-sm ${
-                          isSelected ? 'bg-[#E8A93C] text-[#1E3A5F] font-semibold shadow-md' : 'bg-[#FAF5EE] text-[#1E3A5F] hover:bg-[#F0E9DC]'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="truncate">{label}</span>
-                          <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ml-1 shrink-0 ${
-                            isSelected ? 'bg-[#1E3A5F] text-white' : color
-                          }`}>{count}</span>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </CardContent>
-            </Card>
+            <div className="bg-white rounded-xl shadow-sm p-4 max-h-[600px] overflow-y-auto">
+              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-[#F0E9DC]">Claims Status</h3>
+              <div className="space-y-1">
+                {[
+                  { value: 'all', label: 'All Claims', color: 'bg-gray-100 text-gray-800' },
+                  { value: 'submitted', label: 'Submitted', color: 'bg-blue-100 text-blue-800' },
+                  { value: 'approved', label: 'Approved', color: 'bg-green-100 text-green-800' },
+                  { value: 'pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800' },
+                  { value: 'denied', label: 'Denied', color: 'bg-red-100 text-red-800' },
+                  { value: 'pended', label: 'Pended', color: 'bg-orange-100 text-orange-800' },
+                  { value: 'rejected', label: 'Rejected', color: 'bg-gray-900 text-white' },
+                  { value: 'resubmitted', label: 'Resubmitted', color: 'bg-violet-100 text-violet-800' },
+                  { value: 'none', label: 'No Status', color: 'bg-gray-50 text-gray-500' },
+                ].map(({ value, label, color }) => {
+                  const count = value === 'all'
+                    ? activePatients.filter(p => selectedInsurance ? p.insurance === selectedInsurance : true).length
+                    : activePatients.filter(p =>
+                        (selectedInsurance ? p.insurance === selectedInsurance : true) &&
+                        (p.claimsStatus ?? 'none') === value
+                      ).length;
+                  const isSelected = selectedClaimsFilter === value;
+                  return (
+                    <button
+                      key={value}
+                      onClick={() => setSelectedClaimsFilter(value)}
+                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md cursor-pointer transition text-sm ${
+                        isSelected ? 'bg-brand-gold text-white font-semibold' : 'text-brand-blue hover:bg-brand-cream'
+                      }`}
+                    >
+                      <span className="truncate">{label}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
+                        isSelected ? 'bg-white/25 text-white' : color
+                      }`}>{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
           {/* Patient List */}
           <div className="lg:col-span-1 space-y-4">
-            <Card className="border-[#F0E9DC] shadow-md">
-              <CardHeader className="bg-[#1E3A5F] text-white rounded-t-lg">
-                <CardTitle className="text-lg">Patients</CardTitle>
-                <CardDescription className="text-[#E8A93C]">{filteredPatients.length} in {selectedInsurance}</CardDescription>
-              </CardHeader>
-              <CardContent className="p-0">
-                <div className="space-y-1 max-h-96 overflow-y-auto">
-                  {filteredPatients.length > 0 ? filteredPatients.map(patient => {
+            <div className="bg-white rounded-xl shadow-sm p-4">
+              <h3 className="text-lg font-serif font-bold text-brand-blue mb-1">Patients</h3>
+              <p className="text-xs text-[#6B7280] mb-4">{filteredPatients.length} in {selectedInsurance}</p>
+              <div className="space-y-1 max-h-96 overflow-y-auto">
+                {filteredPatients.length > 0 ? filteredPatients.map(patient => {
                     const isActive = activePatient?.id === patient.id;
                     return (
                       <div
                         key={patient.id}
-                        className={`group flex items-center border-b border-[#F0E9DC] transition-all hover:bg-[#FAF5EE] ${isActive ? 'bg-[#FAF5EE] border-l-4 border-l-[#E8A93C]' : ''}`}
+                        className={`group flex items-center rounded-lg mb-2 cursor-pointer transition ${
+                          isActive ? 'bg-brand-blue text-white border-l-4 border-brand-gold' : 'hover:bg-brand-cream'
+                        }`}
                       >
                         {/* Patient name — clicking selects the patient */}
                         <button
                           onClick={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
-                          className="flex-1 text-left p-4 min-w-0"
+                          className="flex-1 text-left p-3 min-w-0"
                         >
-                          <p className="font-semibold text-[#1E3A5F] hover:text-[#E8A93C] cursor-pointer transition-colors truncate">
+                          <p className={`font-semibold whitespace-normal cursor-pointer transition-colors ${
+                            isActive ? 'text-white' : 'text-[#1E3A5F] hover:text-[#E8A93C]'
+                          }`}>
                             {patient.name}
                           </p>
-                          <p className="text-xs text-[#6B7280] mt-1 truncate">{patient.insurance}</p>
+                          <p className={`text-xs opacity-80 mt-1 truncate ${isActive ? 'text-white' : 'text-[#6B7280]'}`}>{patient.insurance}</p>
                           {patient.claimsStatus && (
-                            <span className={`inline-block mt-1.5 text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                            <span className={`inline-block px-2 py-0.5 rounded-full text-xs mt-1.5 font-semibold ${
                               patient.claimsStatus === 'approved'     ? 'bg-green-100 text-green-700' :
                               patient.claimsStatus === 'denied'       ? 'bg-red-100 text-red-700' :
                               patient.claimsStatus === 'pending'      ? 'bg-yellow-100 text-yellow-700' :
@@ -3016,7 +3008,9 @@ export default function Dashboard() {
                           }}
                           title={`Delete ${patient.name}`}
                           aria-label={`Delete patient ${patient.name}`}
-                          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 group-focus-within:opacity-100 sm:opacity-0 max-sm:opacity-100 transition-opacity p-2 mr-2 rounded-md text-red-400 hover:text-red-600 hover:bg-red-50 focus-visible:ring-2 focus-visible:ring-red-400 shrink-0"
+                          className={`opacity-0 group-hover:opacity-100 focus-visible:opacity-100 group-focus-within:opacity-100 sm:opacity-0 max-sm:opacity-100 transition-opacity p-2 mr-2 rounded-md focus-visible:ring-2 focus-visible:ring-red-400 shrink-0 ${
+                            isActive ? 'text-white/70 hover:text-white hover:bg-white/10' : 'text-red-400 hover:text-red-600 hover:bg-red-50'
+                          }`}
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -3025,9 +3019,8 @@ export default function Dashboard() {
                   }) : (
                     <div className="p-4 text-center text-[#6B7280] text-sm">No patients for this insurance</div>
                   )}
-                </div>
-              </CardContent>
-            </Card>
+              </div>
+            </div>
 
             {/* ─── Completed Sessions Folder ─────────────────────────────────── */}
             {completedPatients.length > 0 && (
@@ -3122,12 +3115,12 @@ export default function Dashboard() {
           <div className="lg:col-span-3 space-y-6">
             {activePatient && (
               <>
-                <Card className="border-[#F0E9DC] shadow-md">
+                <Card className="border-[#F0E9DC] shadow-sm rounded-xl">
                   <CardHeader className="pb-3">
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <button onClick={() => setShowDetailView(true)} className="group">
-                          <CardTitle className="text-2xl text-[#1E3A5F] group-hover:text-[#E8A93C] transition-colors cursor-pointer">
+                          <CardTitle className="text-2xl font-serif font-bold text-brand-blue group-hover:text-[#E8A93C] transition-colors cursor-pointer">
                             {activePatient.name}
                           </CardTitle>
                         </button>
@@ -3147,28 +3140,28 @@ export default function Dashboard() {
                         </CardDescription>
                       </div>
                       {alertStatus && (
-                        <Badge className={`text-sm ${alertStatus.color}`}>{alertStatus.label}</Badge>
+                        <Badge className={`text-sm px-3 py-1 rounded-full font-medium ${alertStatus.color}`}>{alertStatus.label}</Badge>
                       )}
                     </div>
                   </CardHeader>
                   <CardContent>
-                    <div className="grid grid-cols-3 gap-4">
-                      <div className="p-3 bg-[#FAF5EE] rounded-lg">
-                        <p className="text-xs text-[#6B7280] font-medium">Authorized Sessions</p>
-                        <p className="text-2xl font-bold text-[#1E3A5F] mt-1">{activeMetrics.totalAuthorized}</p>
+                    <div className="grid grid-cols-3 gap-4 mt-2">
+                      <div className="p-4 bg-brand-cream/40 rounded-lg text-center">
+                        <p className="text-xs text-gray-600 uppercase tracking-wide mb-1">Authorized Sessions</p>
+                        <p className="text-3xl font-bold text-brand-gold">{activeMetrics.totalAuthorized}</p>
                       </div>
-                      <div className="p-3 bg-[#FAF5EE] rounded-lg">
-                        <p className="text-xs text-[#6B7280] font-medium">Completed</p>
-                        <p className="text-2xl font-bold text-[#E8A93C] mt-1">{activeMetrics.completed}</p>
+                      <div className="p-4 bg-brand-cream/40 rounded-lg text-center">
+                        <p className="text-xs text-gray-600 uppercase tracking-wide mb-1">Completed</p>
+                        <p className="text-3xl font-bold text-green-600">{activeMetrics.completed}</p>
                       </div>
-                      <div className="p-3 bg-[#FAF5EE] rounded-lg">
-                        <p className="text-xs text-[#6B7280] font-medium">Remaining</p>
-                        <p className="text-2xl font-bold text-[#1E3A5F] mt-1">{activeMetrics.remaining}</p>
+                      <div className="p-4 bg-brand-cream/40 rounded-lg text-center">
+                        <p className="text-xs text-gray-600 uppercase tracking-wide mb-1">Remaining</p>
+                        <p className="text-3xl font-bold text-brand-blue">{activeMetrics.remaining}</p>
                       </div>
                     </div>
                     <button
                       onClick={() => setShowDetailView(true)}
-                      className="mt-4 w-full py-2 px-4 bg-[#1E3A5F] text-white rounded-lg hover:bg-[#152A47] transition-colors font-semibold"
+                      className="mt-6 w-full py-3 px-4 bg-brand-blue text-white rounded-lg hover:bg-brand-blue-dark transition font-semibold"
                     >
                       View Full Records & Edit Date ASH Submitted
                     </button>
@@ -3177,21 +3170,23 @@ export default function Dashboard() {
 
                 {/* Progress Chart */}
                 {patientProgressData.length > 0 && (
-                  <Card className="border-[#F0E9DC] shadow-md">
+                  <Card className="border-[#F0E9DC] shadow-sm rounded-xl">
                     <CardHeader>
-                      <CardTitle className="text-[#1E3A5F]">Session Progress</CardTitle>
-                      <CardDescription>Sessions remaining over time</CardDescription>
+                      <CardTitle className="text-lg font-serif font-bold text-brand-blue">Session Progress</CardTitle>
+                      <CardDescription className="text-sm text-gray-600 mt-1">Sessions remaining over time</CardDescription>
                     </CardHeader>
                     <CardContent>
-                      <ResponsiveContainer width="100%" height={300}>
-                        <LineChart data={patientProgressData}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#F0E9DC" />
-                          <XAxis dataKey="session" stroke="#6B7280" />
-                          <YAxis stroke="#6B7280" />
-                          <Tooltip contentStyle={{ backgroundColor: '#FAF5EE', border: '1px solid #F0E9DC', borderRadius: '8px' }} />
-                          <Line type="monotone" dataKey="remaining" stroke="#1E3A5F" strokeWidth={2} dot={{ fill: '#E8A93C', r: 4 }} activeDot={{ r: 6 }} />
-                        </LineChart>
-                      </ResponsiveContainer>
+                      <div className="h-64">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={patientProgressData}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F0E9DC" />
+                            <XAxis dataKey="session" stroke="#6B7280" />
+                            <YAxis stroke="#6B7280" />
+                            <Tooltip contentStyle={{ backgroundColor: '#FAF5EE', border: '1px solid #F0E9DC', borderRadius: '8px' }} />
+                            <Line type="monotone" dataKey="remaining" stroke="#1E3A5F" strokeWidth={2} dot={{ fill: '#E8A93C', r: 4 }} activeDot={{ r: 6 }} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
                     </CardContent>
                   </Card>
                 )}
@@ -3199,20 +3194,24 @@ export default function Dashboard() {
             )}
 
             {/* Clinic Overview */}
-            <Card className="border-[#F0E9DC] shadow-md">
+            <Card className="border-[#F0E9DC] shadow-sm rounded-xl">
               <CardHeader>
-                <CardTitle className="text-[#1E3A5F]">Clinic Overview</CardTitle>
-                <CardDescription>Sessions for active patient</CardDescription>
+                <CardTitle className="text-lg font-serif font-bold text-brand-blue">Clinic Overview</CardTitle>
+                <CardDescription className="text-sm text-gray-600 mt-1">Sessions for active patient</CardDescription>
               </CardHeader>
               <CardContent>
-                <ResponsiveContainer width="100%" height={250}>
-                  <PieChart>
-                    <Pie data={clinicStatusData} cx="50%" cy="50%" labelLine={false} label={({ name, value }) => `${name}: ${value}`} outerRadius={80} dataKey="value">
-                      {clinicStatusData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
-                    </Pie>
-                    <Tooltip contentStyle={{ backgroundColor: '#FAF5EE', border: '1px solid #F0E9DC', borderRadius: '8px' }} />
-                  </PieChart>
-                </ResponsiveContainer>
+                <div className="flex items-center justify-center gap-6">
+                  <div className="max-w-[240px] w-full mx-auto">
+                    <ResponsiveContainer width="100%" height={220}>
+                      <PieChart>
+                        <Pie data={clinicStatusData} cx="50%" cy="50%" labelLine={false} label={({ name, value }) => `${name}: ${value}`} outerRadius={70} dataKey="value">
+                          {clinicStatusData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+                        </Pie>
+                        <Tooltip contentStyle={{ backgroundColor: '#FAF5EE', border: '1px solid #F0E9DC', borderRadius: '8px' }} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           </div>
