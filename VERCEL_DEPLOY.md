@@ -68,10 +68,24 @@ In the Vercel project settings under **Settings → Environment Variables**, add
 
 | Variable | Notes |
 |---|---|
-| `BUILT_IN_FORGE_API_URL` | Only needed if using LLM, image generation, or storage features |
+| `BUILT_IN_FORGE_API_URL` | Only needed for the unused Manus storage-proxy feature |
 | `BUILT_IN_FORGE_API_KEY` | Server-side Manus API key |
 | `VITE_FRONTEND_FORGE_API_KEY` | Frontend Manus API key |
 | `VITE_FRONTEND_FORGE_API_URL` | Frontend Manus API URL |
+
+### Required — AI claim extraction (PDF upload)
+
+The claim-extraction pipeline (`/api/claims/upload-extract`) talks to an AI provider through a single abstraction (`server/_core/llm.ts`). Provider is chosen entirely by `AI_PROVIDER` — no code changes needed to swap.
+
+| Variable | Value | Notes |
+|---|---|---|
+| `AI_PROVIDER` | `anthropic` | Default. Set to `openrouter` to switch providers instead. |
+| `ANTHROPIC_API_KEY` | `sk-ant-...` | Required when `AI_PROVIDER=anthropic`. Get one at [console.anthropic.com](https://console.anthropic.com/settings/keys). |
+| `ANTHROPIC_MODEL` | `claude-sonnet-5` (default) | Optional override. Must be a PDF/vision-capable Claude model. |
+| `OPENROUTER_API_KEY` | `sk-or-...` | Only required when `AI_PROVIDER=openrouter`. Get one at [openrouter.ai/keys](https://openrouter.ai/keys). |
+| `OPENROUTER_MODEL` | `anthropic/claude-3.5-sonnet` (default) | Optional override — any OpenRouter-hosted model, e.g. `google/gemini-2.0-flash-001`. |
+
+> As of this migration, OpenAI is no longer used anywhere in this project. `OPENAI_API_KEY`/`OPENAI_MODEL`/`BUILT_IN_FORGE_API_URL` pointed at `api.openai.com` can be removed from Vercel if still present from an earlier deploy.
 
 ---
 

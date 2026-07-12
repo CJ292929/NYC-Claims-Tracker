@@ -18,7 +18,7 @@ import { join } from 'path';
 import { invokeLLM } from './_core/llm';
 import { ENV } from './_core/env';
 import { tryTemplateExtraction, parseCMS1500 } from './insuranceTemplates';
-import { extractClaimsWithOpenAI, detectInsuranceType, type ExtractionSource } from './openaiExtractor';
+import { extractClaimsWithAI, detectInsuranceType, type ExtractionSource } from './aiClaimExtractor';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -157,7 +157,7 @@ ${trimmedText}
 Return JSON object with "claims" array:`;
 
   const response = await invokeLLM({
-    model: ENV.openaiModel,
+    model: ENV.aiModel,
     messages: [
       { role: 'system', content: 'You are a medical billing data extraction assistant. Always respond with valid JSON only.' },
       { role: 'user', content: prompt },
@@ -220,6 +220,8 @@ export function registerClaimUploadRoute(app: Express) {
         const name = originalname.toLowerCase();
         let extractedText = '';
 
+        console.log(`[ClaimUpload] Stage 1/7 — PDF uploaded: "${originalname}" (${(buffer.length / 1024).toFixed(1)} KB, ${mimetype})`);
+
         const isXlsx =
           name.endsWith('.xlsx') ||
           name.endsWith('.xls') ||
@@ -265,21 +267,23 @@ export function registerClaimUploadRoute(app: Express) {
           return;
         }
 
+        console.log(`[ClaimUpload] Stage 2/7 — OCR/text extraction completed: ${extractedText.trim() ? `${extractedText.length} chars` : 'no text extracted, will rely on AI vision fallback'}`);
+
         // Determine upload type from form field (reimbursement | cms1500)
         let uploadType: string = (req.body?.uploadType as string) || 'reimbursement';
 
-        // Optionally detect document type using OpenAI if not explicitly specified
+        // Optionally auto-detect document type via AI if not explicitly specified
         if (!req.body?.uploadType && !isXlsx && !isCsv && extractedText.trim()) {
           try {
             const detection = await detectInsuranceType(extractedText);
-            console.log(`[ClaimUpload] Detected: ${detection.insurer} (${detection.documentType}, confidence: ${detection.confidence})`);
+            console.log(`[ClaimUpload] Stage 3/7 — Template/type detection: ${detection.insurer} (${detection.documentType}, confidence: ${detection.confidence})`);
             // Auto-detect CMS1500 with high confidence
             if (detection.confidence > 0.7 && detection.documentType === 'cms1500') {
               uploadType = 'cms1500';
               console.log('[ClaimUpload] Auto-detected CMS1500 format');
             }
           } catch (error) {
-            console.error('[ClaimUpload] Document type detection failed:', error);
+            console.error('[ClaimUpload] Document type detection failed (non-fatal, continuing with default uploadType):', error);
           }
         }
 
@@ -294,10 +298,12 @@ export function registerClaimUploadRoute(app: Express) {
             }
           }
           // CMS1500 parser: extract Date of Service, Place of Service, CPT, Modifier, Units, Diagnosis
+          console.log('[ClaimUpload] Stage 4/7 — Regex template parsing (CMS1500)...');
           const patientGroups = parseCMS1500(cms1500Text);
           const flatClaims = patientGroups.flatMap(g => g.claims);
 
           if (flatClaims.length > 0) {
+            console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${flatClaims.length} claim(s) via CMS1500 template parser`);
             res.json({
               claims: flatClaims,
               patientGroups: patientGroups.length > 0 ? patientGroups : null,
@@ -313,29 +319,33 @@ export function registerClaimUploadRoute(app: Express) {
           // installed in this environment (serverless platforms like Vercel
           // don't ship it). Use whatever text we do have; if none at all
           // (pdftotext AND pdfjs both failed), send the PDF directly instead.
+          // Never let an AI-provider failure crash the request — log and fall
+          // through to the CMS1500 template result (empty) below instead.
           try {
             const cms1500Source: ExtractionSource = (cms1500Text || extractedText).trim()
               ? { kind: 'text', text: cms1500Text || extractedText }
               : { kind: 'pdf', buffer, filename: originalname };
-            console.log(`[ClaimUpload] CMS1500 regex parser found no claims, trying OpenAI extraction (${cms1500Source.kind})...`);
-            const openaiResult = await extractClaimsWithOpenAI(cms1500Source, 'cms1500');
-            if (openaiResult.claims.length > 0) {
-              const aiPatientGroups = openaiResult.patientName
-                ? [{ patientName: openaiResult.patientName, claims: openaiResult.claims }]
+            console.log(`[ClaimUpload] Stage 5/7 — AI text parsing (CMS1500 regex parser found no claims, trying AI via ${cms1500Source.kind}${cms1500Source.kind === 'pdf' ? ' — Stage 5b/7 vision fallback' : ''})...`);
+            const aiResult = await extractClaimsWithAI(cms1500Source, 'cms1500');
+            if (aiResult.claims.length > 0) {
+              console.log(`[ClaimUpload] Stage 6/7 — JSON validation passed: ${aiResult.claims.length} claim(s)`);
+              const aiPatientGroups = aiResult.patientName
+                ? [{ patientName: aiResult.patientName, claims: aiResult.claims }]
                 : null;
+              console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${aiResult.claims.length} claim(s) via AI (CMS1500)`);
               res.json({
-                claims: openaiResult.claims,
+                claims: aiResult.claims,
                 patientGroups: aiPatientGroups,
                 extractedLength: extractedText.length,
-                templateUsed: `OpenAI (CMS1500)`,
+                templateUsed: `AI (CMS1500)`,
                 uploadType: 'cms1500',
-                confidence: openaiResult.confidence,
-                extractionNotes: openaiResult.extractionNotes,
+                confidence: aiResult.confidence,
+                extractionNotes: aiResult.extractionNotes,
               });
               return;
             }
-          } catch (openaiError) {
-            console.error('[ClaimUpload] CMS1500 OpenAI extraction failed:', openaiError);
+          } catch (aiError) {
+            console.error('[ClaimUpload] CMS1500 AI extraction failed (continuing with empty template result, request will not crash):', aiError);
           }
 
           res.json({
@@ -362,8 +372,10 @@ export function registerClaimUploadRoute(app: Express) {
             reimbursementText = extractedText;
           }
         }
+        console.log('[ClaimUpload] Stage 4/7 — Template detection (reimbursement)...');
         const templateResult = tryTemplateExtraction(reimbursementText, originalname);
         if (templateResult && templateResult.claims.length > 0) {
+          console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${templateResult.claims.length} claim(s) via template "${templateResult.templateName}"`);
           res.json({
             claims: templateResult.claims,
             patientGroups: templateResult.patientGroups ?? null,
@@ -374,51 +386,56 @@ export function registerClaimUploadRoute(app: Express) {
           return;
         }
 
-        // Step 2: Fall back to OpenAI extraction for unrecognized formats.
-        // Use whatever text we have; if none at all (pdftotext AND pdfjs
-        // both failed to extract anything), send the PDF directly instead.
+        // Step 2: Fall back to AI extraction for unrecognized formats. Use
+        // whatever text we have; if none at all (pdftotext AND pdfjs both
+        // failed to extract anything), send the PDF directly instead (vision
+        // fallback). Never let an AI-provider failure crash the request —
+        // log and fall through to Step 3 instead.
         try {
           const reimbursementSource: ExtractionSource = reimbursementText.trim()
             ? { kind: 'text', text: reimbursementText }
             : { kind: 'pdf', buffer, filename: originalname };
-          console.log(`[ClaimUpload] No template matched, using OpenAI extraction (${reimbursementSource.kind})...`);
-          const openaiResult = await extractClaimsWithOpenAI(reimbursementSource, 'reimbursement');
-          
-          if (openaiResult.claims.length > 0) {
-            console.log(`[ClaimUpload] OpenAI extracted ${openaiResult.claims.length} claims for patient: ${openaiResult.patientName}`);
-            
+          console.log(`[ClaimUpload] Stage 5/7 — AI text parsing (no template matched, using AI via ${reimbursementSource.kind}${reimbursementSource.kind === 'pdf' ? ' — Stage 5b/7 vision fallback' : ''})...`);
+          const aiResult = await extractClaimsWithAI(reimbursementSource, 'reimbursement');
+
+          if (aiResult.claims.length > 0) {
+            console.log(`[ClaimUpload] Stage 6/7 — JSON validation passed: ${aiResult.claims.length} claim(s) for patient: ${aiResult.patientName}`);
+
             // If all claims are for the same patient, create patientGroups for single-patient mode
             let patientGroups = null;
-            if (openaiResult.patientName) {
+            if (aiResult.patientName) {
               patientGroups = [{
-                patientName: openaiResult.patientName,
-                claims: openaiResult.claims
+                patientName: aiResult.patientName,
+                claims: aiResult.claims
               }];
             }
-            
+
+            console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${aiResult.claims.length} claim(s) via AI (${aiResult.detectedInsurer || 'Unknown'})`);
             res.json({
-              claims: openaiResult.claims,
+              claims: aiResult.claims,
               patientGroups: patientGroups,
               extractedLength: extractedText.length,
-              templateUsed: `OpenAI (${openaiResult.detectedInsurer || 'Unknown'})`,
+              templateUsed: `AI (${aiResult.detectedInsurer || 'Unknown'})`,
               uploadType: 'reimbursement',
-              confidence: openaiResult.confidence,
-              extractionNotes: openaiResult.extractionNotes,
+              confidence: aiResult.confidence,
+              extractionNotes: aiResult.extractionNotes,
             });
             return;
           }
-        } catch (openaiError) {
-          console.error('[ClaimUpload] OpenAI extraction failed:', openaiError);
+        } catch (aiError) {
+          console.error('[ClaimUpload] AI extraction failed (continuing to legacy fallback, request will not crash):', aiError);
         }
 
         // Step 3: Final fallback to legacy AI extraction — needs actual text,
         // unlike the vision-capable step above, so skip it when we have none.
         if (!extractedText.trim()) {
+          console.error('[ClaimUpload] No text and AI extraction failed — returning controlled 422 instead of crashing.');
           res.status(422).json({ error: 'Could not extract any claims from this file.' });
           return;
         }
-        console.log('[ClaimUpload] OpenAI failed, using legacy AI extraction...');
+        console.log('[ClaimUpload] Stage 5/7 — AI text parsing failed upstream, using legacy AI extraction...');
         const claims = await mapToClaimColumns(extractedText);
+        console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${claims.length} claim(s) via legacy AI extraction`);
         res.json({ claims, extractedLength: extractedText.length, templateUsed: 'AI Extraction (Legacy)', uploadType: 'reimbursement' });
       } catch (err: any) {
         console.error('[ClaimUpload] Error:', err);

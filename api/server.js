@@ -48,12 +48,22 @@ var init_env = __esm({
       oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
       ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
       isProduction: process.env.NODE_ENV === "production",
+      // Manus's own built-in proxy — used only by unrelated platform features
+      // (the file storage proxy). Not part of the AI claim-extraction pipeline.
       forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
       forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
-      // Manus's own proxy (the default forgeApiUrl) tolerates an omitted model
-      // and picks one server-side; a real OpenAI-compatible endpoint requires
-      // one explicitly. Only needed when forgeApiUrl is overridden.
-      openaiModel: process.env.OPENAI_MODEL ?? "gpt-4o-mini"
+      // AI provider for claim extraction (server/_core/llm.ts). Swap providers
+      // by changing AI_PROVIDER alone — no code changes needed elsewhere.
+      // "anthropic" (native Claude Messages API, default) or "openrouter"
+      // (OpenAI-compatible proxy that can reach Claude, Gemini, etc.).
+      aiProvider: (process.env.AI_PROVIDER ?? "anthropic").trim().toLowerCase(),
+      anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
+      anthropicModel: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5",
+      openrouterApiKey: process.env.OPENROUTER_API_KEY ?? "",
+      openrouterModel: process.env.OPENROUTER_MODEL ?? "anthropic/claude-3.5-sonnet",
+      get aiModel() {
+        return ENV.aiProvider === "openrouter" ? ENV.openrouterModel : ENV.anthropicModel;
+      }
     };
   }
 });
@@ -1157,12 +1167,6 @@ var normalizeToolChoice = (toolChoice, tools) => {
   }
   return toolChoice;
 };
-var resolveApiUrl = () => ENV.forgeApiUrl && ENV.forgeApiUrl.trim().length > 0 ? `${ENV.forgeApiUrl.replace(/\/$/, "")}/v1/chat/completions` : "https://forge.manus.im/v1/chat/completions";
-var assertApiKey = () => {
-  if (!ENV.forgeApiKey) {
-    throw new Error("OPENAI_API_KEY is not configured");
-  }
-};
 var normalizeResponseFormat = ({
   responseFormat,
   response_format,
@@ -1224,22 +1228,211 @@ var fetchWithBackoff = async (url, init) => {
       } catch {
       }
       console.warn(
-        `LLM request retry ${attempt + 1}/${RETRY_MAX_RETRIES} after status ${response.status}`
+        `[LLM:${ENV.aiProvider}] retry ${attempt + 1}/${RETRY_MAX_RETRIES} after status ${response.status}`
       );
       await sleep(computeBackoffDelay(attempt, retryAfterMs));
     } catch (error) {
       lastError = error;
       if (attempt === RETRY_MAX_RETRIES) throw error;
       console.warn(
-        `LLM request retry ${attempt + 1}/${RETRY_MAX_RETRIES} after network error`
+        `[LLM:${ENV.aiProvider}] retry ${attempt + 1}/${RETRY_MAX_RETRIES} after network error`
       );
       await sleep(computeBackoffDelay(attempt));
     }
   }
   throw lastError instanceof Error ? lastError : new Error("LLM request failed after exhausting retries");
 };
-async function invokeLLM(params) {
-  assertApiKey();
+var REQUEST_TIMEOUT_MS = 9e4;
+var fetchWithTimeout = async (url, init) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetchWithBackoff(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`LLM request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+var ANTHROPIC_API_VERSION = "2023-06-01";
+var ANTHROPIC_PDF_BETA = "pdfs-2024-09-25";
+var ANTHROPIC_DEFAULT_MAX_TOKENS = 8192;
+var ANTHROPIC_TOOL_NAME = "emit_structured_output";
+var resolveAnthropicUrl = () => "https://api.anthropic.com/v1/messages";
+var dataUriToBase64 = (dataUri) => {
+  const commaIdx = dataUri.indexOf(",");
+  return commaIdx === -1 ? dataUri : dataUri.slice(commaIdx + 1);
+};
+var toAnthropicContentBlock = (part) => {
+  if (part.type === "text") {
+    return { type: "text", text: part.text };
+  }
+  if (part.type === "image_url") {
+    return { type: "image", source: { type: "url", url: part.image_url.url } };
+  }
+  if (part.type === "file") {
+    return {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "application/pdf",
+        data: dataUriToBase64(part.file.file_data)
+      },
+      title: part.file.filename
+    };
+  }
+  if (part.type === "file_url") {
+    if (part.file_url.mime_type === "application/pdf") {
+      return { type: "document", source: { type: "url", url: part.file_url.url } };
+    }
+    return { type: "image", source: { type: "url", url: part.file_url.url } };
+  }
+  throw new Error("Unsupported message content part for Anthropic provider");
+};
+var buildAnthropicRequest = (messages) => {
+  let systemPrompt = "";
+  const anthropicMessages = [];
+  for (const message of messages) {
+    if (message.role === "system") {
+      const text = ensureArray(message.content).map((part) => typeof part === "string" ? part : part.type === "text" ? part.text : "").filter(Boolean).join("\n\n");
+      systemPrompt = systemPrompt ? `${systemPrompt}
+
+${text}` : text;
+      continue;
+    }
+    if (message.role === "tool" || message.role === "function") {
+      const text = ensureArray(message.content).map((part) => typeof part === "string" ? part : JSON.stringify(part)).join("\n");
+      anthropicMessages.push({
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: message.tool_call_id ?? "", content: text }]
+      });
+      continue;
+    }
+    const role = message.role === "assistant" ? "assistant" : "user";
+    const parts = ensureArray(message.content);
+    if (parts.length === 1 && typeof parts[0] === "string") {
+      anthropicMessages.push({ role, content: parts[0] });
+      continue;
+    }
+    const blocks = parts.map(
+      (part) => typeof part === "string" ? { type: "text", text: part } : toAnthropicContentBlock(part)
+    );
+    anthropicMessages.push({ role, content: blocks });
+  }
+  return { systemPrompt, anthropicMessages };
+};
+async function invokeAnthropic(params) {
+  if (!ENV.anthropicApiKey) {
+    throw new Error("ANTHROPIC_API_KEY is not configured");
+  }
+  const {
+    messages,
+    model,
+    maxTokens,
+    max_tokens,
+    responseFormat,
+    response_format,
+    outputSchema,
+    output_schema,
+    tools,
+    toolChoice,
+    tool_choice
+  } = params;
+  const { systemPrompt, anthropicMessages } = buildAnthropicRequest(messages);
+  const normalizedResponseFormat = normalizeResponseFormat({
+    responseFormat,
+    response_format,
+    outputSchema,
+    output_schema
+  });
+  const payload = {
+    model: model || ENV.anthropicModel,
+    max_tokens: max_tokens ?? maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
+    messages: anthropicMessages
+  };
+  if (systemPrompt) payload.system = systemPrompt;
+  let forcedToolName;
+  if (normalizedResponseFormat?.type === "json_schema") {
+    forcedToolName = ANTHROPIC_TOOL_NAME;
+    payload.tools = [
+      {
+        name: ANTHROPIC_TOOL_NAME,
+        description: `Emit the extraction result matching the "${normalizedResponseFormat.json_schema.name}" schema.`,
+        input_schema: normalizedResponseFormat.json_schema.schema
+      }
+    ];
+    payload.tool_choice = { type: "tool", name: ANTHROPIC_TOOL_NAME };
+  } else if (tools && tools.length > 0) {
+    payload.tools = tools.map((t2) => ({
+      name: t2.function.name,
+      description: t2.function.description,
+      input_schema: t2.function.parameters ?? { type: "object", properties: {} }
+    }));
+    const normalizedChoice = normalizeToolChoice(toolChoice || tool_choice, tools);
+    if (normalizedChoice && normalizedChoice !== "none" && normalizedChoice !== "auto") {
+      payload.tool_choice = { type: "tool", name: normalizedChoice.function.name };
+    } else if (normalizedChoice === "auto") {
+      payload.tool_choice = { type: "auto" };
+    }
+  }
+  const usesPdf = anthropicMessages.some(
+    (m) => Array.isArray(m.content) && m.content.some((c) => c.type === "document")
+  );
+  const response = await fetchWithTimeout(resolveAnthropicUrl(), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": ENV.anthropicApiKey,
+      "anthropic-version": ANTHROPIC_API_VERSION,
+      ...usesPdf ? { "anthropic-beta": ANTHROPIC_PDF_BETA } : {}
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`LLM invoke failed: ${response.status} ${response.statusText} \u2013 ${errorText}`);
+  }
+  const data = await response.json();
+  const blocks = Array.isArray(data.content) ? data.content : [];
+  let content = "";
+  const toolUseBlock = blocks.find((b) => b.type === "tool_use" && (!forcedToolName || b.name === forcedToolName));
+  if (toolUseBlock) {
+    content = JSON.stringify(toolUseBlock.input ?? {});
+  } else {
+    content = blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n");
+  }
+  const finishReasonMap = {
+    end_turn: "stop",
+    stop_sequence: "stop",
+    max_tokens: "length",
+    tool_use: "tool_calls"
+  };
+  return {
+    id: data.id ?? `anthropic_${Date.now()}`,
+    created: Math.floor(Date.now() / 1e3),
+    model: data.model ?? payload.model,
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content },
+        finish_reason: finishReasonMap[data.stop_reason] ?? data.stop_reason ?? null
+      }
+    ],
+    usage: data.usage ? {
+      prompt_tokens: data.usage.input_tokens ?? 0,
+      completion_tokens: data.usage.output_tokens ?? 0,
+      total_tokens: (data.usage.input_tokens ?? 0) + (data.usage.output_tokens ?? 0)
+    } : void 0
+  };
+}
+var resolveOpenRouterUrl = () => "https://openrouter.ai/api/v1/chat/completions";
+async function invokeOpenRouter(params) {
+  if (!ENV.openrouterApiKey) {
+    throw new Error("OPENROUTER_API_KEY is not configured");
+  }
   const {
     messages,
     tools,
@@ -1256,18 +1449,13 @@ async function invokeLLM(params) {
     max_tokens
   } = params;
   const payload = {
+    model: model || ENV.openrouterModel,
     messages: messages.map(normalizeMessage)
   };
-  if (model) {
-    payload.model = model;
-  }
   if (tools && tools.length > 0) {
     payload.tools = tools;
   }
-  const normalizedToolChoice = normalizeToolChoice(
-    toolChoice || tool_choice,
-    tools
-  );
+  const normalizedToolChoice = normalizeToolChoice(toolChoice || tool_choice, tools);
   if (normalizedToolChoice) {
     payload.tool_choice = normalizedToolChoice;
   }
@@ -1275,12 +1463,8 @@ async function invokeLLM(params) {
   if (typeof resolvedMaxTokens === "number") {
     payload.max_tokens = resolvedMaxTokens;
   }
-  if (thinking) {
-    payload.thinking = thinking;
-  }
-  if (reasoning) {
-    payload.reasoning = reasoning;
-  }
+  if (thinking) payload.thinking = thinking;
+  if (reasoning) payload.reasoning = reasoning;
   const normalizedResponseFormat = normalizeResponseFormat({
     responseFormat,
     response_format,
@@ -1290,21 +1474,36 @@ async function invokeLLM(params) {
   if (normalizedResponseFormat) {
     payload.response_format = normalizedResponseFormat;
   }
-  const response = await fetchWithBackoff(resolveApiUrl(), {
+  const response = await fetchWithTimeout(resolveOpenRouterUrl(), {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${ENV.forgeApiKey}`
+      authorization: `Bearer ${ENV.openrouterApiKey}`,
+      "HTTP-Referer": "https://nyc-dashboard-eight.vercel.app",
+      "X-Title": "NYC Home Rehab Claims Dashboard"
     },
     body: JSON.stringify(payload)
   });
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(
-      `LLM invoke failed: ${response.status} ${response.statusText} \u2013 ${errorText}`
-    );
+    throw new Error(`LLM invoke failed: ${response.status} ${response.statusText} \u2013 ${errorText}`);
   }
   return await response.json();
+}
+async function invokeLLM(params) {
+  const provider = ENV.aiProvider;
+  try {
+    if (provider === "openrouter") {
+      return await invokeOpenRouter(params);
+    }
+    if (provider === "anthropic") {
+      return await invokeAnthropic(params);
+    }
+    throw new Error(`Unsupported AI_PROVIDER "${provider}". Use "anthropic" or "openrouter".`);
+  } catch (error) {
+    console.error(`[LLM:${provider}] invoke failed:`, error instanceof Error ? error.message : error);
+    throw error;
+  }
 }
 
 // server/claimUpload.ts
@@ -1641,9 +1840,30 @@ function tryTemplateExtraction(text, filename) {
   return null;
 }
 
-// server/openaiExtractor.ts
+// server/aiClaimExtractor.ts
 init_env();
-async function extractClaimsWithOpenAI(source, uploadType) {
+function recoverJson(raw) {
+  const attempts = [
+    raw,
+    raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "")
+  ];
+  for (const attempt of attempts) {
+    try {
+      return JSON.parse(attempt.trim());
+    } catch {
+    }
+  }
+  const objectMatch = raw.match(/\{[\s\S]*\}/);
+  if (objectMatch) {
+    try {
+      return JSON.parse(objectMatch[0]);
+    } catch {
+    }
+  }
+  return null;
+}
+async function extractClaimsWithAI(source, uploadType) {
+  console.log(`[AIExtractor] Starting ${uploadType} extraction (source: ${source.kind}, provider: ${ENV.aiProvider})`);
   const systemPrompt = uploadType === "reimbursement" ? `You are a medical claims data extraction specialist. Extract all Explanation of Benefits (EOB) claim information accurately from the provided document text.
 
 *** CRITICAL: You MUST extract the PATIENT NAME for EACH claim. This is required for matching against the clinic's patient database. ***
@@ -1697,7 +1917,7 @@ ${source.text}` : [
   ];
   try {
     const response = await invokeLLM({
-      model: ENV.openaiModel,
+      model: ENV.aiModel,
       messages: [
         {
           role: "system",
@@ -1753,12 +1973,17 @@ ${source.text}` : [
         }
       }
     });
-    const content = response.choices[0].message.content;
+    const content = response.choices[0]?.message?.content;
     if (!content || typeof content !== "string") {
-      throw new Error("No response from OpenAI");
+      throw new Error("No response from AI provider");
     }
-    const parsed = JSON.parse(content);
-    const normalizedClaims = (parsed.claims || []).map(
+    const parsed = recoverJson(content);
+    if (!parsed) {
+      console.error("[AIExtractor] Could not parse AI response as JSON:", content.slice(0, 500));
+      throw new Error("AI provider returned malformed JSON that could not be recovered");
+    }
+    const claimsArray = Array.isArray(parsed.claims) ? parsed.claims : [];
+    const normalizedClaims = claimsArray.map(
       (claim) => ({
         dateOfService: claim.dateOfService || null,
         cptCodes: claim.cptCodes || null,
@@ -1787,9 +2012,10 @@ ${source.text}` : [
       })
     );
     const uniquePatientNames = new Set(
-      parsed.claims.map((c) => c.patientName?.toUpperCase().trim())
+      claimsArray.map((c) => c.patientName?.toUpperCase().trim())
     );
     const patientName = uniquePatientNames.size === 1 ? Array.from(uniquePatientNames)[0] : void 0;
+    console.log(`[AIExtractor] Extracted ${normalizedClaims.length} claim(s), confidence ${parsed.confidence ?? "n/a"}`);
     return {
       claims: normalizedClaims,
       confidence: parsed.confidence || 0.8,
@@ -1798,16 +2024,16 @@ ${source.text}` : [
       patientName
     };
   } catch (error) {
-    console.error("[OpenAI Extraction Error]", error);
+    console.error("[AIExtractor] Extraction error:", error);
     throw new Error(
-      `Failed to extract claims with OpenAI: ${error instanceof Error ? error.message : String(error)}`
+      `Failed to extract claims with AI (${ENV.aiProvider}): ${error instanceof Error ? error.message : String(error)}`
     );
   }
 }
 async function detectInsuranceType(pdfText) {
   try {
     const response = await invokeLLM({
-      model: ENV.openaiModel,
+      model: ENV.aiModel,
       messages: [
         {
           role: "system",
@@ -1847,13 +2073,17 @@ ${pdfText.substring(0, 2e3)}`
         }
       }
     });
-    const content = response.choices[0].message.content;
+    const content = response.choices[0]?.message?.content;
     if (!content || typeof content !== "string") {
-      throw new Error("No response from OpenAI");
+      throw new Error("No response from AI provider");
     }
-    return JSON.parse(content);
+    const parsed = recoverJson(content);
+    if (!parsed) {
+      throw new Error("AI provider returned malformed JSON for insurance detection");
+    }
+    return parsed;
   } catch (error) {
-    console.error("[Insurance Detection Error]", error);
+    console.error("[AIExtractor] Insurance detection error:", error);
     return {
       insurer: "Unknown",
       documentType: "other",
@@ -1982,7 +2212,7 @@ ${trimmedText}
 
 Return JSON object with "claims" array:`;
   const response = await invokeLLM({
-    model: ENV.openaiModel,
+    model: ENV.aiModel,
     messages: [
       { role: "system", content: "You are a medical billing data extraction assistant. Always respond with valid JSON only." },
       { role: "user", content: prompt }
@@ -2035,6 +2265,7 @@ function registerClaimUploadRoute(app2) {
         const { buffer, mimetype, originalname } = req.file;
         const name = originalname.toLowerCase();
         let extractedText = "";
+        console.log(`[ClaimUpload] Stage 1/7 \u2014 PDF uploaded: "${originalname}" (${(buffer.length / 1024).toFixed(1)} KB, ${mimetype})`);
         const isXlsx = name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".xlsm") || mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || mimetype === "application/vnd.ms-excel.sheet.macroEnabled.12";
         const isCsv = !isXlsx && (mimetype === "text/csv" || name.endsWith(".csv"));
         if (isXlsx) {
@@ -2058,17 +2289,18 @@ function registerClaimUploadRoute(app2) {
           res.status(422).json({ error: "Could not extract any data from the file. Please ensure it is a valid CSV or Excel file." });
           return;
         }
+        console.log(`[ClaimUpload] Stage 2/7 \u2014 OCR/text extraction completed: ${extractedText.trim() ? `${extractedText.length} chars` : "no text extracted, will rely on AI vision fallback"}`);
         let uploadType = req.body?.uploadType || "reimbursement";
         if (!req.body?.uploadType && !isXlsx && !isCsv && extractedText.trim()) {
           try {
             const detection = await detectInsuranceType(extractedText);
-            console.log(`[ClaimUpload] Detected: ${detection.insurer} (${detection.documentType}, confidence: ${detection.confidence})`);
+            console.log(`[ClaimUpload] Stage 3/7 \u2014 Template/type detection: ${detection.insurer} (${detection.documentType}, confidence: ${detection.confidence})`);
             if (detection.confidence > 0.7 && detection.documentType === "cms1500") {
               uploadType = "cms1500";
               console.log("[ClaimUpload] Auto-detected CMS1500 format");
             }
           } catch (error) {
-            console.error("[ClaimUpload] Document type detection failed:", error);
+            console.error("[ClaimUpload] Document type detection failed (non-fatal, continuing with default uploadType):", error);
           }
         }
         if (uploadType === "cms1500") {
@@ -2079,9 +2311,11 @@ function registerClaimUploadRoute(app2) {
             } catch {
             }
           }
+          console.log("[ClaimUpload] Stage 4/7 \u2014 Regex template parsing (CMS1500)...");
           const patientGroups = parseCMS1500(cms1500Text);
           const flatClaims = patientGroups.flatMap((g) => g.claims);
           if (flatClaims.length > 0) {
+            console.log(`[ClaimUpload] Stage 7/7 \u2014 Database save pending: ${flatClaims.length} claim(s) via CMS1500 template parser`);
             res.json({
               claims: flatClaims,
               patientGroups: patientGroups.length > 0 ? patientGroups : null,
@@ -2093,23 +2327,25 @@ function registerClaimUploadRoute(app2) {
           }
           try {
             const cms1500Source = (cms1500Text || extractedText).trim() ? { kind: "text", text: cms1500Text || extractedText } : { kind: "pdf", buffer, filename: originalname };
-            console.log(`[ClaimUpload] CMS1500 regex parser found no claims, trying OpenAI extraction (${cms1500Source.kind})...`);
-            const openaiResult = await extractClaimsWithOpenAI(cms1500Source, "cms1500");
-            if (openaiResult.claims.length > 0) {
-              const aiPatientGroups = openaiResult.patientName ? [{ patientName: openaiResult.patientName, claims: openaiResult.claims }] : null;
+            console.log(`[ClaimUpload] Stage 5/7 \u2014 AI text parsing (CMS1500 regex parser found no claims, trying AI via ${cms1500Source.kind}${cms1500Source.kind === "pdf" ? " \u2014 Stage 5b/7 vision fallback" : ""})...`);
+            const aiResult = await extractClaimsWithAI(cms1500Source, "cms1500");
+            if (aiResult.claims.length > 0) {
+              console.log(`[ClaimUpload] Stage 6/7 \u2014 JSON validation passed: ${aiResult.claims.length} claim(s)`);
+              const aiPatientGroups = aiResult.patientName ? [{ patientName: aiResult.patientName, claims: aiResult.claims }] : null;
+              console.log(`[ClaimUpload] Stage 7/7 \u2014 Database save pending: ${aiResult.claims.length} claim(s) via AI (CMS1500)`);
               res.json({
-                claims: openaiResult.claims,
+                claims: aiResult.claims,
                 patientGroups: aiPatientGroups,
                 extractedLength: extractedText.length,
-                templateUsed: `OpenAI (CMS1500)`,
+                templateUsed: `AI (CMS1500)`,
                 uploadType: "cms1500",
-                confidence: openaiResult.confidence,
-                extractionNotes: openaiResult.extractionNotes
+                confidence: aiResult.confidence,
+                extractionNotes: aiResult.extractionNotes
               });
               return;
             }
-          } catch (openaiError) {
-            console.error("[ClaimUpload] CMS1500 OpenAI extraction failed:", openaiError);
+          } catch (aiError) {
+            console.error("[ClaimUpload] CMS1500 AI extraction failed (continuing with empty template result, request will not crash):", aiError);
           }
           res.json({
             claims: flatClaims,
@@ -2128,8 +2364,10 @@ function registerClaimUploadRoute(app2) {
             reimbursementText = extractedText;
           }
         }
+        console.log("[ClaimUpload] Stage 4/7 \u2014 Template detection (reimbursement)...");
         const templateResult = tryTemplateExtraction(reimbursementText, originalname);
         if (templateResult && templateResult.claims.length > 0) {
+          console.log(`[ClaimUpload] Stage 7/7 \u2014 Database save pending: ${templateResult.claims.length} claim(s) via template "${templateResult.templateName}"`);
           res.json({
             claims: templateResult.claims,
             patientGroups: templateResult.patientGroups ?? null,
@@ -2141,37 +2379,40 @@ function registerClaimUploadRoute(app2) {
         }
         try {
           const reimbursementSource = reimbursementText.trim() ? { kind: "text", text: reimbursementText } : { kind: "pdf", buffer, filename: originalname };
-          console.log(`[ClaimUpload] No template matched, using OpenAI extraction (${reimbursementSource.kind})...`);
-          const openaiResult = await extractClaimsWithOpenAI(reimbursementSource, "reimbursement");
-          if (openaiResult.claims.length > 0) {
-            console.log(`[ClaimUpload] OpenAI extracted ${openaiResult.claims.length} claims for patient: ${openaiResult.patientName}`);
+          console.log(`[ClaimUpload] Stage 5/7 \u2014 AI text parsing (no template matched, using AI via ${reimbursementSource.kind}${reimbursementSource.kind === "pdf" ? " \u2014 Stage 5b/7 vision fallback" : ""})...`);
+          const aiResult = await extractClaimsWithAI(reimbursementSource, "reimbursement");
+          if (aiResult.claims.length > 0) {
+            console.log(`[ClaimUpload] Stage 6/7 \u2014 JSON validation passed: ${aiResult.claims.length} claim(s) for patient: ${aiResult.patientName}`);
             let patientGroups = null;
-            if (openaiResult.patientName) {
+            if (aiResult.patientName) {
               patientGroups = [{
-                patientName: openaiResult.patientName,
-                claims: openaiResult.claims
+                patientName: aiResult.patientName,
+                claims: aiResult.claims
               }];
             }
+            console.log(`[ClaimUpload] Stage 7/7 \u2014 Database save pending: ${aiResult.claims.length} claim(s) via AI (${aiResult.detectedInsurer || "Unknown"})`);
             res.json({
-              claims: openaiResult.claims,
+              claims: aiResult.claims,
               patientGroups,
               extractedLength: extractedText.length,
-              templateUsed: `OpenAI (${openaiResult.detectedInsurer || "Unknown"})`,
+              templateUsed: `AI (${aiResult.detectedInsurer || "Unknown"})`,
               uploadType: "reimbursement",
-              confidence: openaiResult.confidence,
-              extractionNotes: openaiResult.extractionNotes
+              confidence: aiResult.confidence,
+              extractionNotes: aiResult.extractionNotes
             });
             return;
           }
-        } catch (openaiError) {
-          console.error("[ClaimUpload] OpenAI extraction failed:", openaiError);
+        } catch (aiError) {
+          console.error("[ClaimUpload] AI extraction failed (continuing to legacy fallback, request will not crash):", aiError);
         }
         if (!extractedText.trim()) {
+          console.error("[ClaimUpload] No text and AI extraction failed \u2014 returning controlled 422 instead of crashing.");
           res.status(422).json({ error: "Could not extract any claims from this file." });
           return;
         }
-        console.log("[ClaimUpload] OpenAI failed, using legacy AI extraction...");
+        console.log("[ClaimUpload] Stage 5/7 \u2014 AI text parsing failed upstream, using legacy AI extraction...");
         const claims = await mapToClaimColumns(extractedText);
+        console.log(`[ClaimUpload] Stage 7/7 \u2014 Database save pending: ${claims.length} claim(s) via legacy AI extraction`);
         res.json({ claims, extractedLength: extractedText.length, templateUsed: "AI Extraction (Legacy)", uploadType: "reimbursement" });
       } catch (err) {
         console.error("[ClaimUpload] Error:", err);
