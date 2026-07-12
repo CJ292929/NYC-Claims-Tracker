@@ -23,7 +23,19 @@ export type FileContent = {
   };
 };
 
-export type MessageContent = string | TextContent | ImageContent | FileContent;
+/** OpenAI Chat Completions' native PDF file input (base64 data URI) — lets a
+ *  vision-capable model (e.g. gpt-4o-mini) read a PDF directly, with no local
+ *  text extraction needed. Distinct from FileContent above, which targets
+ *  Manus's own proxy format instead. */
+export type PdfFileContent = {
+  type: "file";
+  file: {
+    filename: string;
+    file_data: string; // "data:application/pdf;base64,<...>"
+  };
+};
+
+export type MessageContent = string | TextContent | ImageContent | FileContent | PdfFileContent;
 
 export type Message = {
   role: Role;
@@ -119,7 +131,7 @@ const ensureArray = (
 
 const normalizeContentPart = (
   part: MessageContent
-): TextContent | ImageContent | FileContent => {
+): TextContent | ImageContent | FileContent | PdfFileContent => {
   if (typeof part === "string") {
     return { type: "text", text: part };
   }
@@ -133,6 +145,10 @@ const normalizeContentPart = (
   }
 
   if (part.type === "file_url") {
+    return part;
+  }
+
+  if (part.type === "file") {
     return part;
   }
 

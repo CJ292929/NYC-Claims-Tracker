@@ -10,13 +10,18 @@ export interface OpenAIClaimExtractionResult {
   patientName?: string; // Top-level patient name if all claims are for same patient
 }
 
+/** Where to source the document content from for extraction. */
+export type ExtractionSource =
+  | { kind: "text"; text: string }
+  | { kind: "pdf"; buffer: Buffer; filename: string };
+
 /**
  * Extract claims from PDF text using OpenAI's structured JSON capabilities
  * Handles both Reimbursement (EOB) and CMS1500 upload types
  * CRITICAL: Ensures patient name is extracted for each claim
  */
 export async function extractClaimsWithOpenAI(
-  pdfText: string,
+  source: ExtractionSource,
   uploadType: "reimbursement" | "cms1500"
 ): Promise<OpenAIClaimExtractionResult> {
   const systemPrompt =
@@ -61,10 +66,30 @@ IMPORTANT:
 - Patient name is REQUIRED - never leave it null or empty
 - Return ONLY valid JSON, no markdown or explanations.`;
 
-  const userPrompt =
+  const instruction =
     uploadType === "reimbursement"
-      ? `Extract all EOB claims from this document. IMPORTANT: Make sure to extract the patient name for each claim.\n\n${pdfText}`
-      : `Extract all CMS-1500 claims from this document. IMPORTANT: Make sure to extract the patient name from Box 2 for each claim.\n\n${pdfText}`;
+      ? "Extract all EOB claims from this document. IMPORTANT: Make sure to extract the patient name for each claim."
+      : "Extract all CMS-1500 claims from this document. IMPORTANT: Make sure to extract the patient name from Box 2 for each claim.";
+
+  // Two ways to hand the document to the model:
+  //  - text: pre-extracted text (from pdftotext/pdfjs) — cheaper, works when
+  //    local extraction succeeded.
+  //  - pdf: the raw PDF bytes, read natively by the model's own vision/file
+  //    understanding — used when no local extraction method is available
+  //    (e.g. serverless environments without pdftotext or a canvas backend).
+  const userContent =
+    source.kind === "text"
+      ? `${instruction}\n\n${source.text}`
+      : [
+          { type: "text" as const, text: instruction },
+          {
+            type: "file" as const,
+            file: {
+              filename: source.filename,
+              file_data: `data:application/pdf;base64,${source.buffer.toString("base64")}`,
+            },
+          },
+        ];
 
   try {
     const response = await invokeLLM({
@@ -76,7 +101,7 @@ IMPORTANT:
         },
         {
           role: "user",
-          content: userPrompt,
+          content: userContent,
         },
       ],
       response_format: {
