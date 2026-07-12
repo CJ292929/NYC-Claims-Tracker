@@ -17,8 +17,43 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { invokeLLM } from './_core/llm';
 import { ENV } from './_core/env';
-import { tryTemplateExtraction, parseCMS1500 } from './insuranceTemplates';
+import { tryTemplateExtraction, parseCMS1500, type ExtractedClaim, type PatientClaimGroup } from './insuranceTemplates';
 import { extractClaimsWithAI, detectInsuranceType, type ExtractionSource } from './aiClaimExtractor';
+
+// Fields the regex/template parsers are known to leave null for some document
+// layouts (Meritain EOBs never print these at all; CMS1500's layout-dependent
+// regex can miss them depending on how a given PDF renderer positions text).
+// When any of these are missing after the fast template pass, we run one
+// supplementary AI vision/text pass and use it ONLY to fill the gaps —
+// dollar amounts and claim numbers stay sourced from the regex parser, which
+// is more precise for those than an LLM.
+const FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
+  'placeOfService',
+  'unitsBilled',
+  'diagnosisCodes',
+  'modifier',
+  'claimSubmittedDate',
+];
+
+function hasMissingFields(claims: ExtractedClaim[]): boolean {
+  return claims.some(claim => FIELDS_TO_BACKFILL.some(field => claim[field] === null || claim[field] === undefined));
+}
+
+// Mutates `claims` in place so it stays in sync with any other array (e.g.
+// patientGroups) that references the same claim objects.
+function backfillMissingFields(claims: ExtractedClaim[], aiClaims: ExtractedClaim[]): void {
+  claims.forEach((claim, i) => {
+    const match =
+      aiClaims.find(a => a.cptCodes === claim.cptCodes && a.dateOfService === claim.dateOfService) ??
+      aiClaims[i];
+    if (!match) return;
+    for (const field of FIELDS_TO_BACKFILL) {
+      if ((claim[field] === null || claim[field] === undefined) && match[field] !== null && match[field] !== undefined) {
+        (claim as any)[field] = match[field];
+      }
+    }
+  });
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -303,6 +338,20 @@ export function registerClaimUploadRoute(app: Express) {
           const flatClaims = patientGroups.flatMap(g => g.claims);
 
           if (flatClaims.length > 0) {
+            if (hasMissingFields(flatClaims)) {
+              try {
+                const cms1500Source: ExtractionSource = (cms1500Text || extractedText).trim()
+                  ? { kind: 'text', text: cms1500Text || extractedText }
+                  : { kind: 'pdf', buffer, filename: originalname };
+                console.log('[ClaimUpload] Stage 4b/7 — CMS1500 regex parser left fields blank, running AI to backfill place of service / units / diagnosis / modifier...');
+                const backfillResult = await extractClaimsWithAI(cms1500Source, 'cms1500');
+                if (backfillResult.claims.length > 0) {
+                  backfillMissingFields(flatClaims, backfillResult.claims);
+                }
+              } catch (backfillError) {
+                console.error('[ClaimUpload] CMS1500 AI backfill failed (continuing with regex-only result):', backfillError);
+              }
+            }
             console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${flatClaims.length} claim(s) via CMS1500 template parser`);
             res.json({
               claims: flatClaims,
@@ -375,6 +424,26 @@ export function registerClaimUploadRoute(app: Express) {
         console.log('[ClaimUpload] Stage 4/7 — Template detection (reimbursement)...');
         const templateResult = tryTemplateExtraction(reimbursementText, originalname);
         if (templateResult && templateResult.claims.length > 0) {
+          if (hasMissingFields(templateResult.claims)) {
+            try {
+              const reimbursementBackfillSource: ExtractionSource = reimbursementText.trim()
+                ? { kind: 'text', text: reimbursementText }
+                : { kind: 'pdf', buffer, filename: originalname };
+              console.log(`[ClaimUpload] Stage 4b/7 — Template "${templateResult.templateName}" left fields blank, running AI to backfill place of service / units / diagnosis / modifier...`);
+              const backfillResult = await extractClaimsWithAI(reimbursementBackfillSource, 'reimbursement');
+              if (backfillResult.claims.length > 0) {
+                backfillMissingFields(templateResult.claims, backfillResult.claims);
+                // templateResult.claims and templateResult.patientGroups[].claims come from
+                // two independent parse calls (see tryTemplateExtraction), not shared
+                // object references — each group's claims need the same backfill applied.
+                templateResult.patientGroups?.forEach((group: PatientClaimGroup) => {
+                  backfillMissingFields(group.claims, backfillResult.claims);
+                });
+              }
+            } catch (backfillError) {
+              console.error('[ClaimUpload] Reimbursement AI backfill failed (continuing with template-only result):', backfillError);
+            }
+          }
           console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${templateResult.claims.length} claim(s) via template "${templateResult.templateName}"`);
           res.json({
             claims: templateResult.claims,
