@@ -18,7 +18,7 @@ import { join } from 'path';
 import { invokeLLM } from './_core/llm';
 import { ENV } from './_core/env';
 import { tryTemplateExtraction, parseCMS1500 } from './insuranceTemplates';
-import { extractClaimsWithOpenAI, detectInsuranceType } from './openaiExtractor';
+import { extractClaimsWithOpenAI, detectInsuranceType, type ExtractionSource } from './openaiExtractor';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -255,8 +255,13 @@ export function registerClaimUploadRoute(app: Express) {
           }
         }
 
-        if (!extractedText.trim()) {
-          res.status(422).json({ error: 'Could not extract any text from the file. Please ensure it is a digital (not scanned) PDF, a valid CSV, or a valid Excel file.' });
+        // For CSV/Excel there's no fallback if extraction comes back empty —
+        // fail now. PDFs are allowed through even with empty extractedText:
+        // the AI fallback steps below can read the PDF directly (vision) when
+        // no local text-extraction method worked (e.g. serverless
+        // environments without pdftotext or a canvas backend).
+        if (!extractedText.trim() && (isXlsx || isCsv)) {
+          res.status(422).json({ error: 'Could not extract any data from the file. Please ensure it is a valid CSV or Excel file.' });
           return;
         }
 
@@ -264,7 +269,7 @@ export function registerClaimUploadRoute(app: Express) {
         let uploadType: string = (req.body?.uploadType as string) || 'reimbursement';
 
         // Optionally detect document type using OpenAI if not explicitly specified
-        if (!req.body?.uploadType && !isXlsx && !isCsv) {
+        if (!req.body?.uploadType && !isXlsx && !isCsv && extractedText.trim()) {
           try {
             const detection = await detectInsuranceType(extractedText);
             console.log(`[ClaimUpload] Detected: ${detection.insurer} (${detection.documentType}, confidence: ${detection.confidence})`);
@@ -306,10 +311,14 @@ export function registerClaimUploadRoute(app: Express) {
           // Fall back to AI extraction when the regex-based parser (which relies
           // on pdftotext -layout output) finds nothing — e.g. pdftotext isn't
           // installed in this environment (serverless platforms like Vercel
-          // don't ship it), so cms1500Text falls back to the plain pdfjs text.
+          // don't ship it). Use whatever text we do have; if none at all
+          // (pdftotext AND pdfjs both failed), send the PDF directly instead.
           try {
-            console.log('[ClaimUpload] CMS1500 regex parser found no claims, trying OpenAI extraction...');
-            const openaiResult = await extractClaimsWithOpenAI(cms1500Text || extractedText, 'cms1500');
+            const cms1500Source: ExtractionSource = (cms1500Text || extractedText).trim()
+              ? { kind: 'text', text: cms1500Text || extractedText }
+              : { kind: 'pdf', buffer, filename: originalname };
+            console.log(`[ClaimUpload] CMS1500 regex parser found no claims, trying OpenAI extraction (${cms1500Source.kind})...`);
+            const openaiResult = await extractClaimsWithOpenAI(cms1500Source, 'cms1500');
             if (openaiResult.claims.length > 0) {
               const aiPatientGroups = openaiResult.patientName
                 ? [{ patientName: openaiResult.patientName, claims: openaiResult.claims }]
@@ -365,10 +374,15 @@ export function registerClaimUploadRoute(app: Express) {
           return;
         }
 
-        // Step 2: Fall back to OpenAI extraction for unrecognized formats
+        // Step 2: Fall back to OpenAI extraction for unrecognized formats.
+        // Use whatever text we have; if none at all (pdftotext AND pdfjs
+        // both failed to extract anything), send the PDF directly instead.
         try {
-          console.log('[ClaimUpload] No template matched, using OpenAI extraction...');
-          const openaiResult = await extractClaimsWithOpenAI(reimbursementText, 'reimbursement');
+          const reimbursementSource: ExtractionSource = reimbursementText.trim()
+            ? { kind: 'text', text: reimbursementText }
+            : { kind: 'pdf', buffer, filename: originalname };
+          console.log(`[ClaimUpload] No template matched, using OpenAI extraction (${reimbursementSource.kind})...`);
+          const openaiResult = await extractClaimsWithOpenAI(reimbursementSource, 'reimbursement');
           
           if (openaiResult.claims.length > 0) {
             console.log(`[ClaimUpload] OpenAI extracted ${openaiResult.claims.length} claims for patient: ${openaiResult.patientName}`);
@@ -397,7 +411,12 @@ export function registerClaimUploadRoute(app: Express) {
           console.error('[ClaimUpload] OpenAI extraction failed:', openaiError);
         }
 
-        // Step 3: Final fallback to legacy AI extraction
+        // Step 3: Final fallback to legacy AI extraction — needs actual text,
+        // unlike the vision-capable step above, so skip it when we have none.
+        if (!extractedText.trim()) {
+          res.status(422).json({ error: 'Could not extract any claims from this file.' });
+          return;
+        }
         console.log('[ClaimUpload] OpenAI failed, using legacy AI extraction...');
         const claims = await mapToClaimColumns(extractedText);
         res.json({ claims, extractedLength: extractedText.length, templateUsed: 'AI Extraction (Legacy)', uploadType: 'reimbursement' });

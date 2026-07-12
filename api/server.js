@@ -1098,6 +1098,9 @@ var normalizeContentPart = (part) => {
   if (part.type === "file_url") {
     return part;
   }
+  if (part.type === "file") {
+    return part;
+  }
   throw new Error("Unsupported message content part");
 };
 var normalizeMessage = (message) => {
@@ -1640,7 +1643,7 @@ function tryTemplateExtraction(text, filename) {
 
 // server/openaiExtractor.ts
 init_env();
-async function extractClaimsWithOpenAI(pdfText, uploadType) {
+async function extractClaimsWithOpenAI(source, uploadType) {
   const systemPrompt = uploadType === "reimbursement" ? `You are a medical claims data extraction specialist. Extract all Explanation of Benefits (EOB) claim information accurately from the provided document text.
 
 *** CRITICAL: You MUST extract the PATIENT NAME for EACH claim. This is required for matching against the clinic's patient database. ***
@@ -1679,11 +1682,19 @@ For each claim, extract:
 IMPORTANT:
 - Patient name is REQUIRED - never leave it null or empty
 - Return ONLY valid JSON, no markdown or explanations.`;
-  const userPrompt = uploadType === "reimbursement" ? `Extract all EOB claims from this document. IMPORTANT: Make sure to extract the patient name for each claim.
+  const instruction = uploadType === "reimbursement" ? "Extract all EOB claims from this document. IMPORTANT: Make sure to extract the patient name for each claim." : "Extract all CMS-1500 claims from this document. IMPORTANT: Make sure to extract the patient name from Box 2 for each claim.";
+  const userContent = source.kind === "text" ? `${instruction}
 
-${pdfText}` : `Extract all CMS-1500 claims from this document. IMPORTANT: Make sure to extract the patient name from Box 2 for each claim.
-
-${pdfText}`;
+${source.text}` : [
+    { type: "text", text: instruction },
+    {
+      type: "file",
+      file: {
+        filename: source.filename,
+        file_data: `data:application/pdf;base64,${source.buffer.toString("base64")}`
+      }
+    }
+  ];
   try {
     const response = await invokeLLM({
       model: ENV.openaiModel,
@@ -1694,7 +1705,7 @@ ${pdfText}`;
         },
         {
           role: "user",
-          content: userPrompt
+          content: userContent
         }
       ],
       response_format: {
@@ -2043,12 +2054,12 @@ function registerClaimUploadRoute(app2) {
             }
           }
         }
-        if (!extractedText.trim()) {
-          res.status(422).json({ error: "Could not extract any text from the file. Please ensure it is a digital (not scanned) PDF, a valid CSV, or a valid Excel file." });
+        if (!extractedText.trim() && (isXlsx || isCsv)) {
+          res.status(422).json({ error: "Could not extract any data from the file. Please ensure it is a valid CSV or Excel file." });
           return;
         }
         let uploadType = req.body?.uploadType || "reimbursement";
-        if (!req.body?.uploadType && !isXlsx && !isCsv) {
+        if (!req.body?.uploadType && !isXlsx && !isCsv && extractedText.trim()) {
           try {
             const detection = await detectInsuranceType(extractedText);
             console.log(`[ClaimUpload] Detected: ${detection.insurer} (${detection.documentType}, confidence: ${detection.confidence})`);
@@ -2081,8 +2092,9 @@ function registerClaimUploadRoute(app2) {
             return;
           }
           try {
-            console.log("[ClaimUpload] CMS1500 regex parser found no claims, trying OpenAI extraction...");
-            const openaiResult = await extractClaimsWithOpenAI(cms1500Text || extractedText, "cms1500");
+            const cms1500Source = (cms1500Text || extractedText).trim() ? { kind: "text", text: cms1500Text || extractedText } : { kind: "pdf", buffer, filename: originalname };
+            console.log(`[ClaimUpload] CMS1500 regex parser found no claims, trying OpenAI extraction (${cms1500Source.kind})...`);
+            const openaiResult = await extractClaimsWithOpenAI(cms1500Source, "cms1500");
             if (openaiResult.claims.length > 0) {
               const aiPatientGroups = openaiResult.patientName ? [{ patientName: openaiResult.patientName, claims: openaiResult.claims }] : null;
               res.json({
@@ -2128,8 +2140,9 @@ function registerClaimUploadRoute(app2) {
           return;
         }
         try {
-          console.log("[ClaimUpload] No template matched, using OpenAI extraction...");
-          const openaiResult = await extractClaimsWithOpenAI(reimbursementText, "reimbursement");
+          const reimbursementSource = reimbursementText.trim() ? { kind: "text", text: reimbursementText } : { kind: "pdf", buffer, filename: originalname };
+          console.log(`[ClaimUpload] No template matched, using OpenAI extraction (${reimbursementSource.kind})...`);
+          const openaiResult = await extractClaimsWithOpenAI(reimbursementSource, "reimbursement");
           if (openaiResult.claims.length > 0) {
             console.log(`[ClaimUpload] OpenAI extracted ${openaiResult.claims.length} claims for patient: ${openaiResult.patientName}`);
             let patientGroups = null;
@@ -2152,6 +2165,10 @@ function registerClaimUploadRoute(app2) {
           }
         } catch (openaiError) {
           console.error("[ClaimUpload] OpenAI extraction failed:", openaiError);
+        }
+        if (!extractedText.trim()) {
+          res.status(422).json({ error: "Could not extract any claims from this file." });
+          return;
         }
         console.log("[ClaimUpload] OpenAI failed, using legacy AI extraction...");
         const claims = await mapToClaimColumns(extractedText);
