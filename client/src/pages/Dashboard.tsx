@@ -1729,17 +1729,17 @@ export default function Dashboard() {
                   const isActive = period === activePeriod;
                   return (
                     <div key={`period-${period}`}>
-                    <Card className={`border-2 shadow-md mb-6 ${
-                      isActive ? 'border-[#E8A93C]' : 'border-gray-200'
+                    <Card className={`shadow-sm rounded-xl overflow-hidden py-0 gap-0 mb-6 border ${
+                      isActive ? 'border-gray-100 border-t-4 border-t-brand-gold' : 'border-gray-200'
                     }`}>
-                      <CardHeader className={`rounded-t-lg flex flex-row items-center justify-between ${
-                        isActive ? 'bg-[#1E3A5F] text-white' : 'bg-gray-100 text-gray-600'
+                      <CardHeader className={`px-6 py-5 flex flex-row items-center justify-between ${
+                        isActive ? 'bg-brand-blue text-white' : 'bg-gray-100 text-gray-600'
                       }`}>
-                        <div>
-                          <CardTitle className={`text-xl ${ isActive ? 'text-white' : 'text-gray-700'}`}>
+                        <div className="flex-1">
+                          <CardTitle className={`text-xl font-serif font-bold ${ isActive ? 'text-white' : 'text-gray-700'}`}>
                             Authorization Period {period} — {periodAuth} Sessions
                           </CardTitle>
-                          <CardDescription className={isActive ? 'text-[#E8A93C]' : 'text-gray-500'}>
+                          <CardDescription className={`text-sm mt-1 opacity-90 ${isActive ? 'text-brand-gold' : 'text-gray-500'}`}>
                             {periodInsurance && (
                               <span className="font-medium">{periodInsurance} · </span>
                             )}
@@ -1752,8 +1752,8 @@ export default function Dashboard() {
                         {isActive && (
                           <Dialog open={showLogSessionDialog} onOpenChange={setShowLogSessionDialog}>
                             <DialogTrigger asChild>
-                              <Button className="bg-[#E8A93C] hover:bg-[#C88A20] text-[#1E3A5F] font-semibold flex items-center gap-2">
-                                <Plus className="w-4 h-4" />
+                              <Button className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold px-5 py-2.5 rounded-lg inline-flex items-center gap-2 transition-all shadow-sm hover:shadow-md">
+                                <Plus className="w-4 h-4" strokeWidth={2.5} />
                                 Log Session
                               </Button>
                             </DialogTrigger>
@@ -1796,51 +1796,59 @@ export default function Dashboard() {
                       </CardHeader>
                       <CardContent className="p-0">
                         <div className="overflow-x-auto">
-                          <table className="w-full text-sm">
-                            <thead>
-                              <tr className="bg-[#1E3A5F] text-white">
-                                <th className="text-left py-3 px-4 font-semibold">Auth Date</th>
-                                <th className="text-left py-3 px-4 font-semibold"># Authorized</th>
-                                <th className="text-left py-3 px-4 font-semibold"># Remaining</th>
-                                <th className="text-left py-3 px-4 font-semibold">Session #</th>
-                                <th className="text-left py-3 px-4 font-semibold">Date of Service</th>
-                                <th className="text-left py-3 px-4 font-semibold">
+                          <table className="w-full text-sm min-w-full">
+                            <thead className="bg-brand-blue/95">
+                              <tr>
+                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Date</th>
+                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider"># Authorized</th>
+                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider"># Remaining</th>
+                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Session #</th>
+                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Date of Service</th>
+                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">
                                   Date ASH Submitted
-                                  <span className="ml-1 text-[#E8A93C] text-xs font-normal">(editable)</span>
+                                  <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
                                 </th>
-                                <th className="text-left py-3 px-4 font-semibold">Auth Status</th>
+                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Status</th>
                               </tr>
                             </thead>
-                            <tbody>
+                            <tbody className="bg-white divide-y divide-gray-100">
                       {periodVisits.map((visit) => (
-                        <tr key={visit.id} className="border-b border-[#F0E9DC] hover:bg-[#FAF5EE] transition-colors">
+                        <tr key={visit.id} className="hover:bg-brand-cream/30 transition-colors">
                           {/* Auth Date */}
-                          <td className="py-3 px-4 text-[#1E3A5F]">
-                            {formatDate(visit.dateOfService)}
+                          <td className="px-6 py-4 text-sm text-[#1E3A5F] whitespace-nowrap">
+                            {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* # Authorized */}
-                          <td className="py-3 px-4 text-[#1E3A5F] font-semibold">
-                            {visit.sessionsAuthorized ?? '—'}
+                          <td className="px-6 py-4 text-sm whitespace-nowrap">
+                            {visit.sessionsAuthorized != null ? (
+                              <span className="font-semibold text-brand-blue text-base">{visit.sessionsAuthorized}</span>
+                            ) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* # Remaining */}
-                          <td className="py-3 px-4">
+                          <td className="px-6 py-4 text-sm whitespace-nowrap">
                             {visit.sessionsRemaining != null ? (
-                              <span className="font-semibold text-[#E8A93C]">{visit.sessionsRemaining}</span>
-                            ) : '—'}
+                              <span className="font-bold text-brand-gold text-base">{visit.sessionsRemaining}</span>
+                            ) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* Session # */}
-                          <td className="py-3 px-4 text-[#1E3A5F] font-medium">{visit.sessionNumber ?? '—'}</td>
+                          <td className="px-6 py-4 text-sm whitespace-nowrap">
+                            {visit.sessionNumber != null ? (
+                              <span className="font-medium text-gray-700 text-base">{visit.sessionNumber}</span>
+                            ) : <span className="text-gray-300 text-lg">—</span>}
+                          </td>
                           {/* Date of Service */}
-                          <td className="py-3 px-4 text-[#6B7280]">{formatDate(visit.dateOfService)}</td>
+                          <td className="px-6 py-4 text-sm text-[#6B7280] whitespace-nowrap">
+                            {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
+                          </td>
                           {/* Date ASH Submitted — EDITABLE */}
-                          <td className="py-3 px-4">
+                          <td className="px-6 py-4 text-sm whitespace-nowrap">
                             {editingAshId === visit.id ? (
                               <div className="flex items-center gap-2">
                                 <input
                                   type="date"
                                   value={editingAshValue}
                                   onChange={e => setEditingAshValue(e.target.value)}
-                                  className="border border-[#E8A93C] rounded px-2 py-1 text-sm text-[#1E3A5F] focus:outline-none focus:ring-2 focus:ring-[#E8A93C]"
+                                  className="border border-brand-gold rounded-md px-2 py-1.5 text-sm text-[#1E3A5F] focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
                                   autoFocus
                                 />
                                 <button
@@ -1860,26 +1868,26 @@ export default function Dashboard() {
                             ) : (
                               <button
                                 onClick={() => handleStartEditAsh(visit)}
-                                className="flex items-center gap-1.5 group text-[#6B7280] hover:text-[#1E3A5F] transition-colors"
+                                className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue cursor-pointer transition-colors"
                                 title="Click to edit Date ASH Submitted"
                               >
-                                <Calendar className="w-3.5 h-3.5 text-[#E8A93C] group-hover:text-[#1E3A5F] transition-colors shrink-0" />
-                                <span className={visit.dateAshSubmitted ? 'text-[#1E3A5F]' : 'text-gray-400 italic'}>
+                                <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
+                                <span className={visit.dateAshSubmitted ? 'text-[#1E3A5F] text-sm' : 'text-sm italic'}>
                                   {visit.dateAshSubmitted ? formatDate(visit.dateAshSubmitted) : 'Click to set date'}
                                 </span>
                               </button>
                             )}
                           </td>
                           {/* Auth Status */}
-                          <td className="py-3 px-4">
+                          <td className="px-6 py-4 text-sm whitespace-nowrap">
                             <select
                               value={visit.authStatus === 'none' ? '' : visit.authStatus.charAt(0).toUpperCase() + visit.authStatus.slice(1)}
                               onChange={e => handleUpdateAuthStatus(visit.id, e.target.value)}
-                              className={`text-xs font-semibold px-2 py-1 rounded-full border-0 outline-none cursor-pointer transition-colors ${
-                                visit.authStatus === 'approved' ? 'bg-green-100 text-green-800' :
+                              className={`text-xs font-medium px-3 py-1 rounded-full border-0 outline-none cursor-pointer transition-colors ${
+                                visit.authStatus === 'approved' ? 'bg-green-100 text-green-700' :
                                 visit.authStatus === 'denied' ? 'bg-red-100 text-red-700' :
-                                visit.authStatus === 'pending' ? 'bg-yellow-100 text-yellow-800' :
-                                'bg-gray-100 text-gray-500'
+                                visit.authStatus === 'pending' ? 'bg-yellow-100 text-yellow-700' :
+                                'bg-gray-100 text-gray-600'
                               }`}
                             >
                               <option value="">— None —</option>
