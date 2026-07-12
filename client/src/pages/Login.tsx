@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2, Lock, User, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
+import { Logo } from "@/components/Logo";
 
 export default function Login() {
   const [, navigate] = useLocation();
@@ -36,12 +37,12 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#104163] via-[#0d3452] to-[#071e30] flex items-center justify-center p-4">
+    <div className="min-h-screen bg-gradient-to-br from-[#1E3A5F] via-[#152A47] to-[#071e30] flex items-center justify-center p-4">
       {/* Background pattern */}
       <div className="absolute inset-0 opacity-5 pointer-events-none"
         style={{
-          backgroundImage: `radial-gradient(circle at 25% 25%, #D9A312 0%, transparent 50%),
-                            radial-gradient(circle at 75% 75%, #D9A312 0%, transparent 50%)`
+          backgroundImage: `radial-gradient(circle at 25% 25%, #E8A93C 0%, transparent 50%),
+                            radial-gradient(circle at 75% 75%, #E8A93C 0%, transparent 50%)`
         }}
       />
 
@@ -49,20 +50,16 @@ export default function Login() {
         {/* Logo / Header */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-20 h-20 mb-4">
-            <img
-              src="/manus-storage/nychomerehab-logo_f6012b59.png"
-              alt="NYC Home Rehab Logo"
-              className="w-20 h-20 object-contain drop-shadow-lg"
-            />
+            <Logo variant="icon" size="xl" className="w-20 h-20 drop-shadow-lg" />
           </div>
-          <h1 className="text-2xl font-bold text-white">NYC Home Rehab</h1>
-          <p className="text-[#D9A312] text-sm mt-1">ASH Authorization Tracker</p>
+          <h1 className="text-2xl font-serif font-bold text-white">NYC Home Rehab</h1>
+          <p className="text-[#E8A93C] text-sm mt-1 uppercase tracking-wide">Physical Therapy · ASH Authorization Tracker</p>
         </div>
 
         <Card className="border-0 shadow-2xl bg-white/95 backdrop-blur-sm">
           <CardHeader className="pb-4 pt-6 px-6">
-            <CardTitle className="text-[#104163] text-xl font-bold text-center">Staff Login</CardTitle>
-            <CardDescription className="text-center text-[#4A4A4A]">
+            <CardTitle className="text-[#1E3A5F] font-serif text-xl font-bold text-center">Staff Login</CardTitle>
+            <CardDescription className="text-center text-[#6B7280]">
               Enter your credentials to access the dashboard
             </CardDescription>
           </CardHeader>
@@ -70,11 +67,11 @@ export default function Login() {
             <form onSubmit={handleSubmit} className="space-y-4">
               {/* Username */}
               <div className="space-y-1.5">
-                <Label htmlFor="username" className="text-[#104163] font-medium text-sm">
+                <Label htmlFor="username" className="text-[#1E3A5F] font-medium text-sm">
                   Username
                 </Label>
                 <div className="relative">
-                  <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#104163]/50" />
+                  <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#1E3A5F]/50" />
                   <Input
                     id="username"
                     type="text"
@@ -82,7 +79,7 @@ export default function Login() {
                     placeholder="Enter your username"
                     value={username}
                     onChange={e => { setUsername(e.target.value); setErrorMsg(""); }}
-                    className="pl-9 border-[#E8E6E1] focus:border-[#104163] focus:ring-[#104163]/20 text-[#104163]"
+                    className="pl-9 border-[#F0E9DC] focus:border-[#1E3A5F] focus:ring-[#1E3A5F]/20 text-[#1E3A5F]"
                     disabled={loginMutation.isPending}
                   />
                 </div>
@@ -90,11 +87,11 @@ export default function Login() {
 
               {/* Password */}
               <div className="space-y-1.5">
-                <Label htmlFor="password" className="text-[#104163] font-medium text-sm">
+                <Label htmlFor="password" className="text-[#1E3A5F] font-medium text-sm">
                   Password
                 </Label>
                 <div className="relative">
-                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#104163]/50" />
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#1E3A5F]/50" />
                   <Input
                     id="password"
                     type="password"
@@ -102,7 +99,7 @@ export default function Login() {
                     placeholder="Enter your password"
                     value={password}
                     onChange={e => { setPassword(e.target.value); setErrorMsg(""); }}
-                    className="pl-9 border-[#E8E6E1] focus:border-[#104163] focus:ring-[#104163]/20 text-[#104163]"
+                    className="pl-9 border-[#F0E9DC] focus:border-[#1E3A5F] focus:ring-[#1E3A5F]/20 text-[#1E3A5F]"
                     disabled={loginMutation.isPending}
                   />
                 </div>
@@ -120,7 +117,7 @@ export default function Login() {
               <Button
                 type="submit"
                 disabled={loginMutation.isPending}
-                className="w-full bg-[#104163] hover:bg-[#0d3452] text-white font-semibold py-2.5 rounded-lg transition-all duration-150 active:scale-[0.97] mt-2"
+                className="w-full bg-[#1E3A5F] hover:bg-[#152A47] text-white font-semibold py-2.5 rounded-lg transition-all duration-150 active:scale-[0.97] mt-2"
               >
                 {loginMutation.isPending ? (
                   <><Loader2 className="w-4 h-4 animate-spin mr-2" />Signing in…</>
