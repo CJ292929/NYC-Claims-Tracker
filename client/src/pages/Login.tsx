@@ -37,7 +37,7 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-brand-blue via-[#152A47] to-[#071e30] flex items-center justify-center p-4">
+    <div className="min-h-screen bg-gradient-to-br from-[#1E3A5F] via-[#152A47] to-[#071e30] flex items-center justify-center p-4">
       {/* Background pattern */}
       <div className="absolute inset-0 opacity-5 pointer-events-none"
         style={{
@@ -53,12 +53,12 @@ export default function Login() {
             <Logo variant="icon" size="xl" className="w-20 h-20 drop-shadow-lg" />
           </div>
           <h1 className="text-2xl font-serif font-bold text-white">NYC Home Rehab</h1>
-          <p className="text-brand-gold text-sm mt-1 uppercase tracking-wide">Physical Therapy · ASH Authorization Tracker</p>
+          <p className="text-[#E8A93C] text-sm mt-1 uppercase tracking-wide">Physical Therapy · ASH Authorization Tracker</p>
         </div>
 
         <Card className="border-0 shadow-2xl bg-white/95 backdrop-blur-sm">
           <CardHeader className="pb-4 pt-6 px-6">
-            <CardTitle className="text-brand-blue font-serif text-xl font-bold text-center">Staff Login</CardTitle>
+            <CardTitle className="text-[#1E3A5F] font-serif text-xl font-bold text-center">Staff Login</CardTitle>
             <CardDescription className="text-center text-[#6B7280]">
               Enter your credentials to access the dashboard
             </CardDescription>
@@ -67,11 +67,11 @@ export default function Login() {
             <form onSubmit={handleSubmit} className="space-y-4">
               {/* Username */}
               <div className="space-y-1.5">
-                <Label htmlFor="username" className="text-brand-blue font-medium text-sm">
+                <Label htmlFor="username" className="text-[#1E3A5F] font-medium text-sm">
                   Username
                 </Label>
                 <div className="relative">
-                  <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-blue/50" />
+                  <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#1E3A5F]/50" />
                   <Input
                     id="username"
                     type="text"
@@ -79,7 +79,7 @@ export default function Login() {
                     placeholder="Enter your username"
                     value={username}
                     onChange={e => { setUsername(e.target.value); setErrorMsg(""); }}
-                    className="pl-9 border-[#F0E9DC] focus:border-brand-blue focus:ring-brand-blue/20 text-brand-blue"
+                    className="pl-9 border-[#F0E9DC] focus:border-[#1E3A5F] focus:ring-[#1E3A5F]/20 text-[#1E3A5F]"
                     disabled={loginMutation.isPending}
                   />
                 </div>
@@ -87,11 +87,11 @@ export default function Login() {
 
               {/* Password */}
               <div className="space-y-1.5">
-                <Label htmlFor="password" className="text-brand-blue font-medium text-sm">
+                <Label htmlFor="password" className="text-[#1E3A5F] font-medium text-sm">
                   Password
                 </Label>
                 <div className="relative">
-                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-blue/50" />
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#1E3A5F]/50" />
                   <Input
                     id="password"
                     type="password"
@@ -99,7 +99,7 @@ export default function Login() {
                     placeholder="Enter your password"
                     value={password}
                     onChange={e => { setPassword(e.target.value); setErrorMsg(""); }}
-                    className="pl-9 border-[#F0E9DC] focus:border-brand-blue focus:ring-brand-blue/20 text-brand-blue"
+                    className="pl-9 border-[#F0E9DC] focus:border-[#1E3A5F] focus:ring-[#1E3A5F]/20 text-[#1E3A5F]"
                     disabled={loginMutation.isPending}
                   />
                 </div>
@@ -117,7 +117,7 @@ export default function Login() {
               <Button
                 type="submit"
                 disabled={loginMutation.isPending}
-                className="w-full bg-brand-blue hover:bg-[#152A47] text-white font-semibold py-2.5 rounded-lg transition-all duration-150 active:scale-[0.97] mt-2"
+                className="w-full bg-[#1E3A5F] hover:bg-[#152A47] text-white font-semibold py-2.5 rounded-lg transition-all duration-150 active:scale-[0.97] mt-2"
               >
                 {loginMutation.isPending ? (
                   <><Loader2 className="w-4 h-4 animate-spin mr-2" />Signing in…</>
