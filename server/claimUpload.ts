@@ -141,6 +141,78 @@ function extractPdfTextLayout(buffer: Buffer): string {
   }
 }
 
+/**
+ * Pure-JS layout-preserving PDF text extraction using pdfjs-dist's per-glyph
+ * position data. Approximates what `pdftotext -layout` produces (each visual
+ * row kept on its own text line, columns kept visually separated) without
+ * requiring the poppler `pdftotext` binary — which isn't bundled in Vercel's
+ * serverless Node runtime, so extractPdfTextLayout() above reliably fails
+ * there every time. Used as the fallback in that case, in place of
+ * extractPdfText()'s flat "join every glyph on the page with one space"
+ * output, which discards row structure entirely (an entire page's table
+ * becomes a single line) and is far more likely to scramble a dense table's
+ * columns/rows together than this is.
+ */
+async function extractPdfTextLayoutJS(buffer: Buffer): Promise<string> {
+  const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
+  const pdf = await loadingTask.promise;
+  const pageTexts: string[] = [];
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    const items = (content.items as any[]).filter(item => typeof item.str === 'string' && item.str.length > 0);
+
+    // Group glyphs into rows by Y position — fragments on the same visual
+    // line land within a small tolerance of each other's baseline (same
+    // technique already used by parseCMS1500's layout-mode row detection
+    // in insuranceTemplates.ts, applied generically here for any EOB table).
+    const rows: Array<Array<{ x: number; str: string; width: number }>> = [];
+    let currentRow: Array<{ x: number; str: string; width: number }> = [];
+    let lastY: number | null = null;
+    const sortedByY = [...items].sort((a, b) => b.transform[5] - a.transform[5]);
+
+    for (const item of sortedByY) {
+      const y = item.transform[5];
+      if (lastY !== null && Math.abs(y - lastY) > 2) {
+        if (currentRow.length > 0) rows.push(currentRow);
+        currentRow = [];
+      }
+      currentRow.push({ x: item.transform[4], str: item.str, width: item.width ?? 0 });
+      lastY = y;
+    }
+    if (currentRow.length > 0) rows.push(currentRow);
+
+    // Within each row, order left-to-right and space fragments apart
+    // proportional to the horizontal gap between them, so table columns
+    // stay visually separated instead of glued into one run of characters.
+    const pageLines = rows.map(row => {
+      const sorted = [...row].sort((a, b) => a.x - b.x);
+      let line = '';
+      let prevEnd: number | null = null;
+      for (const frag of sorted) {
+        if (prevEnd !== null) {
+          const gap = frag.x - prevEnd;
+          // ~4 PDF units per space character approximates typical body-text
+          // spacing at EOB font sizes; clamped so overlapping/adjacent
+          // fragments still get at least one separating space, and any
+          // pathologically large gap doesn't blow up the line length.
+          const spaces = Math.max(1, Math.round(gap / 4));
+          line += ' '.repeat(Math.min(spaces, 20));
+        }
+        line += frag.str;
+        prevEnd = frag.x + frag.width;
+      }
+      return line;
+    });
+
+    pageTexts.push(pageLines.join('\n'));
+  }
+
+  return pageTexts.join('\n\n');
+}
+
 // Parse Excel (XLSX/XLS) buffer to JSON string (compact, one row per line)
 function extractXlsxText(buffer: Buffer): string {
   const workbook = XLSX.read(buffer, { type: 'buffer' });
@@ -328,8 +400,18 @@ export function registerClaimUploadRoute(app: Express) {
           if (!isXlsx && !isCsv) {
             try {
               cms1500Text = extractPdfTextLayout(buffer);
-            } catch {
-              // fallback to pdfjs text if pdftotext is unavailable
+            } catch (pdftotextError) {
+              // pdftotext binary isn't bundled on serverless platforms like Vercel —
+              // this fails on every request there, not just occasionally, so it's
+              // logged rather than silently swallowed. Fall back to the pure-JS
+              // layout reconstruction (still row/column-aware) instead of dropping
+              // all the way to extractedText's single-line-per-page flat join.
+              console.warn('[ClaimUpload] pdftotext -layout unavailable for CMS1500 (expected on serverless):', pdftotextError instanceof Error ? pdftotextError.message : pdftotextError);
+              try {
+                cms1500Text = await extractPdfTextLayoutJS(buffer);
+              } catch (jsLayoutError) {
+                console.error('[ClaimUpload] JS layout extraction also failed for CMS1500, falling back to flat text:', jsLayoutError);
+              }
             }
           }
           // CMS1500 parser: extract Date of Service, Place of Service, CPT, Modifier, Units, Diagnosis
@@ -417,8 +499,19 @@ export function registerClaimUploadRoute(app: Express) {
         if (!isXlsx && !isCsv) {
           try {
             reimbursementText = extractPdfTextLayout(buffer);
-          } catch {
-            reimbursementText = extractedText;
+          } catch (pdftotextError) {
+            // See the matching comment in the CMS1500 branch above — this is
+            // an expected, every-time failure on serverless platforms like
+            // Vercel (no pdftotext binary), so it's logged instead of silent,
+            // and falls back to the pure-JS layout reconstruction rather than
+            // straight to extractedText's flattened, row-structure-free text.
+            console.warn('[ClaimUpload] pdftotext -layout unavailable for reimbursement doc (expected on serverless):', pdftotextError instanceof Error ? pdftotextError.message : pdftotextError);
+            try {
+              reimbursementText = await extractPdfTextLayoutJS(buffer);
+            } catch (jsLayoutError) {
+              console.error('[ClaimUpload] JS layout extraction also failed for reimbursement doc, falling back to flat text:', jsLayoutError);
+              reimbursementText = extractedText;
+            }
           }
         }
         console.log('[ClaimUpload] Stage 4/7 — Template detection (reimbursement)...');
