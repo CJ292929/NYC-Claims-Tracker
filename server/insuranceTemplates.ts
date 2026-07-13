@@ -197,7 +197,6 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
     while ((lineMatch = serviceLinePattern.exec(section)) !== null) {
       const rawDate = lineMatch[1];
       const cptCode = lineMatch[3];
-      const totalCharge = parseMoney(lineMatch[4]);
       const notPaymentAmount = parseMoney(lineMatch[5]); // allowed/insurance reimbursement
       // Patient obligation = co-ins + co-pay + deductible + non-covered
       const coIns = parseMoney(lineMatch[9]) ?? 0;
@@ -215,7 +214,11 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
       patientClaims.push({
         dateOfService: parsedDate,
         cptCodes: cptCode || null,
-        chargeAmount: totalCharge,
+        // Charge is a CMS-1500-only field. dateOfService/cptCodes above stay
+        // populated even on a Reimbursement/EOB upload — they're the upsert
+        // match key used to attach this payment to its existing CMS-1500
+        // row, not reimbursement "value" data.
+        chargeAmount: null,
         insuranceReimbursement: notPaymentAmount,
         patientAmountPaid: coPayAmountFromLine,
         insuranceBilled: 'Meritain Health',
@@ -381,6 +384,9 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
         claimSubmittedDate: dateSubmitted,
         cptCodes: null, chargeAmount: null, insuranceReimbursement: null,
         patientAmountPaid: null, patientAmountDue: null, unitsBilled: null, modifier: null, cptLines: [],
+        // Reimbursement/EOB-only fields — explicit null (not undefined) since
+        // a CMS-1500 form never carries claim/check/payment data.
+        oaClaimNumber: null, checkDate: null, checkNumberVirtualCard: null, expireBcbsClaimNumber: null,
       });
     }
     dateMap.get(dateKey)!.cptLines.push({

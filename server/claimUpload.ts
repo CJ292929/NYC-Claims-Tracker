@@ -27,7 +27,15 @@ import { extractClaimsWithAI, detectInsuranceType, type ExtractionSource } from 
 // supplementary AI vision/text pass and use it ONLY to fill the gaps —
 // dollar amounts and claim numbers stay sourced from the regex parser, which
 // is more precise for those than an LLM.
-const FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
+//
+// Each upload type has its own backfill list, scoped to only that document
+// type's valid fields (see the field-boundary rules enforced by
+// enforceFieldBoundary below) — backfilling a CMS1500-only field like
+// diagnosisCodes onto a reimbursement claim would both waste an AI call
+// (those fields are always null on an EOB, so hasMissingFields would fire on
+// every single reimbursement upload) and populate a value that
+// enforceFieldBoundary would strip right back out before saving.
+const CMS1500_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
   'placeOfService',
   'unitsBilled',
   'diagnosisCodes',
@@ -35,24 +43,70 @@ const FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
   'claimSubmittedDate',
 ];
 
-function hasMissingFields(claims: ExtractedClaim[]): boolean {
-  return claims.some(claim => FIELDS_TO_BACKFILL.some(field => claim[field] === null || claim[field] === undefined));
+const REIMBURSEMENT_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
+  'insuranceReimbursement',
+  'patientAmountPaid',
+  'patientAmountDue',
+  'oaClaimNumber',
+  'checkDate',
+  'checkNumberVirtualCard',
+];
+
+function hasMissingFields(claims: ExtractedClaim[], fields: (keyof ExtractedClaim)[]): boolean {
+  return claims.some(claim => fields.some(field => claim[field] === null || claim[field] === undefined));
 }
 
 // Mutates `claims` in place so it stays in sync with any other array (e.g.
 // patientGroups) that references the same claim objects.
-function backfillMissingFields(claims: ExtractedClaim[], aiClaims: ExtractedClaim[]): void {
+function backfillMissingFields(claims: ExtractedClaim[], aiClaims: ExtractedClaim[], fields: (keyof ExtractedClaim)[]): void {
   claims.forEach((claim, i) => {
     const match =
       aiClaims.find(a => a.cptCodes === claim.cptCodes && a.dateOfService === claim.dateOfService) ??
       aiClaims[i];
     if (!match) return;
-    for (const field of FIELDS_TO_BACKFILL) {
+    for (const field of fields) {
       if ((claim[field] === null || claim[field] === undefined) && match[field] !== null && match[field] !== undefined) {
         (claim as any)[field] = match[field];
       }
     }
   });
+}
+
+// Value fields that may ONLY appear on a CMS-1500 claim form, vs. only on a
+// Reimbursement/EOB payment document. dateOfService and cptCodes are
+// deliberately excluded from both lists — they're the upsert match key
+// (patient_id, auth_period, date_of_service, cpt_codes) used by
+// bulkImportFromEOB/upsertClaimRecord, so a Reimbursement upload must keep
+// them populated to attach its payment to the right existing CMS-1500 row.
+const CMS1500_ONLY_FIELDS: (keyof ExtractedClaim)[] = [
+  'placeOfService',
+  'diagnosisCodes',
+  'unitsBilled',
+  'modifier',
+  'chargeAmount',
+  'claimSubmittedDate',
+];
+
+const REIMBURSEMENT_ONLY_FIELDS: (keyof ExtractedClaim)[] = [
+  'insuranceReimbursement',
+  'patientAmountPaid',
+  'patientAmountDue',
+  'oaClaimNumber',
+  'checkDate',
+  'checkNumberVirtualCard',
+];
+
+// Final defensive gate: strips any value that leaked across the document-type
+// boundary — whether from the regex template parser, an AI backfill pass, or
+// the unscoped legacy extractor — before a claim ever reaches the client or
+// gets saved. Mutates `claims` in place.
+function enforceFieldBoundary(claims: ExtractedClaim[], uploadType: 'reimbursement' | 'cms1500'): void {
+  const fieldsToStrip = uploadType === 'reimbursement' ? CMS1500_ONLY_FIELDS : REIMBURSEMENT_ONLY_FIELDS;
+  for (const claim of claims) {
+    for (const field of fieldsToStrip) {
+      (claim as any)[field] = null;
+    }
+  }
 }
 
 const upload = multer({
@@ -420,7 +474,7 @@ export function registerClaimUploadRoute(app: Express) {
           const flatClaims = patientGroups.flatMap(g => g.claims);
 
           if (flatClaims.length > 0) {
-            if (hasMissingFields(flatClaims)) {
+            if (hasMissingFields(flatClaims, CMS1500_FIELDS_TO_BACKFILL)) {
               try {
                 const cms1500Source: ExtractionSource = (cms1500Text || extractedText).trim()
                   ? { kind: 'text', text: cms1500Text || extractedText }
@@ -428,12 +482,13 @@ export function registerClaimUploadRoute(app: Express) {
                 console.log('[ClaimUpload] Stage 4b/7 — CMS1500 regex parser left fields blank, running AI to backfill place of service / units / diagnosis / modifier...');
                 const backfillResult = await extractClaimsWithAI(cms1500Source, 'cms1500');
                 if (backfillResult.claims.length > 0) {
-                  backfillMissingFields(flatClaims, backfillResult.claims);
+                  backfillMissingFields(flatClaims, backfillResult.claims, CMS1500_FIELDS_TO_BACKFILL);
                 }
               } catch (backfillError) {
                 console.error('[ClaimUpload] CMS1500 AI backfill failed (continuing with regex-only result):', backfillError);
               }
             }
+            enforceFieldBoundary(flatClaims, 'cms1500');
             console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${flatClaims.length} claim(s) via CMS1500 template parser`);
             res.json({
               claims: flatClaims,
@@ -460,6 +515,7 @@ export function registerClaimUploadRoute(app: Express) {
             const aiResult = await extractClaimsWithAI(cms1500Source, 'cms1500');
             if (aiResult.claims.length > 0) {
               console.log(`[ClaimUpload] Stage 6/7 — JSON validation passed: ${aiResult.claims.length} claim(s)`);
+              enforceFieldBoundary(aiResult.claims, 'cms1500');
               const aiPatientGroups = aiResult.patientName
                 ? [{ patientName: aiResult.patientName, claims: aiResult.claims }]
                 : null;
@@ -479,6 +535,7 @@ export function registerClaimUploadRoute(app: Express) {
             console.error('[ClaimUpload] CMS1500 AI extraction failed (continuing with empty template result, request will not crash):', aiError);
           }
 
+          enforceFieldBoundary(flatClaims, 'cms1500');
           res.json({
             claims: flatClaims,
             patientGroups: patientGroups.length > 0 ? patientGroups : null,
@@ -517,7 +574,7 @@ export function registerClaimUploadRoute(app: Express) {
         console.log('[ClaimUpload] Stage 4/7 — Template detection (reimbursement)...');
         const templateResult = tryTemplateExtraction(reimbursementText, originalname);
         if (templateResult && templateResult.claims.length > 0) {
-          if (hasMissingFields(templateResult.claims)) {
+          if (hasMissingFields(templateResult.claims, REIMBURSEMENT_FIELDS_TO_BACKFILL)) {
             try {
               const reimbursementBackfillSource: ExtractionSource = reimbursementText.trim()
                 ? { kind: 'text', text: reimbursementText }
@@ -525,18 +582,22 @@ export function registerClaimUploadRoute(app: Express) {
               console.log(`[ClaimUpload] Stage 4b/7 — Template "${templateResult.templateName}" left fields blank, running AI to backfill place of service / units / diagnosis / modifier...`);
               const backfillResult = await extractClaimsWithAI(reimbursementBackfillSource, 'reimbursement');
               if (backfillResult.claims.length > 0) {
-                backfillMissingFields(templateResult.claims, backfillResult.claims);
+                backfillMissingFields(templateResult.claims, backfillResult.claims, REIMBURSEMENT_FIELDS_TO_BACKFILL);
                 // templateResult.claims and templateResult.patientGroups[].claims come from
                 // two independent parse calls (see tryTemplateExtraction), not shared
                 // object references — each group's claims need the same backfill applied.
                 templateResult.patientGroups?.forEach((group: PatientClaimGroup) => {
-                  backfillMissingFields(group.claims, backfillResult.claims);
+                  backfillMissingFields(group.claims, backfillResult.claims, REIMBURSEMENT_FIELDS_TO_BACKFILL);
                 });
               }
             } catch (backfillError) {
               console.error('[ClaimUpload] Reimbursement AI backfill failed (continuing with template-only result):', backfillError);
             }
           }
+          enforceFieldBoundary(templateResult.claims, 'reimbursement');
+          templateResult.patientGroups?.forEach((group: PatientClaimGroup) => {
+            enforceFieldBoundary(group.claims, 'reimbursement');
+          });
           console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${templateResult.claims.length} claim(s) via template "${templateResult.templateName}"`);
           res.json({
             claims: templateResult.claims,
@@ -562,6 +623,7 @@ export function registerClaimUploadRoute(app: Express) {
 
           if (aiResult.claims.length > 0) {
             console.log(`[ClaimUpload] Stage 6/7 — JSON validation passed: ${aiResult.claims.length} claim(s) for patient: ${aiResult.patientName}`);
+            enforceFieldBoundary(aiResult.claims, 'reimbursement');
 
             // If all claims are for the same patient, create patientGroups for single-patient mode
             let patientGroups = null;
@@ -619,6 +681,11 @@ export function registerClaimUploadRoute(app: Express) {
         }
         console.log('[ClaimUpload] Stage 5/7 — AI text parsing failed upstream, using legacy AI extraction...');
         const claims = await mapToClaimColumns(extractedText);
+        // mapToClaimColumns' prompt (COLUMN_DESCRIPTIONS) is not upload-type-scoped
+        // like extractClaimsWithAI's — it asks for every column regardless of
+        // document type, so this is the one place the boundary gate is load-bearing
+        // rather than defense-in-depth.
+        enforceFieldBoundary(claims, 'reimbursement');
         console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${claims.length} claim(s) via legacy AI extraction`);
         res.json({ claims, extractedLength: extractedText.length, templateUsed: 'AI Extraction (Legacy)', uploadType: 'reimbursement' });
       } catch (err: any) {
