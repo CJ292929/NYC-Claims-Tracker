@@ -234,8 +234,8 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     return (
       <div className="mb-6">
         <div className="flex items-center gap-2 mb-3">
-          <BellRing className="w-5 h-5 text-brand-gold" />
-          <h2 className="text-lg font-bold text-brand-blue">Authorization Alerts</h2>
+          <BellRing className="w-5 h-5 text-[#E8A93C]" />
+          <h2 className="text-lg font-bold text-[#1E3A5F]">Authorization Alerts</h2>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {[1, 2].map(i => (
@@ -262,8 +262,8 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     <>
     <div className="mb-6">
       <div className="flex items-center gap-2 mb-3">
-        <BellRing className="w-5 h-5 text-brand-gold animate-bounce" />
-        <h2 className="text-lg font-bold text-brand-blue">Authorization Alerts</h2>
+        <BellRing className="w-5 h-5 text-[#E8A93C] animate-bounce" />
+        <h2 className="text-lg font-bold text-[#1E3A5F]">Authorization Alerts</h2>
         <span className="ml-1 inline-flex items-center justify-center w-6 h-6 rounded-full bg-red-600 text-white text-xs font-bold">
           {urgent.length}
         </span>
@@ -288,7 +288,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
                 <div className="flex items-start gap-3">
                   <span className={`mt-0.5 shrink-0 ${cfg.iconClass}`}>{cfg.icon}</span>
                   <div className="min-w-0">
-                    <p className="font-bold text-brand-blue truncate">{alert.patientName}</p>
+                    <p className="font-bold text-[#1E3A5F] truncate">{alert.patientName}</p>
                     <p className="text-xs text-[#6B7280] truncate">{alert.insurance}</p>
                     <div className="flex flex-wrap gap-1 mt-2">
                       <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${cfg.badgeClass}`}>
@@ -340,7 +340,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
                       e.stopPropagation();
                       markAsRequested.mutate({ patientId: alert.patientId });
                     }}
-                    className="flex-1 mt-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-brand-blue text-white hover:bg-[#152A47] disabled:opacity-60 disabled:cursor-not-allowed transition-all active:scale-[0.97]"
+                    className="flex-1 mt-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#1E3A5F] text-white hover:bg-[#152A47] disabled:opacity-60 disabled:cursor-not-allowed transition-all active:scale-[0.97]"
                   >
                     {isRequesting ? (
                       <><Loader2 className="w-3 h-3 animate-spin" /> Saving…</>
@@ -389,7 +389,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     <Dialog open={!!approveDialogPatient} onOpenChange={(open) => { if (!open) { setApproveDialogPatient(null); setNewAuthValidUntil(''); } }}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="text-brand-blue flex items-center gap-2">
+          <DialogTitle className="text-[#1E3A5F] flex items-center gap-2">
             <ShieldCheck className="w-5 h-5 text-green-600" />
             New Authorization Approved
           </DialogTitle>
@@ -400,7 +400,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
         </DialogHeader>
         <div className="space-y-4 py-2">
           <div className="space-y-1.5">
-            <Label htmlFor="new-sessions" className="text-brand-blue font-semibold">
+            <Label htmlFor="new-sessions" className="text-[#1E3A5F] font-semibold">
               Sessions Authorized <span className="text-red-500">*</span>
             </Label>
             <Input
@@ -411,11 +411,11 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               placeholder="e.g. 20"
               value={newSessions}
               onChange={(e) => setNewSessions(e.target.value)}
-              className="border-brand-blue/30 focus:border-brand-blue"
+              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-auth-date" className="text-brand-blue font-semibold">
+            <Label htmlFor="new-auth-date" className="text-[#1E3A5F] font-semibold">
               Authorization Date
             </Label>
             <Input
@@ -423,18 +423,18 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               type="date"
               value={newAuthDate}
               onChange={(e) => setNewAuthDate(e.target.value)}
-              className="border-brand-blue/30 focus:border-brand-blue"
+              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-insurance" className="text-brand-blue font-semibold">
+            <Label htmlFor="new-insurance" className="text-[#1E3A5F] font-semibold">
               Insurance Company
             </Label>
             <Select
               value={newInsurance}
               onValueChange={setNewInsurance}
             >
-              <SelectTrigger id="new-insurance" className="border-brand-blue/30 focus:border-brand-blue">
+              <SelectTrigger id="new-insurance" className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]">
                 <SelectValue placeholder="Select insurance company" />
               </SelectTrigger>
               <SelectContent>
@@ -450,7 +450,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-auth-valid-until" className="text-brand-blue font-semibold">
+            <Label htmlFor="new-auth-valid-until" className="text-[#1E3A5F] font-semibold">
               Authorization Valid Until <span className="text-gray-400 font-normal">(optional)</span>
             </Label>
             <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
@@ -459,7 +459,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               type="date"
               value={newAuthValidUntil}
               onChange={(e) => setNewAuthValidUntil(e.target.value)}
-              className="border-brand-blue/30 focus:border-brand-blue"
+              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
             />
           </div>
           <div className="rounded-lg bg-blue-50 border border-blue-200 p-3 text-sm text-blue-800">
@@ -527,7 +527,7 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
       <div className="mb-6 bg-orange-50 border-l-4 border-orange-400 rounded-lg p-4">
         <div className="flex items-center gap-2 mb-3">
           <AlertCircle className="w-5 h-5 text-orange-500" />
-          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up Needed</h2>
+          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up Needed</h2>
         </div>
         <div className="text-sm text-gray-500">Loading unpaid claims…</div>
       </div>
@@ -539,7 +539,7 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
       <div className="mb-6 bg-green-50 border-l-4 border-green-500 rounded-lg p-4">
         <div className="flex items-center gap-2 mb-2">
           <CheckCircle2 className="w-5 h-5 text-green-500" />
-          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up</h2>
+          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up</h2>
         </div>
         <p className="text-sm text-green-700">All billed claims have received insurance reimbursement. No follow-up needed.</p>
       </div>
@@ -551,7 +551,7 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <AlertCircle className="w-5 h-5 text-orange-500 animate-pulse" />
-          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up Needed</h2>
+          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up Needed</h2>
           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 text-orange-800">
             {unpaidClaims.length} claim{unpaidClaims.length !== 1 ? 's' : ''}
           </span>
@@ -1732,9 +1732,9 @@ export default function Dashboard() {
 
   if (patientsLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-brand-cream to-white flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4 text-brand-blue">
-          <Loader2 className="w-10 h-10 animate-spin text-brand-gold" />
+      <div className="min-h-screen bg-gradient-to-b from-[#FAF5EE] to-white flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4 text-[#1E3A5F]">
+          <Loader2 className="w-10 h-10 animate-spin text-[#E8A93C]" />
           <p className="text-lg font-semibold">Loading patient data…</p>
         </div>
       </div>
@@ -1745,13 +1745,13 @@ export default function Dashboard() {
 
   if (showDetailView && activePatient) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-brand-cream to-white">
+      <div className="min-h-screen bg-gradient-to-b from-[#FAF5EE] to-white">
         {/* Header */}
-        <div className="bg-brand-blue text-white py-6">
+        <div className="bg-[#1E3A5F] text-white py-6">
           <div className="container">
             <button
               onClick={() => setShowDetailView(false)}
-              className="flex items-center gap-2 text-brand-gold hover:text-white mb-4 transition-colors"
+              className="flex items-center gap-2 text-[#E8A93C] hover:text-white mb-4 transition-colors"
             >
               <ChevronLeft className="w-5 h-5" />
               Back to Dashboard
@@ -1759,7 +1759,7 @@ export default function Dashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="text-4xl font-bold">{activePatient.name}</h1>
-                <p className="text-brand-gold mt-2">Detailed Visit Records — {activePatient.insurance}</p>
+                <p className="text-[#E8A93C] mt-2">Detailed Visit Records — {activePatient.insurance}</p>
               </div>
               <div className="flex items-center gap-4">
                 {/* Active / Inactive toggle */}
@@ -1784,7 +1784,7 @@ export default function Dashboard() {
                 </div>
                 <button
                   onClick={() => refetchVisits()}
-                  className="flex items-center gap-2 text-brand-gold hover:text-white transition-colors text-sm"
+                  className="flex items-center gap-2 text-[#E8A93C] hover:text-white transition-colors text-sm"
                 >
                   <RefreshCw className="w-4 h-4" />
                   Refresh
@@ -1836,9 +1836,9 @@ export default function Dashboard() {
           {/* Summary cards */}
           <div className="grid grid-cols-3 gap-4 mb-8">
             {[
-              { label: 'Authorized', value: activeMetrics.totalAuthorized, color: 'text-brand-blue' },
-              { label: 'Completed', value: activeMetrics.completed, color: 'text-brand-gold' },
-              { label: 'Remaining', value: activeMetrics.remaining, color: 'text-brand-blue' },
+              { label: 'Authorized', value: activeMetrics.totalAuthorized, color: 'text-[#1E3A5F]' },
+              { label: 'Completed', value: activeMetrics.completed, color: 'text-[#E8A93C]' },
+              { label: 'Remaining', value: activeMetrics.remaining, color: 'text-[#1E3A5F]' },
             ].map(({ label, value, color }) => (
               <Card key={label} className="border-[#F0E9DC] shadow-md">
                 <CardContent className="pt-6">
@@ -1851,8 +1851,8 @@ export default function Dashboard() {
 
           {/* Visit Records — one Card per auth period */}
           {visitsLoading ? (
-            <div className="flex items-center justify-center py-12 text-brand-blue">
-              <Loader2 className="w-6 h-6 animate-spin mr-2 text-brand-gold" />
+            <div className="flex items-center justify-center py-12 text-[#1E3A5F]">
+              <Loader2 className="w-6 h-6 animate-spin mr-2 text-[#E8A93C]" />
               Loading visits…
             </div>
           ) : visits.length === 0 ? (
@@ -1903,12 +1903,12 @@ export default function Dashboard() {
                             </DialogTrigger>
                             <DialogContent className="bg-white">
                               <DialogHeader>
-                                <DialogTitle className="text-brand-blue">Log New Session</DialogTitle>
+                                <DialogTitle className="text-[#1E3A5F]">Log New Session</DialogTitle>
                                 <DialogDescription>Record a therapy session for {activePatient.name}</DialogDescription>
                               </DialogHeader>
                               <div className="space-y-4">
                                 <div>
-                                  <Label className="text-brand-blue font-semibold">Date of Service</Label>
+                                  <Label className="text-[#1E3A5F] font-semibold">Date of Service</Label>
                                   <Input
                                     type="date"
                                     value={sessionDate}
@@ -1916,7 +1916,7 @@ export default function Dashboard() {
                                     className="border-[#F0E9DC] mt-2"
                                   />
                                 </div>
-                                <div className="bg-brand-cream rounded-lg p-4 text-sm text-brand-blue">
+                                <div className="bg-[#FAF5EE] rounded-lg p-4 text-sm text-[#1E3A5F]">
                                   <p><strong>Sessions remaining:</strong> {activeMetrics.remaining}</p>
                                   <p><strong>After this session:</strong> {Math.max(0, activeMetrics.remaining - 1)}</p>
                                 </div>
@@ -1924,7 +1924,7 @@ export default function Dashboard() {
                                   <Button
                                     onClick={handleLogSession}
                                     disabled={createVisit.isPending}
-                                    className="flex-1 bg-brand-blue hover:bg-[#152A47] text-white font-semibold"
+                                    className="flex-1 bg-[#1E3A5F] hover:bg-[#152A47] text-white font-semibold"
                                   >
                                     {createVisit.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <CheckCircle2 className="w-4 h-4 mr-2" />}
                                     Confirm Session
@@ -1959,7 +1959,7 @@ export default function Dashboard() {
                       {periodVisits.map((visit) => (
                         <tr key={visit.id} className="hover:bg-brand-cream/30 transition-colors">
                           {/* Auth Date */}
-                          <td className="px-6 py-4 text-sm text-brand-blue whitespace-nowrap">
+                          <td className="px-6 py-4 text-sm text-[#1E3A5F] whitespace-nowrap">
                             {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* # Authorized */}
@@ -1992,7 +1992,7 @@ export default function Dashboard() {
                                   type="date"
                                   value={editingAshValue}
                                   onChange={e => setEditingAshValue(e.target.value)}
-                                  className="border border-brand-gold rounded-md px-2 py-1.5 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
+                                  className="border border-brand-gold rounded-md px-2 py-1.5 text-sm text-[#1E3A5F] focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
                                   autoFocus
                                 />
                                 <button
@@ -2016,7 +2016,7 @@ export default function Dashboard() {
                                 title="Click to edit Date ASH Submitted"
                               >
                                 <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
-                                <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>
+                                <span className={visit.dateAshSubmitted ? 'text-[#1E3A5F] text-sm' : 'text-sm italic'}>
                                   {visit.dateAshSubmitted ? formatDate(visit.dateAshSubmitted) : 'Click to set date'}
                                 </span>
                               </button>
@@ -2955,26 +2955,26 @@ export default function Dashboard() {
                 </DialogTrigger>
                 <DialogContent className="bg-white max-w-md">
                   <DialogHeader>
-                    <DialogTitle className="text-brand-blue">Bulk Upload Patient Data</DialogTitle>
+                    <DialogTitle className="text-[#1E3A5F]">Bulk Upload Patient Data</DialogTitle>
                     <DialogDescription>Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions</DialogDescription>
                   </DialogHeader>
                   <div className="space-y-4">
-                    <div className="border-2 border-dashed border-[#F0E9DC] rounded-lg p-6 text-center hover:border-brand-gold transition-colors">
+                    <div className="border-2 border-dashed border-[#F0E9DC] rounded-lg p-6 text-center hover:border-[#E8A93C] transition-colors">
                       <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" id="file-upload" />
                       <label htmlFor="file-upload" className="cursor-pointer block">
-                        <Upload className="w-8 h-8 text-brand-gold mx-auto mb-2" />
-                        <p className="text-brand-blue font-semibold">Click to upload CSV</p>
+                        <Upload className="w-8 h-8 text-[#E8A93C] mx-auto mb-2" />
+                        <p className="text-[#1E3A5F] font-semibold">Click to upload CSV</p>
                       </label>
                     </div>
                     {uploadProgress > 0 && uploadProgress < 100 && (
                       <div className="w-full bg-[#F0E9DC] rounded-full h-2">
-                        <div className="bg-brand-gold h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
+                        <div className="bg-[#E8A93C] h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
                       </div>
                     )}
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
                       <div className="flex items-center justify-between mb-2">
                         <p className="font-semibold">CSV Format:</p>
-                        <button onClick={handleDownloadTemplate} className="flex items-center gap-1.5 bg-brand-blue hover:bg-[#152A47] text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors">
+                        <button onClick={handleDownloadTemplate} className="flex items-center gap-1.5 bg-[#1E3A5F] hover:bg-[#152A47] text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors">
                           <Download className="w-3.5 h-3.5" />
                           Download Template
                         </button>
@@ -2995,34 +2995,34 @@ export default function Dashboard() {
                 </DialogTrigger>
                 <DialogContent className="bg-white">
                   <DialogHeader>
-                    <DialogTitle className="text-brand-blue">Add New Patient</DialogTitle>
+                    <DialogTitle className="text-[#1E3A5F]">Add New Patient</DialogTitle>
                     <DialogDescription>Enter patient details to add them to the clinic dashboard</DialogDescription>
                   </DialogHeader>
                   <div className="space-y-4">
                     <div>
-                      <Label htmlFor="patient-name" className="text-brand-blue font-semibold">Patient Name</Label>
+                      <Label htmlFor="patient-name" className="text-[#1E3A5F] font-semibold">Patient Name</Label>
                       <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-[#F0E9DC] mt-2" />
                     </div>
                     <div>
-                      <Label htmlFor="insurance" className="text-brand-blue font-semibold">Insurance Company</Label>
-                      <select id="insurance" value={newPatientInsurance} onChange={e => setNewPatientInsurance(e.target.value)} className="w-full border border-[#F0E9DC] rounded-md px-3 py-2 mt-2 bg-white text-brand-blue font-medium">
+                      <Label htmlFor="insurance" className="text-[#1E3A5F] font-semibold">Insurance Company</Label>
+                      <select id="insurance" value={newPatientInsurance} onChange={e => setNewPatientInsurance(e.target.value)} className="w-full border border-[#F0E9DC] rounded-md px-3 py-2 mt-2 bg-white text-[#1E3A5F] font-medium">
                         {insuranceList.map(ins => <option key={ins} value={ins}>{ins}</option>)}
                       </select>
                     </div>
                     <div>
-                      <Label htmlFor="authorized-sessions" className="text-brand-blue font-semibold">Authorized Sessions (optional)</Label>
+                      <Label htmlFor="authorized-sessions" className="text-[#1E3A5F] font-semibold">Authorized Sessions (optional)</Label>
                       <Input id="authorized-sessions" placeholder="e.g. 12" type="number" value={newPatientAuthorized} onChange={e => setNewPatientAuthorized(e.target.value)} className="border-[#F0E9DC] mt-2" />
                     </div>
                     <div>
-                      <Label htmlFor="auth-date" className="text-brand-blue font-semibold">Authorization Date (optional)</Label>
+                      <Label htmlFor="auth-date" className="text-[#1E3A5F] font-semibold">Authorization Date (optional)</Label>
                       <Input id="auth-date" type="date" value={newPatientAuthDate} onChange={e => setNewPatientAuthDate(e.target.value)} className="border-[#F0E9DC] mt-2" />
                     </div>
                     <div>
-                      <Label htmlFor="auth-valid-until" className="text-brand-blue font-semibold">Authorization Valid Until (optional)</Label>
+                      <Label htmlFor="auth-valid-until" className="text-[#1E3A5F] font-semibold">Authorization Valid Until (optional)</Label>
                       <p className="text-xs text-gray-500 mt-0.5">Staff will be alerted 1 week before this date to request a new authorization.</p>
                       <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-[#F0E9DC] mt-2" />
                     </div>
-                    <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-brand-blue hover:bg-[#152A47] text-white font-semibold">
+                    <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-[#1E3A5F] hover:bg-[#152A47] text-white font-semibold">
                       {(createPatient.isPending || bulkCreateVisits.isPending) ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
                       Add Patient
                     </Button>
@@ -3040,9 +3040,9 @@ export default function Dashboard() {
         {/* KPI Cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           {[
-            { icon: <Users className="w-5 h-5 text-brand-blue" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', color: 'text-brand-blue' },
-            { icon: <CheckCircle2 className="w-5 h-5 text-brand-gold" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', color: 'text-brand-gold' },
-            { icon: <Clock className="w-5 h-5 text-brand-blue" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Active patient', color: 'text-brand-blue' },
+            { icon: <Users className="w-5 h-5 text-[#1E3A5F]" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', color: 'text-[#1E3A5F]' },
+            { icon: <CheckCircle2 className="w-5 h-5 text-[#E8A93C]" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', color: 'text-[#E8A93C]' },
+            { icon: <Clock className="w-5 h-5 text-[#1E3A5F]" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Active patient', color: 'text-[#1E3A5F]' },
             { icon: <AlertCircle className="w-5 h-5 text-[#DC2626]" />, label: 'Utilization Rate', value: `${clinicMetrics.utilizationRate}%`, sub: 'Sessions completed', color: 'text-[#DC2626]' },
           ].map(({ icon, label, value, sub, color }) => (
             <Card key={label} className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition">
@@ -3157,7 +3157,7 @@ export default function Dashboard() {
                           className="flex-1 text-left p-3 min-w-0"
                         >
                           <p className={`font-semibold whitespace-normal cursor-pointer transition-colors ${
-                            isActive ? 'text-white' : 'text-brand-blue hover:text-brand-gold'
+                            isActive ? 'text-white' : 'text-[#1E3A5F] hover:text-[#E8A93C]'
                           }`}>
                             {patient.name}
                           </p>
@@ -3297,7 +3297,7 @@ export default function Dashboard() {
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <button onClick={() => setShowDetailView(true)} className="group">
-                          <CardTitle className="text-2xl font-serif font-bold text-brand-blue group-hover:text-brand-gold transition-colors cursor-pointer">
+                          <CardTitle className="text-2xl font-serif font-bold text-brand-blue group-hover:text-[#E8A93C] transition-colors cursor-pointer">
                             {activePatient.name}
                           </CardTitle>
                         </button>
@@ -3399,7 +3399,7 @@ export default function Dashboard() {
       <Dialog open={showDischargeDialog} onOpenChange={(open) => { if (!open) { setShowDischargeDialog(false); setPendingDischargePatientId(null); } }}>
         <DialogContent className="bg-white max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-brand-blue text-xl flex items-center gap-2">
+            <DialogTitle className="text-[#1E3A5F] text-xl flex items-center gap-2">
               <UserX className="w-5 h-5 text-gray-500" />
               Discharge Patient
             </DialogTitle>
@@ -3409,23 +3409,23 @@ export default function Dashboard() {
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div>
-              <Label htmlFor="discharge-date" className="text-brand-blue font-semibold">Date of Discharge</Label>
+              <Label htmlFor="discharge-date" className="text-[#1E3A5F] font-semibold">Date of Discharge</Label>
               <Input
                 id="discharge-date"
                 type="date"
                 value={dischargeDate}
                 onChange={e => setDischargeDate(e.target.value)}
-                className="mt-1 border-[#F0E9DC] focus:border-brand-blue"
+                className="mt-1 border-[#F0E9DC] focus:border-[#1E3A5F]"
               />
             </div>
             <div>
-              <Label htmlFor="discharge-reason" className="text-brand-blue font-semibold">Reason of Discharge</Label>
+              <Label htmlFor="discharge-reason" className="text-[#1E3A5F] font-semibold">Reason of Discharge</Label>
               <Input
                 id="discharge-reason"
                 placeholder="e.g. Goals met, Moved, Insurance ended…"
                 value={dischargeReason}
                 onChange={e => setDischargeReason(e.target.value)}
-                className="mt-1 border-[#F0E9DC] focus:border-brand-blue"
+                className="mt-1 border-[#F0E9DC] focus:border-[#1E3A5F]"
               />
             </div>
           </div>
@@ -3453,14 +3453,14 @@ export default function Dashboard() {
       <AlertDialog open={deletePatientId !== null} onOpenChange={(open) => { if (!open) { setDeletePatientId(null); setDeletePatientName(''); } }}>
         <AlertDialogContent className="bg-white">
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-brand-blue text-xl">Delete Patient?</AlertDialogTitle>
+            <AlertDialogTitle className="text-[#1E3A5F] text-xl">Delete Patient?</AlertDialogTitle>
             <AlertDialogDescription className="text-[#6B7280]">
               You are about to permanently delete <strong>{deletePatientName}</strong> and all of their visit records.
               This action <strong>cannot be undone</strong>.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="border-[#F0E9DC] text-brand-blue hover:bg-brand-cream">
+            <AlertDialogCancel className="border-[#F0E9DC] text-[#1E3A5F] hover:bg-[#FAF5EE]">
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
