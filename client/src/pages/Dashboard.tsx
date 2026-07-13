@@ -1294,7 +1294,7 @@ export default function Dashboard() {
                 _key: row._key, cptCodes: row.cptCodes, chargeAmount: row.chargeAmount,
                 insuranceReimbursement: row.insuranceReimbursement, patientAmountPaid: row.patientAmountPaid,
                 patientAmountDue: row.patientAmountDue, unitsBilled: row.unitsBilled,
-                modifier: row.modifier, diagnosisCodes: row.diagnosisCodes,
+                modifier: row.modifier, diagnosisCodes: row.diagnosisCodes, notes: row.notes,
               });
             }
             const normalized = Array.from(dateGroupMap.values());
@@ -1344,7 +1344,7 @@ export default function Dashboard() {
                 _key: row._key, cptCodes: row.cptCodes, chargeAmount: row.chargeAmount,
                 insuranceReimbursement: row.insuranceReimbursement, patientAmountPaid: row.patientAmountPaid,
                 patientAmountDue: row.patientAmountDue, unitsBilled: row.unitsBilled,
-                modifier: row.modifier, diagnosisCodes: row.diagnosisCodes,
+                modifier: row.modifier, diagnosisCodes: row.diagnosisCodes, notes: row.notes,
               });
             }
             const normalized = Array.from(dateGroupMap.values());
@@ -1420,6 +1420,7 @@ export default function Dashboard() {
           unitsBilled: row.unitsBilled,
           modifier: row.modifier,
           diagnosisCodes: row.diagnosisCodes,
+          notes: row.notes,
         });
       }
       const normalized = Array.from(dateGroupMap.values());
@@ -2666,7 +2667,17 @@ export default function Dashboard() {
                                 : <span className="text-gray-300">—</span>
                             ) : null}
                           </td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 font-mono text-blue-700">{line.cptCodes || <span className="text-gray-300">—</span>}</td>
+                          <td className="px-3 py-1.5 border-r border-gray-200 font-mono text-blue-700">
+                            <span className="inline-flex items-center gap-1">
+                              {line.cptCodes || <span className="text-gray-300">—</span>}
+                              {line.notes ? (
+                                <AlertTriangle
+                                  className={`w-3 h-3 flex-shrink-0 ${line.notes.includes('⚠️') ? 'text-amber-500' : 'text-gray-400'}`}
+                                  title={line.notes}
+                                />
+                              ) : null}
+                            </span>
+                          </td>
                           <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.chargeAmount ? `$${parseFloat(line.chargeAmount).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
                           <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.insuranceReimbursement ? `$${parseFloat(line.insuranceReimbursement).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
                           <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.patientAmountPaid ? `$${parseFloat(line.patientAmountPaid).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
