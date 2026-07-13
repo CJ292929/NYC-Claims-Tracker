@@ -158,6 +158,8 @@ IMPORTANT:
 - If multiple patients are in the document, create separate claim objects for each patient's claims
 - Patient name is REQUIRED - never leave it null or empty
 - Use null (not a guess) for any field that isn't actually visible in the document
+- Each individual service line is its own claim object — never combine two service lines (e.g. two different CPT codes) into one object. If you see two CPT codes on what looks like one row, that's two service lines that got visually close together; output them as two separate claim objects, never as one object with a comma-joined cptCodes value.
+- Never output a CLAIM TOTALS, SUBTOTAL, or grand-total row as a service line — those summary rows repeat/sum the individual lines' amounts (e.g. a $700 total when the actual lines are $350/$175/$175) and must be skipped entirely, not extracted as their own claim or used as any line's chargeAmount.
 - Return ONLY valid JSON, no markdown or explanations.`
       : `You are a medical claims data extraction specialist. Extract all CMS-1500 Health Insurance Claim Form information accurately from the provided document text.
 
