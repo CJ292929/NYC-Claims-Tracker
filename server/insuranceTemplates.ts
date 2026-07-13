@@ -523,6 +523,24 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
 
   const claims = Array.from(dateMap.values());
   if (claims.length === 0) return [];
+
+  // bulkImportFromEOB (server/routers.ts) reads per-service-line data from
+  // cptLines when present, but falls back to the DateClaimGroup's own
+  // top-level fields when cptLines is empty (e.g. the date/POS/diagnosis
+  // area matched but no individual service line did) — so those top-level
+  // fields shouldn't be left at their placeholder null forever when at least
+  // one cptLine was actually found. Representative of the group's first line;
+  // exact for the common single-CPT-line-per-date case.
+  for (const claim of claims) {
+    if (claim.cptLines.length > 0) {
+      const first = claim.cptLines[0];
+      claim.cptCodes = claim.cptLines.map(l => l.cptCodes).filter(Boolean).join(', ') || null;
+      claim.chargeAmount = first.chargeAmount;
+      claim.unitsBilled = first.unitsBilled;
+      claim.modifier = first.modifier;
+    }
+  }
+
   return [{ patientName, claims }];
 }
 

@@ -159,7 +159,7 @@ export async function extractClaimsWithAI(
 
 Payers lay these documents out very differently — a table of many patients on one page, a single-patient web-portal export, a per-claim narrative block, etc. Do not assume there is only one patient name at the top of the document: scan the ENTIRE document and re-identify the patient name at each claim/service-line block, since one EOB commonly covers many different patients (e.g. a check remitting payment for a whole clinic's batch of claims).
 
-For each claim/service line, extract:
+For each claim/service line, extract EVERY one of these fields when it appears anywhere in the document — a payment line's reimbursement, patient-paid, patient-due, claim #, check date, and check/EFT number are often printed in different parts of the same claim block, not all in one place, so check the whole block before leaving any of them null:
 - patientName: REQUIRED - full name exactly as shown next to that specific claim (e.g., "JOHN SMITH" or "Smith, John" or "JOHN M SMITH"). Never reuse a different claim's patient name.
 - dateOfService: MM/DD/YYYY format — extracted only to match this payment to the correct existing claim record, not as reimbursement data
 - cptCodes: CPT/HCPCS code(s), comma-separated if multiple — extracted only to match this payment to the correct existing claim record, not as reimbursement data
@@ -194,19 +194,22 @@ IMPORTANT:
 
 *** DOCUMENT-TYPE BOUNDARY: This is a CMS-1500 claim form. Only extract billing-side data — dateOfService, placeOfService, diagnosisCodes, unitsBilled, modifier, cptCodes, and chargeAmount. NEVER extract insuranceReimbursement, patientAmountPaid, patientAmountDue, oaClaimNumber (Claim #), checkDate, or checkNumberVirtualCard (Check/EFT) — those belong exclusively to Reimbursement/EOB payment documents and a CMS-1500 form never carries that data. ***
 
-For each claim, extract:
+For each service line, extract EVERY one of these fields when it appears anywhere in the document — do not leave a field null just because it wasn't on the exact box you checked first; CPT/charge/units/modifier are frequently printed on the same physical row and must all be read together:
 - patientName: REQUIRED - from Box 2 of form (e.g., "JOHN SMITH" or "Smith, John")
 - dateOfService: MM/DD/YYYY format (from Box 24A)
 - placeOfService: place of service code (from Box 24B)
 - cptCodes: CPT/HCPCS code(s), comma-separated if multiple (from Box 24D)
 - diagnosisCodes: ICD-10 diagnosis codes, comma-separated (from Box 21)
-- unitsBilled: units billed (from Box 24G)
-- modifier: modifier codes if present (from Box 24D)
-- chargeAmount: total charge amount (numeric only)
+- unitsBilled: units/days billed (from Box 24G — labeled "DAYS OR UNITS")
+- modifier: modifier codes if present (from Box 24D, immediately after the CPT code)
+- chargeAmount: total charge amount for this line (numeric only, from Box 24F)
+- claimSubmittedDate: MM/DD/YYYY format — the physician/supplier signature date (from Box 31, usually printed after "SIGNED"/"DATE")
 - insuranceBilled: the insurance plan/payer name this form was submitted to (from Box 11c "Insurance Plan Name" if present, otherwise Box 1 "Other" plan name, otherwise the carrier name printed in the form's letterhead/address block)
 
 IMPORTANT:
 - Patient name is REQUIRED - never leave it null or empty
+- Extract one service line = one claim object. A CMS-1500 form with multiple service lines (Box 24, rows 1-6) must produce one claim object per row, each with its OWN dateOfService/cptCodes/chargeAmount/unitsBilled/modifier — never merge two rows together or repeat the same row's values across every date.
+- Use null (not a guess) only for a field that is genuinely not visible anywhere in the document — do not leave a field null when the value is printed on the form.
 - Return ONLY valid JSON, no markdown or explanations.`;
 
   const instruction =
@@ -269,6 +272,7 @@ IMPORTANT:
     diagnosisCodes: { type: ["string", "null"] },
     unitsBilled: { type: ["number", "null"] },
     modifier: { type: ["string", "null"] },
+    claimSubmittedDate: { type: ["string", "null"] },
     claimStatus: {
       type: "string",
       enum: ["submitted", "approved", "denied"],
@@ -382,7 +386,7 @@ IMPORTANT:
         // above), so applying detectedInsurer to every claim uniformly would
         // mislabel any claim whose actual payer differs from the letterhead.
         insuranceBilled: claim.insuranceBilled || parsed.detectedInsurer || "Unknown",
-        claimSubmittedDate: null,
+        claimSubmittedDate: claim.claimSubmittedDate || null,
         expireBcbsClaimNumber: null,
         paymentReceived: null,
         lmn: null,
