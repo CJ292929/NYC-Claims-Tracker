@@ -89,6 +89,22 @@ function verifyClaimAgainstSourceText(claim: ExtractedClaim, sourceText: string)
 }
 
 /**
+ * Finds the single line of source text a claim's CPT code appears on, so
+ * staff reviewing the extraction can see the literal text a claim was read
+ * from without having to re-open the source document. Best-effort only —
+ * returns null rather than guessing when the code can't be located (e.g.
+ * the vision/PDF path, which has no separate source text to search).
+ */
+function findSourceLineForClaim(claim: ExtractedClaim, sourceText: string): string | null {
+  if (!claim.cptCodes) return null;
+  const cptCore = claim.cptCodes.match(/^[A-Z]?\d{4,5}/)?.[0] ?? claim.cptCodes;
+  const line = sourceText
+    .split("\n")
+    .find((l) => l.includes(claim.cptCodes!) || l.includes(cptCore));
+  return line ? line.trim().replace(/\s+/g, " ") : null;
+}
+
+/**
  * Extract claims from PDF text using the configured AI provider's structured
  * JSON capabilities (see server/_core/llm.ts — OpenAI GPT-4 Vision by
  * default, swappable via AI_PROVIDER). Handles both Reimbursement (EOB) and
@@ -355,6 +371,17 @@ IMPORTANT:
             warnings.join("; ")
           );
           claim.notes = [claim.notes, `⚠️ Unverified against source: ${warnings.join("; ")}`]
+            .filter(Boolean)
+            .join(" | ");
+        }
+
+        // Audit trail: attach the literal source line a claim's CPT code was
+        // read from, regardless of verification outcome, so staff reviewing
+        // the extraction (before it's saved) can eyeball it against the
+        // structured fields without reopening the source document.
+        const sourceLine = findSourceLineForClaim(claim, source.text);
+        if (sourceLine) {
+          claim.notes = [claim.notes, `📄 Source: "${sourceLine}"`]
             .filter(Boolean)
             .join(" | ");
         }
