@@ -49,9 +49,9 @@ function recoverJson(raw: string): any | null {
 
 /**
  * Extract claims from PDF text using the configured AI provider's structured
- * JSON capabilities (see server/_core/llm.ts — Anthropic Claude by default,
- * swappable via AI_PROVIDER). Handles both Reimbursement (EOB) and CMS1500
- * upload types.
+ * JSON capabilities (see server/_core/llm.ts — OpenAI GPT-4 Vision by
+ * default, swappable via AI_PROVIDER). Handles both Reimbursement (EOB) and
+ * CMS1500 upload types.
  * CRITICAL: Ensures patient name is extracted for each claim
  */
 export async function extractClaimsWithAI(

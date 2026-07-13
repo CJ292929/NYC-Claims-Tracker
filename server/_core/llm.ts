@@ -304,9 +304,9 @@ const computeBackoffDelay = (
 
 // Retries non-2xx responses and network errors with exponential backoff, then
 // returns the final Response so callers keep their existing error handling.
-// Provider-agnostic: every adapter below (Anthropic, OpenRouter) routes its
-// HTTP call through this so rate-limit/timeout/network handling stays
-// identical no matter which vendor is active.
+// Provider-agnostic: every adapter below (OpenAI, Anthropic, OpenRouter)
+// routes its HTTP call through this so rate-limit/timeout/network handling
+// stays identical no matter which vendor is active.
 const fetchWithBackoff = async (
   url: string,
   init: FetchInit
@@ -371,11 +371,87 @@ const fetchWithTimeout = async (
 };
 
 // ---------------------------------------------------------------------------
-// Anthropic (Claude) adapter — primary provider. Native Messages API, not
-// OpenAI-compatible, so it gets its own request/response translation. This
-// is the only place that knows Anthropic's wire format; everything above and
-// everything calling invokeLLM() only ever sees the InvokeParams/InvokeResult
-// shapes already used throughout the app.
+// OpenAI adapter — primary provider. Native Chat Completions API. This is
+// the OpenAI-compatible wire format everything else in this file is already
+// normalized against (see normalizeMessage/normalizeToolChoice/
+// normalizeResponseFormat above), so the request body is built directly from
+// those shared helpers — no vendor-specific translation needed, unlike the
+// Anthropic adapter below.
+// ---------------------------------------------------------------------------
+
+const resolveOpenAIUrl = () => "https://api.openai.com/v1/chat/completions";
+
+async function invokeOpenAI(params: InvokeParams): Promise<InvokeResult> {
+  if (!ENV.openaiApiKey) {
+    throw new Error("OPENAI_API_KEY is not configured");
+  }
+
+  const {
+    messages,
+    tools,
+    toolChoice,
+    tool_choice,
+    outputSchema,
+    output_schema,
+    responseFormat,
+    response_format,
+    model,
+    maxTokens,
+    max_tokens,
+  } = params;
+
+  const payload: Record<string, unknown> = {
+    model: model || ENV.openaiModel,
+    messages: messages.map(normalizeMessage),
+  };
+
+  if (tools && tools.length > 0) {
+    payload.tools = tools;
+  }
+
+  const normalizedToolChoice = normalizeToolChoice(toolChoice || tool_choice, tools);
+  if (normalizedToolChoice) {
+    payload.tool_choice = normalizedToolChoice;
+  }
+
+  const resolvedMaxTokens = max_tokens ?? maxTokens;
+  if (typeof resolvedMaxTokens === "number") {
+    payload.max_tokens = resolvedMaxTokens;
+  }
+
+  const normalizedResponseFormat = normalizeResponseFormat({
+    responseFormat,
+    response_format,
+    outputSchema,
+    output_schema,
+  });
+  if (normalizedResponseFormat) {
+    payload.response_format = normalizedResponseFormat;
+  }
+
+  const response = await fetchWithTimeout(resolveOpenAIUrl(), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${ENV.openaiApiKey}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`LLM invoke failed: ${response.status} ${response.statusText} – ${errorText}`);
+  }
+
+  return (await response.json()) as InvokeResult;
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic (Claude) adapter — secondary/swap provider. Native Messages API,
+// not OpenAI-compatible, so it gets its own request/response translation.
+// This is the only place that knows Anthropic's wire format; everything
+// above and everything calling invokeLLM() only ever sees the
+// InvokeParams/InvokeResult shapes already used throughout the app.
 // ---------------------------------------------------------------------------
 
 const ANTHROPIC_API_VERSION = "2023-06-01";
@@ -684,7 +760,10 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
     if (provider === "anthropic") {
       return await invokeAnthropic(params);
     }
-    throw new Error(`Unsupported AI_PROVIDER "${provider}". Use "anthropic" or "openrouter".`);
+    if (provider === "openai") {
+      return await invokeOpenAI(params);
+    }
+    throw new Error(`Unsupported AI_PROVIDER "${provider}". Use "openai", "anthropic", or "openrouter".`);
   } catch (error) {
     console.error(`[LLM:${provider}] invoke failed:`, error instanceof Error ? error.message : error);
     throw error;

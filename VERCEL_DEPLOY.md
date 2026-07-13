@@ -79,13 +79,13 @@ The claim-extraction pipeline (`/api/claims/upload-extract`) talks to an AI prov
 
 | Variable | Value | Notes |
 |---|---|---|
-| `AI_PROVIDER` | `anthropic` | Default. Set to `openrouter` to switch providers instead. |
-| `ANTHROPIC_API_KEY` | `sk-ant-...` | Required when `AI_PROVIDER=anthropic`. Get one at [console.anthropic.com](https://console.anthropic.com/settings/keys). |
+| `AI_PROVIDER` | `openai` | Default. Set to `anthropic` or `openrouter` to switch providers instead. |
+| `OPENAI_API_KEY` | `sk-...` | Required when `AI_PROVIDER=openai`. Get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). |
+| `OPENAI_MODEL` | `gpt-4o` (default) | Optional override. Must be a vision-capable GPT-4 model. |
+| `ANTHROPIC_API_KEY` | `sk-ant-...` | Only required when `AI_PROVIDER=anthropic`. Get one at [console.anthropic.com](https://console.anthropic.com/settings/keys). |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5` (default) | Optional override. Must be a PDF/vision-capable Claude model. |
 | `OPENROUTER_API_KEY` | `sk-or-...` | Only required when `AI_PROVIDER=openrouter`. Get one at [openrouter.ai/keys](https://openrouter.ai/keys). |
 | `OPENROUTER_MODEL` | `anthropic/claude-3.5-sonnet` (default) | Optional override — any OpenRouter-hosted model, e.g. `google/gemini-2.0-flash-001`. |
-
-> As of this migration, OpenAI is no longer used anywhere in this project. `OPENAI_API_KEY`/`OPENAI_MODEL`/`BUILT_IN_FORGE_API_URL` pointed at `api.openai.com` can be removed from Vercel if still present from an earlier deploy.
 
 ---
 
