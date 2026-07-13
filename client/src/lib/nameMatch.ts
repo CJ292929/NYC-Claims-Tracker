@@ -1,12 +1,23 @@
 /**
  * client/src/lib/nameMatch.ts
  *
- * Client-side fuzzy patient name matching utility.
- * Mirrors server/nameMatch.ts — keep both in sync if logic changes.
+ * Client-side fuzzy patient name matching utility. Mirrors server/nameMatch.ts.
+ * This result picks which extracted patientGroup gets shown/saved for the
+ * currently active patient in the single-patient upload review flow (see
+ * handleClaimFileUpload in Dashboard.tsx) — a false-positive match here
+ * silently shows/saves a DIFFERENT patient's claims under the active
+ * patient, so every strategy below requires the FULL set of name tokens to
+ * match (just possibly reordered), never a partial/initial-only overlap.
  *
- * Handles format mismatches between EOB/CMS1500 and dashboard:
+ * Handles the common mismatch between EOB/CMS1500 formats and dashboard formats:
  *   EOB:       "ALLISON AUYEUNG"   (First Last)
  *   Dashboard: "AUYEUNG, ALLISON"  (Last, First)
+ *   Also:      "SMITH, JOHN JR"    (generational/professional suffix)
+ *
+ * Deliberately NOT included: matching on last name + first initial alone
+ * (e.g. "SMITH J"), or on an arbitrary subset of tokens. Both produce false
+ * positives whenever two different patients share a last name and first
+ * initial, or one patient's full name happens to contain another's.
  */
 
 /** Normalize a name: uppercase, remove commas/punctuation, collapse whitespace */
@@ -43,28 +54,34 @@ function nameVariants(name: string): string[] {
   return Array.from(variants);
 }
 
-/** Check if two name token sets overlap sufficiently */
-function tokenSetMatch(tokensA: string[], tokensB: string[]): boolean {
+/** Generational/professional suffixes tolerated as the one surplus token in
+ *  suffixTolerantMatch — anything else is treated as a genuinely different
+ *  name, not a formatting variation. */
+const NAME_SUFFIXES = new Set([
+  'JR', 'SR', 'II', 'III', 'IV', 'V', 'MD', 'DO', 'PT', 'DPT', 'RN', 'PHD', 'ESQ',
+]);
+
+/**
+ * Suffix-tolerant match: the longer name may have exactly ONE surplus token
+ * beyond the shorter name's full token set, and only if that surplus token is
+ * a recognized generational/professional suffix. An arbitrary extra token is
+ * never accepted — allowing that would mean e.g. "MARY ANN JONES" matches an
+ * unrelated "ANN JONES".
+ */
+function suffixTolerantMatch(tokensA: string[], tokensB: string[]): boolean {
   const [shorter, longer] = tokensA.length <= tokensB.length
     ? [tokensA, tokensB]
     : [tokensB, tokensA];
-  return shorter.every(t => longer.includes(t));
-}
 
-/** Last-name + first-initial match */
-function lastNameFirstInitialMatch(tokensA: string[], tokensB: string[]): boolean {
-  if (tokensA.length < 1 || tokensB.length < 1) return false;
-  for (const a of tokensA) {
-    for (const b of tokensB) {
-      if (a === b) {
-        const aOthers = tokensA.filter(t => t !== a);
-        const bOthers = tokensB.filter(t => t !== b);
-        if (aOthers.length === 0 || bOthers.length === 0) continue;
-        if (aOthers[0][0] === bOthers[0][0]) return true;
-      }
-    }
+  if (longer.length !== shorter.length + 1) return false;
+
+  const remaining = [...longer];
+  for (const t of shorter) {
+    const idx = remaining.indexOf(t);
+    if (idx === -1) return false;
+    remaining.splice(idx, 1);
   }
-  return false;
+  return remaining.length === 1 && NAME_SUFFIXES.has(remaining[0]);
 }
 
 /**
@@ -100,13 +117,11 @@ export function fuzzyNameMatch(eobName: string, dashName: string): boolean {
     }
   }
 
-  // 4. Last-name + first-initial match
-  if (lastNameFirstInitialMatch(tokensEob, tokensDash)) return true;
-
-  // 5. Partial token overlap (all tokens of shorter appear in longer)
-  if (tokensEob.length >= 2 && tokensDash.length >= 2) {
-    if (tokenSetMatch(tokensEob, tokensDash)) return true;
-  }
+  // 4. Suffix-tolerant match — the only case where token sets are allowed to
+  //    differ, and only by one recognized suffix token. See suffixTolerantMatch
+  //    for why last-name+first-initial and arbitrary-subset heuristics are not
+  //    used: both can match two genuinely different patients.
+  if (suffixTolerantMatch(tokensEob, tokensDash)) return true;
 
   return false;
 }
