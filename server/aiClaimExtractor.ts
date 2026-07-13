@@ -137,7 +137,7 @@ For each claim/service line, extract:
 - insuranceReimbursement: insurance reimbursement/allowed/paid amount (numeric only)
 - patientAmountPaid: patient co-pay amount already paid (numeric only)
 - patientAmountDue: patient balance/responsibility still due (numeric only)
-- oaClaimNumber: claim number/ID/ICN/reference number for this claim
+- oaClaimNumber: claim number/ID/ICN/reference number for this claim — copy it character-for-character exactly as printed; never reformat, abbreviate, or invent one
 - checkDate: check/payment/EFT date in MM/DD/YYYY format
 - checkNumberVirtualCard: check number, EFT trace number, or virtual card number
 - claimStatus: one of "approved", "denied", or "submitted" (infer from context — e.g. a $0 paid line with a denial code is "denied"; a line with a payment amount is "approved")
@@ -157,7 +157,7 @@ IMPORTANT:
 - Re-identify patient name per claim/service-line block — do NOT assume one name applies to the whole document
 - If multiple patients are in the document, create separate claim objects for each patient's claims
 - Patient name is REQUIRED - never leave it null or empty
-- Use null (not a guess) for any field that isn't actually visible in the document
+- Use null (not a guess) for any field that isn't actually visible in the document — do not use outside/training knowledge to fill a gap (e.g. don't infer an insurer's usual claim number format, or a typical charge for a CPT code); if it isn't printed in this text, it's null
 - Each individual service line is its own claim object — never combine two service lines (e.g. two different CPT codes) into one object. If you see two CPT codes on what looks like one row, that's two service lines that got visually close together; output them as two separate claim objects, never as one object with a comma-joined cptCodes value.
 - Never output a CLAIM TOTALS, SUBTOTAL, or grand-total row as a service line — those summary rows repeat/sum the individual lines' amounts (e.g. a $700 total when the actual lines are $350/$175/$175) and must be skipped entirely, not extracted as their own claim or used as any line's chargeAmount.
 - Return ONLY valid JSON, no markdown or explanations.`

@@ -1396,7 +1396,12 @@ export default function Dashboard() {
 
       // ── Single-patient mode (AI or single-patient template) ───────────────
       if (!json.claims || json.claims.length === 0) {
-        toast.error('No claim data could be extracted from this file. Please check the file content.');
+        // extractionNotes carries a specific explanation when extraction ran
+        // successfully but legitimately found nothing (e.g. the patient's
+        // name appears only in a header/subscriber list with no service
+        // lines of their own) -- prefer that over the generic message so
+        // this doesn't read as a failure when nothing actually went wrong.
+        toast.error(json.extractionNotes || 'No claim data could be extracted from this file. Please check the file content.');
         return;
       }
       // This branch is also reached when the AI found MULTIPLE patients but

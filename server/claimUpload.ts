@@ -584,11 +584,33 @@ export function registerClaimUploadRoute(app: Express) {
             });
             return;
           }
+          // extractClaimsWithAI ran successfully and legitimately found zero
+          // claims -- e.g. the requested patient's name appears only in a
+          // header/subscriber list with no service lines of their own. This
+          // is a valid, honest result, not a failure: return it as such
+          // instead of falling through to the legacy fallback below, which
+          // has no patient-name awareness at all and would extract every
+          // patient in the document unfiltered, silently reintroducing
+          // cross-patient contamination through a completely different path
+          // than the ones already hardened in extractClaimsWithAI.
+          console.log('[ClaimUpload] AI extraction succeeded but found zero claims -- returning empty result rather than falling back to the unscoped legacy extractor.');
+          res.json({
+            claims: [],
+            patientGroups: null,
+            extractedLength: extractedText.length,
+            templateUsed: `AI (${aiResult.detectedInsurer || 'Unknown'})`,
+            uploadType: 'reimbursement',
+            confidence: aiResult.confidence,
+            extractionNotes: aiResult.extractionNotes ?? 'No service line data was found for this patient in the document.',
+          });
+          return;
         } catch (aiError) {
           console.error('[ClaimUpload] AI extraction failed (continuing to legacy fallback, request will not crash):', aiError);
         }
 
-        // Step 3: Final fallback to legacy AI extraction — needs actual text,
+        // Step 3: Final fallback to legacy AI extraction — only reached when
+        // extractClaimsWithAI itself threw (see catch above), never for a
+        // legitimate zero-claims result (handled above). Needs actual text,
         // unlike the vision-capable step above, so skip it when we have none.
         if (!extractedText.trim()) {
           console.error('[ClaimUpload] No text and AI extraction failed — returning controlled 422 instead of crashing.');
