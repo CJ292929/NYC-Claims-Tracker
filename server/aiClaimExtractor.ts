@@ -85,6 +85,15 @@ function verifyClaimAgainstSourceText(claim: ExtractedClaim, sourceText: string)
   checkAmount("Reimbursement", claim.insuranceReimbursement);
   checkAmount("Patient due", claim.patientAmountDue);
 
+  const checkStringField = (label: string, value: string | null | undefined) => {
+    if (!value) return;
+    if (!sourceText.includes(value)) {
+      warnings.push(`${label} "${value}" not found in source text`);
+    }
+  };
+  checkStringField("Claim #", claim.oaClaimNumber);
+  checkStringField("Check/EFT", claim.checkNumberVirtualCard);
+
   // Co-occurrence check: catches "right values, wrong row" fabrication that
   // the independent checks above can't see — e.g. a model that sees the same
   // 4 CPT codes repeat across two dates and extends that pattern to a third
@@ -146,17 +155,14 @@ export async function extractClaimsWithAI(
 
 *** CRITICAL: You MUST extract the PATIENT NAME for EACH claim, individually. This is required for matching against the clinic's patient database. ***
 
+*** DOCUMENT-TYPE BOUNDARY: This is a Reimbursement/EOB document. Only extract payment-side data — insuranceReimbursement, patientAmountPaid, patientAmountDue, oaClaimNumber (Claim #), checkDate (Check/Payment Date), and checkNumberVirtualCard (Check/EFT) — plus dateOfService and cptCodes, which you extract ONLY to identify which existing claim this payment applies to, never as billing data. NEVER extract placeOfService, diagnosisCodes, unitsBilled, modifier, or chargeAmount — those belong exclusively to CMS-1500 claim forms and must not appear on a Reimbursement/EOB record. ***
+
 Payers lay these documents out very differently — a table of many patients on one page, a single-patient web-portal export, a per-claim narrative block, etc. Do not assume there is only one patient name at the top of the document: scan the ENTIRE document and re-identify the patient name at each claim/service-line block, since one EOB commonly covers many different patients (e.g. a check remitting payment for a whole clinic's batch of claims).
 
 For each claim/service line, extract:
 - patientName: REQUIRED - full name exactly as shown next to that specific claim (e.g., "JOHN SMITH" or "Smith, John" or "JOHN M SMITH"). Never reuse a different claim's patient name.
-- dateOfService: MM/DD/YYYY format
-- placeOfService: place of service code (e.g. "11", "12") or description if no code is shown
-- cptCodes: CPT/HCPCS code(s), comma-separated if multiple
-- unitsBilled: units/quantity billed (numeric; default to 1 if the document doesn't show a units column)
-- diagnosisCodes: ICD-10 diagnosis code(s) if visible anywhere near the claim, comma-separated (many EOBs simply don't print diagnosis codes — leave null rather than guessing)
-- modifier: CPT modifier code(s) if shown (e.g. "GP", "59", "KX")
-- chargeAmount: total charge/billed amount (numeric only, no $ sign)
+- dateOfService: MM/DD/YYYY format — extracted only to match this payment to the correct existing claim record, not as reimbursement data
+- cptCodes: CPT/HCPCS code(s), comma-separated if multiple — extracted only to match this payment to the correct existing claim record, not as reimbursement data
 - insuranceReimbursement: insurance reimbursement/allowed/paid amount (numeric only)
 - patientAmountPaid: patient co-pay amount already paid (numeric only)
 - patientAmountDue: patient balance/responsibility still due (numeric only)
@@ -167,10 +173,6 @@ For each claim/service line, extract:
 - insuranceBilled: the specific payer THIS claim was billed to/forwarded to — read the text right next to this claim (e.g. a "CLAIM INFORMATION FORWARDED TO: <payer>" line, or a payer name printed within this claim's own block). Do NOT default to the document's letterhead/logo — some documents (e.g. a Medicare administrator's EOB) print one org's letterhead at the top but list a DIFFERENT payer per claim/per patient below it, and each claim's own payer can differ from its neighbors'. Only fall back to the letterhead org if no claim-specific payer text exists at all.
 
 FIELD NAME VARIATIONS — the same data point is labeled differently across payers; map by meaning, not by exact label. Some payers print several *different, non-interchangeable* dollar columns — read carefully, don't just grab the first similar-sounding label:
-- Place of Service = "POS", "PL", "Service Location"
-- Diagnosis = "DIAG", "ICD-10", "Dx", or diagnosis codes listed near a diagnosis pointer
-- Units = "Units", "Qty", "NUM. SVCS", "Days"
-- Charge = "Billed", "Charges", "Submitted Charges", "Amount Charged"
 - Insurance Reimbursement = the amount the payer actually PAID/will pay: "Paid Amount", "Payable Amount", "Plan Paid", "Claim Payment Amount". This is NOT the same as "Allowed Amount"/"Allowable"/"QPA" — that is only the contractually recognized rate the patient-responsibility math is based on, and is often larger than what was actually paid (especially out-of-network). If both an "Allowed" and a "Paid"/"Payable" column exist, use the "Paid"/"Payable" one.
 - Patient Due = the patient's owed balance under the plan: "Patient Responsibility", "Patient Resp", "Balance Due", or Copay + Deductible + Coinsurance summed. Some EOBs separately print a "Not Payable"/"Not Covered" column for amounts the plan simply doesn't cover — that is a different concept from Patient Responsibility (it's often only billable to the patient if a separate balance-billing agreement applies) — prefer the explicit "Patient Responsibility" figure when both are present.
 - Claim Number = "Claim ID", "ICN", "Reference #", "Claim #", "Transaction ID", "Control Number"
@@ -189,6 +191,8 @@ IMPORTANT:
       : `You are a medical claims data extraction specialist. Extract all CMS-1500 Health Insurance Claim Form information accurately from the provided document text.
 
 *** CRITICAL: You MUST extract the PATIENT NAME from Box 2. This is required for matching against the clinic's patient database. ***
+
+*** DOCUMENT-TYPE BOUNDARY: This is a CMS-1500 claim form. Only extract billing-side data — dateOfService, placeOfService, diagnosisCodes, unitsBilled, modifier, cptCodes, and chargeAmount. NEVER extract insuranceReimbursement, patientAmountPaid, patientAmountDue, oaClaimNumber (Claim #), checkDate, or checkNumberVirtualCard (Check/EFT) — those belong exclusively to Reimbursement/EOB payment documents and a CMS-1500 form never carries that data. ***
 
 For each claim, extract:
 - patientName: REQUIRED - from Box 2 of form (e.g., "JOHN SMITH" or "Smith, John")
@@ -230,6 +234,51 @@ IMPORTANT:
           },
         ];
 
+  // Scoped to each document type's valid fields (mirrors the field-boundary
+  // rules enforced by enforceFieldBoundary in claimUpload.ts). OpenAI's strict
+  // json_schema mode requires every property to be listed in `required`, so
+  // telling the model in the prompt not to fill a field isn't sufficient on
+  // its own — the property must not exist in the schema at all for that
+  // upload type, or the model can still populate it.
+  // dateOfService/cptCodes appear on both schemas because a Reimbursement
+  // upload needs them to match this payment to its existing CMS-1500 claim
+  // row — not as reimbursement-document data to display.
+  const reimbursementClaimProperties = {
+    patientName: { type: "string" }, // REQUIRED
+    dateOfService: { type: ["string", "null"] },
+    cptCodes: { type: ["string", "null"] },
+    insuranceReimbursement: { type: ["number", "null"] },
+    patientAmountPaid: { type: ["number", "null"] },
+    patientAmountDue: { type: ["number", "null"] },
+    oaClaimNumber: { type: ["string", "null"] },
+    checkDate: { type: ["string", "null"] },
+    checkNumberVirtualCard: { type: ["string", "null"] },
+    claimStatus: {
+      type: "string",
+      enum: ["submitted", "approved", "denied"],
+    },
+    insuranceBilled: { type: ["string", "null"] },
+  } as const;
+
+  const cms1500ClaimProperties = {
+    patientName: { type: "string" }, // REQUIRED
+    dateOfService: { type: ["string", "null"] },
+    cptCodes: { type: ["string", "null"] },
+    chargeAmount: { type: ["number", "null"] },
+    placeOfService: { type: ["string", "null"] },
+    diagnosisCodes: { type: ["string", "null"] },
+    unitsBilled: { type: ["number", "null"] },
+    modifier: { type: ["string", "null"] },
+    claimStatus: {
+      type: "string",
+      enum: ["submitted", "approved", "denied"],
+    },
+    insuranceBilled: { type: ["string", "null"] },
+  } as const;
+
+  const claimItemProperties =
+    uploadType === "reimbursement" ? reimbursementClaimProperties : cms1500ClaimProperties;
+
   try {
     const response = await invokeLLM({
       model: ENV.aiModel,
@@ -255,50 +304,13 @@ IMPORTANT:
                 type: "array",
                 items: {
                   type: "object",
-                  properties: {
-                    patientName: { type: "string" }, // REQUIRED
-                    dateOfService: { type: ["string", "null"] },
-                    cptCodes: { type: ["string", "null"] },
-                    chargeAmount: { type: ["number", "null"] },
-                    insuranceReimbursement: { type: ["number", "null"] },
-                    patientAmountPaid: { type: ["number", "null"] },
-                    patientAmountDue: { type: ["number", "null"] },
-                    oaClaimNumber: { type: ["string", "null"] },
-                    checkDate: { type: ["string", "null"] },
-                    checkNumberVirtualCard: { type: ["string", "null"] },
-                    claimStatus: {
-                      type: "string",
-                      enum: ["submitted", "approved", "denied"],
-                    },
-                    placeOfService: { type: ["string", "null"] },
-                    diagnosisCodes: { type: ["string", "null"] },
-                    unitsBilled: { type: ["number", "null"] },
-                    modifier: { type: ["string", "null"] },
-                    insuranceBilled: { type: ["string", "null"] },
-                  },
+                  properties: claimItemProperties,
                   // OpenAI's strict json_schema mode rejects the request unless every
                   // property is listed here (use a nullable type for "optional" fields)
                   // and additionalProperties is explicitly false — Anthropic's tool-use
                   // schema validation is more lenient and accepts this shape too, so one
                   // schema definition works for both adapters.
-                  required: [
-                    "patientName",
-                    "dateOfService",
-                    "cptCodes",
-                    "chargeAmount",
-                    "insuranceReimbursement",
-                    "patientAmountPaid",
-                    "patientAmountDue",
-                    "oaClaimNumber",
-                    "checkDate",
-                    "checkNumberVirtualCard",
-                    "claimStatus",
-                    "placeOfService",
-                    "diagnosisCodes",
-                    "unitsBilled",
-                    "modifier",
-                    "insuranceBilled",
-                  ],
+                  required: Object.keys(claimItemProperties),
                   additionalProperties: false,
                 },
               },
