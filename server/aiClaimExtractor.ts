@@ -175,6 +175,7 @@ FIELD NAME VARIATIONS — the same data point is labeled differently across paye
 - Patient Due = the patient's owed balance under the plan: "Patient Responsibility", "Patient Resp", "Balance Due", or Copay + Deductible + Coinsurance summed. Some EOBs separately print a "Not Payable"/"Not Covered" column for amounts the plan simply doesn't cover — that is a different concept from Patient Responsibility (it's often only billable to the patient if a separate balance-billing agreement applies) — prefer the explicit "Patient Responsibility" figure when both are present.
 - Claim Number = "Claim ID", "ICN", "Reference #", "Claim #", "Transaction ID", "Control Number"
 - Check/Payment Date = "Payment Date", "Check Date", "Direct Deposit Date", "EFT Date"
+- Auto/PIP (e.g. GEICO) EOBs use their own labels: Date of Service = "DOS"; CPT Codes = "PROC CODE"; Charge = "CHARGE". These documents commonly print a "REDUCTION" column — this is the insurer's own fee-schedule/contractual reduction, NOT patientAmountDue. No-fault auto/PIP coverage typically has zero patient responsibility, so do not map REDUCTION to patientAmountDue just because it's a dollar amount near the charge/paid columns; if no explicit patient-responsibility label exists, patientAmountDue is null. insuranceReimbursement on these documents is usually labeled "PROVIDER REIMBURSE".
 
 IMPORTANT:
 - Re-identify patient name per claim/service-line block — do NOT assume one name applies to the whole document
