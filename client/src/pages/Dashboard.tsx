@@ -670,11 +670,14 @@ export default function Dashboard() {
   const [editingCell, setEditingCell] = useState<{ claimId: string; field: string } | null>(null);
   const [editingValue, setEditingValue] = useState<string>('');
   // Column visibility for Claims Tracker — persisted in localStorage
+  // Default visible set is the 18 core claim fields; Place of Service and LMN
+  // Documents Date Sent start hidden (still reachable via the Columns toggle)
+  // unless the user has already saved their own preference.
   const [hiddenClaimsColumns, setHiddenClaimsColumns] = useState<Set<string>>(() => {
     try {
       const saved = localStorage.getItem('claims-hidden-columns');
-      return saved ? new Set(JSON.parse(saved)) : new Set<string>();
-    } catch { return new Set<string>(); }
+      return saved ? new Set(JSON.parse(saved)) : new Set<string>(['placeOfService', 'lmn']);
+    } catch { return new Set<string>(['placeOfService', 'lmn']); }
   });
   const toggleClaimsColumn = (key: string) => {
     setHiddenClaimsColumns(prev => {
