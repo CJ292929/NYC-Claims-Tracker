@@ -633,6 +633,84 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
   );
 }
 
+// ─── CSV Export ─────────────────────────────────────────────────────────────
+// The 18 canonical columns, in dashboard order. Reads the same raw (snake_case)
+// claim shape returned by claims.getByPatientAndPeriod that the table itself renders.
+const CSV_COLUMNS: Array<{ key: string; label: string; type?: 'currency' | 'date' }> = [
+  { key: 'date_of_service', label: 'Date of Service', type: 'date' },
+  { key: 'visit_number', label: 'Visit #' },
+  { key: 'cpt_codes', label: 'CPT Codes' },
+  { key: 'units_billed', label: 'Units' },
+  { key: 'diagnosis_codes', label: 'Diagnosis' },
+  { key: 'modifier', label: 'Modifier' },
+  { key: 'charge_amount', label: 'Charge', type: 'currency' },
+  { key: 'insurance_reimbursement', label: 'Ins. Reimb.', type: 'currency' },
+  { key: 'patient_amount_paid', label: 'Pt. Paid', type: 'currency' },
+  { key: 'patient_amount_due', label: 'Pt. Due', type: 'currency' },
+  { key: 'insurance_billed', label: 'Ins. Billed' },
+  { key: 'claim_submitted_date', label: 'Date Submitted', type: 'date' },
+  { key: 'claim_number', label: 'Claim #' },
+  { key: 'claim_status', label: 'Status' },
+  { key: 'check_date', label: 'Check/Payment Date', type: 'date' },
+  { key: 'check_number_virtual_card', label: 'Check/EFT #' },
+  { key: 'date_of_appeal', label: 'Appeal Date', type: 'date' },
+  { key: 'reference_no', label: 'Appeal Ref #' },
+];
+
+function csvEscape(value: string): string {
+  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/** "YYYY-MM-DD" (how dates are stored) -> "MM/DD/YYYY", via string ops only
+ *  (no Date parsing, which is exactly the kind of timezone/format footgun
+ *  this codebase has been bitten by before). */
+function isoDateToMDY(isoDate: string): string {
+  const m = isoDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[2]}/${m[3]}/${m[1]}` : isoDate;
+}
+
+function claimsToCSV(claims: any[]): string {
+  const header = CSV_COLUMNS.map((c) => csvEscape(c.label)).join(',');
+  const rows = claims.map((claim) =>
+    CSV_COLUMNS.map((col) => {
+      const raw =
+        col.key === 'claim_number'
+          ? claim.expire_bcbs_claim_number || claim.oa_claim_number
+          : claim[col.key];
+      if (raw === null || raw === undefined || raw === '') return '';
+      if (col.type === 'date') return csvEscape(isoDateToMDY(String(raw)));
+      if (col.type === 'currency') return String(raw);
+      return csvEscape(String(raw));
+    }).join(',')
+  );
+  return [header, ...rows].join('\n');
+}
+
+function downloadCSV(filename: string, csv: string) {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/** "LASTNAME, FIRSTNAME" -> "lastname-firstname"; falls back to a slugified
+ *  version of whatever the name actually is if it's not in that format. */
+function patientNameForFilename(name: string): string {
+  const parts = name.split(',').map((s) => s.trim()).filter(Boolean);
+  const base = parts.length === 2 ? `${parts[0]}-${parts[1]}` : name;
+  return base.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function todayForFilename(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -2048,6 +2126,21 @@ export default function Dashboard() {
                                 </div>
                               </PopoverContent>
                             </Popover>
+                            {/* CSV export — currently visible/filtered rows for this period */}
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="border-2 border-brand-blue text-brand-blue hover:bg-brand-blue hover:text-white rounded-lg flex items-center gap-2"
+                              disabled={(claimsDataMap[period] ?? []).length === 0}
+                              onClick={() => {
+                                const csv = claimsToCSV(claimsDataMap[period] ?? []);
+                                const filename = `${patientNameForFilename(activePatient?.name ?? 'patient')}-claims-${todayForFilename()}.csv`;
+                                downloadCSV(filename, csv);
+                              }}
+                            >
+                              <Download className="w-4 h-4" />
+                              Export
+                            </Button>
                             {/* Reimbursement Insurance Upload button */}
                             <label
                               htmlFor={`claim-upload-reimb-${period}`}
