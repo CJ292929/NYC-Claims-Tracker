@@ -2,22 +2,12 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
 import { Route, Switch, useLocation } from "wouter";
-import DashboardLayout from "./components/DashboardLayout";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Dashboard from "./pages/Dashboard";
 import Login from "./pages/Login";
 import { trpc } from "@/lib/trpc";
 import { useEffect } from "react";
-
-/** The main dashboard, wrapped in the persistent sidebar shell. */
-function DashboardWithLayout() {
-  return (
-    <DashboardLayout>
-      <Dashboard />
-    </DashboardLayout>
-  );
-}
 
 /** Wraps a component and redirects to /login if the user is not authenticated. */
 function ProtectedRoute({ component: Component }: { component: React.ComponentType }) {
@@ -50,7 +40,7 @@ function Router() {
   return (
     <Switch>
       <Route path="/login" component={Login} />
-      <Route path="/" component={() => <ProtectedRoute component={DashboardWithLayout} />} />
+      <Route path="/" component={() => <ProtectedRoute component={Dashboard} />} />
       <Route path="/404" component={NotFound} />
       {/* Final fallback route */}
       <Route component={NotFound} />
