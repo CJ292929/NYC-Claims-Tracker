@@ -90,6 +90,7 @@ For each claim/service line, extract:
 - checkDate: check/payment/EFT date in MM/DD/YYYY format
 - checkNumberVirtualCard: check number, EFT trace number, or virtual card number
 - claimStatus: one of "approved", "denied", or "submitted" (infer from context — e.g. a $0 paid line with a denial code is "denied"; a line with a payment amount is "approved")
+- insuranceBilled: the specific payer THIS claim was billed to/forwarded to — read the text right next to this claim (e.g. a "CLAIM INFORMATION FORWARDED TO: <payer>" line, or a payer name printed within this claim's own block). Do NOT default to the document's letterhead/logo — some documents (e.g. a Medicare administrator's EOB) print one org's letterhead at the top but list a DIFFERENT payer per claim/per patient below it, and each claim's own payer can differ from its neighbors'. Only fall back to the letterhead org if no claim-specific payer text exists at all.
 
 FIELD NAME VARIATIONS — the same data point is labeled differently across payers; map by meaning, not by exact label. Some payers print several *different, non-interchangeable* dollar columns — read carefully, don't just grab the first similar-sounding label:
 - Place of Service = "POS", "PL", "Service Location"
@@ -120,6 +121,7 @@ For each claim, extract:
 - unitsBilled: units billed (from Box 24G)
 - modifier: modifier codes if present (from Box 24D)
 - chargeAmount: total charge amount (numeric only)
+- insuranceBilled: the insurance plan/payer name this form was submitted to (from Box 11c "Insurance Plan Name" if present, otherwise Box 1 "Other" plan name, otherwise the carrier name printed in the form's letterhead/address block)
 
 IMPORTANT:
 - Patient name is REQUIRED - never leave it null or empty
@@ -194,6 +196,7 @@ IMPORTANT:
                     diagnosisCodes: { type: ["string", "null"] },
                     unitsBilled: { type: ["number", "null"] },
                     modifier: { type: ["string", "null"] },
+                    insuranceBilled: { type: ["string", "null"] },
                   },
                   // OpenAI's strict json_schema mode rejects the request unless every
                   // property is listed here (use a nullable type for "optional" fields)
@@ -216,6 +219,7 @@ IMPORTANT:
                     "diagnosisCodes",
                     "unitsBilled",
                     "modifier",
+                    "insuranceBilled",
                   ],
                   additionalProperties: false,
                 },
@@ -281,7 +285,13 @@ IMPORTANT:
             ? Number(claim.unitsBilled)
             : null,
         modifier: claim.modifier || null,
-        insuranceBilled: parsed.detectedInsurer || "Unknown",
+        // Prefer the payer identified for THIS specific claim (e.g. its own
+        // "forwarded to" line) over the document-wide detectedInsurer — some
+        // documents print one org's letterhead but list a different payer per
+        // claim/per patient below it (see the multi-patient scanning note
+        // above), so applying detectedInsurer to every claim uniformly would
+        // mislabel any claim whose actual payer differs from the letterhead.
+        insuranceBilled: claim.insuranceBilled || parsed.detectedInsurer || "Unknown",
         claimSubmittedDate: null,
         expireBcbsClaimNumber: null,
         paymentReceived: null,
