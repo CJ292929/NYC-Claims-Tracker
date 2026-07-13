@@ -1,20 +1,27 @@
 // Route path constants for the NYC Home Rehab Claims Dashboard.
-// Session 1: skeleton only -- no new routes are wired up yet.
-// Session 3 will add <Route> entries to App.tsx's <Switch> using these paths.
 //
-// Routing is handled by `wouter`, already installed and wired in
-// client/src/App.tsx (a <Switch>/<Route> setup using the browser History
-// API by default -- no separate provider/wrapper component needed). This
-// project intentionally does not use react-router-dom: adding a second
-// routing library alongside an already-wired one would mean two routers
-// competing for the same browser history, for no functional benefit.
+// Routing is handled by `wouter`, wired in client/src/App.tsx's
+// <Switch>/<Route> setup (browser History API, no separate provider
+// component). This project intentionally does not use react-router-dom:
+// adding a second routing library alongside an already-wired one would
+// mean two routers competing for the same browser history, for no
+// functional benefit.
+//
+// These constants aren't wired into App.tsx/Dashboard.tsx/DashboardLayout.tsx
+// yet -- those files currently use the path strings directly. Swapping them
+// in is a small, optional consistency pass for a future session, not done
+// here to avoid re-touching already-committed, tested routing logic.
 
 export const ROUTES = {
   login: "/login",
-  dashboard: "/",
+  dashboardRoot: "/",
+  patientsList: "/patients",
+  patientDetail: (id: string) => `/patients/${id}`, // opaque patient id, not a name, per the audit's HIPAA note
+  claims: "/claims",
   notFound: "/404",
-  // Future routes, to be added to App.tsx's <Switch> in Session 3:
-  // patients: "/patients",
-  // patientDetail: "/patients/:id",   // use an opaque patient id, not a name, per the audit's HIPAA note
-  // claims: "/claims",
+  // Future routes, not yet built:
+  // reports: '/reports',
+  // bulkUpload: '/bulk-upload',
+  // settings: '/settings',
+  // profile: '/profile',
 } as const;
