@@ -16,7 +16,6 @@ import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch } from '@/lib/nameMatch';
 import logoIcon from '@/assets/logos/logo-icon.png';
-import { useLocation, useRoute } from 'wouter';
 
 /**
  * Dashboard Component — Database-backed
@@ -876,46 +875,6 @@ export default function Dashboard() {
       setSelectedPatientId(patients[0].id);
     }
   }, [patients, selectedPatientId]);
-
-  // ── URL <-> patient-selection sync (Session 3) ────────────────────────────
-  // The URL is a thin mirror of selectedPatientId/showDetailView -- neither
-  // state variable, handler, nor the conditional render they drive was
-  // changed. "/" and "/patients" are treated as equivalent list-view URLs
-  // since this app has no separate dashboard-only content; outbound updates
-  // canonicalize to "/patients". An unknown :id redirects to "/patients"
-  // rather than inventing a new "not found" UI, matching how activePatient
-  // already silently falls back to patients[0] on an unmatched id.
-  const [location, setLocation] = useLocation();
-  const [matchesPatientDetail, patientDetailParams] = useRoute('/patients/:id');
-
-  // URL -> state (deep link, browser back/forward)
-  useEffect(() => {
-    if (patientsLoading) return;
-
-    if (matchesPatientDetail) {
-      const urlPatientId = patientDetailParams?.id;
-      const matchedPatient = patients.find(p => p.id === urlPatientId);
-      if (!matchedPatient) {
-        setLocation('/patients');
-        return;
-      }
-      if (selectedPatientId !== urlPatientId) setSelectedPatientId(urlPatientId!);
-      if (!showDetailView) setShowDetailView(true);
-    } else if (location === '/patients' || location === '/') {
-      if (showDetailView) setShowDetailView(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location, matchesPatientDetail, patientDetailParams?.id, patientsLoading, patients]);
-
-  // state -> URL (patient selection drives the address bar)
-  useEffect(() => {
-    if (patientsLoading) return;
-    const targetLocation = showDetailView && selectedPatientId
-      ? `/patients/${selectedPatientId}`
-      : '/patients';
-    if (location !== targetLocation) setLocation(targetLocation);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPatientId, showDetailView, patientsLoading]);
 
   // ── Mutations ──────────────────────────────────────────────────────────────
   const createPatient = trpc.patients.create.useMutation({
