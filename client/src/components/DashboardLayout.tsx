@@ -63,19 +63,11 @@ const accountNavItems = [
 
 const menuItems = [...mainNavItems, ...toolsNavItems, ...accountNavItems];
 
-/**
- * "/" and "/patients" (and "/patients/:id") all render the same patient
- * list/detail content -- this app has no separate dashboard-only view --
- * so both map to the "patients" nav item being active. Dashboard.tsx's own
- * URL sync immediately canonicalizes "/" to "/patients" once patients load,
- * so the "/" case here only matters for the brief moment before that redirect.
- */
-function getActiveNavId(location: string): string {
-  if (location.startsWith("/patients")) return "patients";
-  if (location.startsWith("/claims")) return "claims";
-  if (location === "/") return "dashboard";
-  return "";
-}
+// Session 2: no routes are wired up yet, so "active" is hardcoded to
+// whichever nav item matches what the single "/" route currently shows
+// (the patient list/detail dashboard). Session 3 replaces this with a
+// real derived-from-URL active state.
+const SESSION_2_ACTIVE_NAV_ID = "patients";
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_WIDTH = 280;
@@ -181,12 +173,13 @@ function DashboardLayoutContent({
 }: DashboardLayoutContentProps) {
   const { user, logout } = useAuth();
   const [location, setLocation] = useLocation();
-  const { state, toggleSidebar, setOpenMobile } = useSidebar();
+  const { state, toggleSidebar } = useSidebar();
   const isCollapsed = state === "collapsed";
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
-  const activeNavId = getActiveNavId(location);
-  const activeMenuItem = menuItems.find(item => item.id === activeNavId);
+  // Session 2: hardcoded to match the sidebar's hardcoded active item, since
+  // no real routes exist yet. Session 3 will derive this from `location`.
+  const activeMenuItem = menuItems.find(item => item.id === SESSION_2_ACTIVE_NAV_ID);
   const isMobile = useIsMobile();
 
   useEffect(() => {
@@ -261,7 +254,7 @@ function DashboardLayoutContent({
               <SidebarGroupContent>
                 <SidebarMenu className="px-2 py-1">
                   {mainNavItems.map(item => {
-                    const isActive = item.id === activeNavId;
+                    const isActive = item.id === SESSION_2_ACTIVE_NAV_ID;
                     return (
                       <SidebarMenuItem key={item.id}>
                         <SidebarMenuButton
@@ -269,8 +262,7 @@ function DashboardLayoutContent({
                           aria-disabled={item.disabled}
                           onClick={() => {
                             if (item.disabled) return;
-                            setLocation(item.path);
-                            if (isMobile) setOpenMobile(false);
+                            console.log(`[nav] ${item.label} clicked -- routing added in Session 3`);
                           }}
                           tooltip={item.disabled ? "Coming Soon" : item.label}
                           className={cn(
