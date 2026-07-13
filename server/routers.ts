@@ -43,10 +43,27 @@ const visitRecordInput = z.object({
   authStatus: z.enum(["none", "pending", "approved", "denied"]).optional(),
 });
 
-// Helper: parse "YYYY-MM-DD" string → Date | null (stored as SQL DATE)
+// Helper: parse a date string → Date | null (stored as SQL DATE).
+// Accepts "YYYY-MM-DD" (HTML date inputs / manual entry) as well as
+// "MM/DD/YYYY" and "MM/DD/YY" (the AI claim extractor's output format —
+// see aiClaimExtractor.ts). Appending "T00:00:00Z" to a slash-formatted
+// date produces a string no JS Date parser recognizes, which silently
+// resolved to an Invalid Date (and thus null) for every AI-extracted
+// claim's date once saved, even though the same string displayed fine
+// pre-save (plain "MM/DD/YYYY" without a time suffix parses fine).
 function parseDate(s: string | null | undefined): Date | null {
   if (!s) return null;
-  const d = new Date(s + "T00:00:00Z");
+  const trimmed = s.trim();
+
+  const slash = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+  if (slash) {
+    const [, mm, dd, yy] = slash;
+    const year = yy.length === 2 ? (Number(yy) <= 79 ? 2000 + Number(yy) : 1900 + Number(yy)) : Number(yy);
+    const d = new Date(Date.UTC(year, Number(mm) - 1, Number(dd)));
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  const d = new Date(trimmed + "T00:00:00Z");
   return isNaN(d.getTime()) ? null : d;
 }
 
