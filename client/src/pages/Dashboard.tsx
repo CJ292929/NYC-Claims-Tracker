@@ -1212,7 +1212,22 @@ export default function Dashboard() {
         credentials: 'include',
         body: formData,
       });
-      const json = await res.json();
+      const rawBody = await res.text();
+      let json: any;
+      try {
+        json = JSON.parse(rawBody);
+      } catch {
+        // The server didn't return JSON at all -- typically the hosting
+        // platform's own error page (e.g. a serverless function timeout or
+        // crash) rather than anything the app itself produced. Surface a
+        // clear message instead of the raw JSON.parse SyntaxError.
+        console.error('[EOB Upload] Non-JSON response:', rawBody.slice(0, 500));
+        throw new Error(
+          res.status === 504 || /timed?\s*out/i.test(rawBody)
+            ? 'The server took too long processing this file (it may be large or complex). Please try again.'
+            : `Server returned an unexpected response (status ${res.status}). Please try again.`
+        );
+      }
       if (!res.ok) throw new Error(json.error ?? 'Extraction failed');
 
       setDetectedTemplate(json.templateUsed ?? '');
