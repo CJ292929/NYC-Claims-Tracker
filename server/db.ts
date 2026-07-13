@@ -594,7 +594,16 @@ export async function getClaimsByPatientAndPeriod(patientId: string, authPeriod:
     .select("*")
     .eq("patient_id", patientId)
     .eq("auth_period", authPeriod)
-    .order("date_of_service", { ascending: false });
+    // date_of_service alone isn't unique — multiple service lines from the same
+    // visit share it — and Postgres doesn't guarantee stable ordering among tied
+    // rows across separate queries. Without a tiebreaker, same-date rows could
+    // come back in a different relative order after any refetch (e.g. right
+    // after approving a claim), which the UI's "hide repeated date" logic reads
+    // as a different row now sharing its predecessor's date, making that row's
+    // date appear to vanish even though the underlying data never changed.
+    .order("date_of_service", { ascending: false })
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
 
   if (error) {
     console.error("[Supabase] getClaimsByPatientAndPeriod:", error);
