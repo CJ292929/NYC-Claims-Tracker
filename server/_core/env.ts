@@ -12,15 +12,20 @@ export const ENV = {
 
   // AI provider for claim extraction (server/_core/llm.ts). Swap providers
   // by changing AI_PROVIDER alone — no code changes needed elsewhere.
-  // "anthropic" (native Claude Messages API, default) or "openrouter"
-  // (OpenAI-compatible proxy that can reach Claude, Gemini, etc.).
-  aiProvider: (process.env.AI_PROVIDER ?? "anthropic").trim().toLowerCase(),
+  // "openai" (GPT-4 Vision via Chat Completions, default), "anthropic"
+  // (native Claude Messages API), or "openrouter" (OpenAI-compatible proxy
+  // that can reach Claude, Gemini, etc.).
+  aiProvider: (process.env.AI_PROVIDER ?? "openai").trim().toLowerCase(),
+  openaiApiKey: process.env.OPENAI_API_KEY ?? "",
+  openaiModel: process.env.OPENAI_MODEL ?? "gpt-4o",
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
   anthropicModel: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5",
   openrouterApiKey: process.env.OPENROUTER_API_KEY ?? "",
   openrouterModel: process.env.OPENROUTER_MODEL ?? "anthropic/claude-3.5-sonnet",
 
   get aiModel(): string {
-    return ENV.aiProvider === "openrouter" ? ENV.openrouterModel : ENV.anthropicModel;
+    if (ENV.aiProvider === "openrouter") return ENV.openrouterModel;
+    if (ENV.aiProvider === "anthropic") return ENV.anthropicModel;
+    return ENV.openaiModel;
   },
 };
