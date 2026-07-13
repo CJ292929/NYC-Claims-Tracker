@@ -1384,8 +1384,35 @@ export default function Dashboard() {
         toast.error('No claim data could be extracted from this file. Please check the file content.');
         return;
       }
+      // This branch is also reached when the AI found MULTIPLE patients but
+      // the server didn't build a patientGroups response for them (it only
+      // does so when every claim happened to share one exact patientName —
+      // see aiClaimExtractor.ts). In that case json.claims is the unfiltered,
+      // every-patient-in-the-document list, so it must be scoped down to the
+      // active patient here too, the same way the patientGroups fallback
+      // above already is — otherwise every patient in a multi-patient EOB
+      // gets saved under whichever patient's page the file was uploaded to.
+      let claimsForActivePatient = json.claims;
+      if (activePatient) {
+        const distinctNames = new Set(
+          json.claims.map((c: any) => c.patientName).filter(Boolean)
+        );
+        if (distinctNames.size > 1) {
+          const filtered = json.claims.filter(
+            (c: any) => c.patientName && fuzzyNameMatch(c.patientName, activePatient.name)
+          );
+          if (filtered.length === 0) {
+            toast.error(
+              `No data found for ${activePatient.name} in this file. Detected patients: ${Array.from(distinctNames).join(', ')}.`
+            );
+            return;
+          }
+          console.log(`[EOB Upload] json.claims contained ${distinctNames.size} distinct patients with no patientGroups response; filtered to ${filtered.length} claim(s) for ${activePatient.name}.`);
+          claimsForActivePatient = filtered;
+        }
+      }
       // Normalize extracted rows to string form for editing
-      const rawRows = json.claims.map((c: any, i: number) => ({
+      const rawRows = claimsForActivePatient.map((c: any, i: number) => ({
         _key: i,
         placeOfService: c.placeOfService ?? '',
         dateOfService: c.dateOfService ?? '',
