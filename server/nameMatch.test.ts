@@ -39,13 +39,13 @@ describe('fuzzyNameMatch', () => {
     expect(fuzzyNameMatch('Auyeung, Allison', 'ALLISON AUYEUNG')).toBe(true);
   });
 
-  // ── Last name + first initial ────────────────────────────────────────────
-  it('matches "AUYEUNG A" against "ALLISON AUYEUNG" via last+initial', () => {
-    expect(fuzzyNameMatch('AUYEUNG A', 'ALLISON AUYEUNG')).toBe(true);
+  // ── Generational/professional suffixes ───────────────────────────────────
+  it('matches "SMITH, JOHN" against "JOHN SMITH JR" via suffix tolerance', () => {
+    expect(fuzzyNameMatch('SMITH, JOHN', 'JOHN SMITH JR')).toBe(true);
   });
 
-  it('matches "A AUYEUNG" against "AUYEUNG, ALLISON" via last+initial', () => {
-    expect(fuzzyNameMatch('A AUYEUNG', 'AUYEUNG, ALLISON')).toBe(true);
+  it('matches "JANE DOE MD" against "DOE, JANE" via suffix tolerance', () => {
+    expect(fuzzyNameMatch('JANE DOE MD', 'DOE, JANE')).toBe(true);
   });
 
   // ── Should NOT match different people ────────────────────────────────────
@@ -59,6 +59,28 @@ describe('fuzzyNameMatch', () => {
 
   it('does not match same last name only', () => {
     expect(fuzzyNameMatch('JOHN AUYEUNG', 'ALLISON AUYEUNG')).toBe(false);
+  });
+
+  // ── Regression: last-name + first-initial must NOT match (removed on
+  //    purpose — it previously misattributed claims between two different
+  //    patients who share a last name and first initial, e.g. two different
+  //    "Auyeung" patients whose first names both start with "A") ───────────
+  it('does not match on last name + first initial alone', () => {
+    expect(fuzzyNameMatch('AUYEUNG A', 'ALLISON AUYEUNG')).toBe(false);
+    expect(fuzzyNameMatch('A AUYEUNG', 'AUYEUNG, ALLISON')).toBe(false);
+  });
+
+  it('does not match two different patients sharing a last name and first initial', () => {
+    // "ANDREW AUYEUNG" and "ALLISON AUYEUNG" are different people, both would
+    // pass the old "last name + first initial" heuristic — must not match now.
+    expect(fuzzyNameMatch('ANDREW AUYEUNG', 'ALLISON AUYEUNG')).toBe(false);
+  });
+
+  // ── Regression: an extra token that isn't a recognized suffix must NOT
+  //    match — e.g. "MARY ANN JONES" is a different person from "ANN JONES" ─
+  it('does not match when the extra token is not a recognized suffix', () => {
+    expect(fuzzyNameMatch('MARY ANN JONES', 'ANN JONES')).toBe(false);
+    expect(fuzzyNameMatch('JOHN SMITH', 'JOHN SMITH WILLIAMS')).toBe(false);
   });
 
   // ── Edge cases ───────────────────────────────────────────────────────────
@@ -107,6 +129,28 @@ describe('findMatchingPatient', () => {
 
   it('does not false-match on shared last name with different first name', () => {
     const result = findMatchingPatient('JOHN AUYEUNG', patients);
+    expect(result).toBeNull();
+  });
+
+  it('does not misattribute a claim between two patients sharing a last name and first initial', () => {
+    const rosterWithCollision = [
+      ...patients,
+      { id: '5', name: 'AUYEUNG, ANDREW' },
+    ];
+    // An EOB claim for "ALLISON AUYEUNG" must resolve to patient 1, never
+    // patient 5 (same last name + first initial "A") — this is the exact
+    // false-positive scenario the suffix-tolerant matcher replaces.
+    const result = findMatchingPatient('ALLISON AUYEUNG', rosterWithCollision);
+    expect(result?.id).toBe('1');
+  });
+
+  it('returns null rather than a wrong-patient match when only a last-name+initial collision exists', () => {
+    // Isolates the fix from array order: with ONLY the colliding patient in
+    // the roster (no correct "Allison Auyeung" present), the old last-name+
+    // first-initial heuristic would have incorrectly matched "Andrew Auyeung"
+    // here. The fixed matcher must return null instead of guessing.
+    const rosterWithOnlyCollision = [{ id: '5', name: 'AUYEUNG, ANDREW' }];
+    const result = findMatchingPatient('ALLISON AUYEUNG', rosterWithOnlyCollision);
     expect(result).toBeNull();
   });
 });
