@@ -1,5 +1,6 @@
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import ClaimsPlaceholder from "@/pages/ClaimsPlaceholder";
 import NotFound from "@/pages/NotFound";
 import { Route, Switch, useLocation } from "wouter";
 import DashboardLayout from "./components/DashboardLayout";
@@ -15,6 +16,14 @@ function DashboardWithLayout() {
   return (
     <DashboardLayout>
       <Dashboard />
+    </DashboardLayout>
+  );
+}
+
+function ClaimsWithLayout() {
+  return (
+    <DashboardLayout>
+      <ClaimsPlaceholder />
     </DashboardLayout>
   );
 }
@@ -51,6 +60,16 @@ function Router() {
     <Switch>
       <Route path="/login" component={Login} />
       <Route path="/" component={() => <ProtectedRoute component={DashboardWithLayout} />} />
+      {/*
+        "/patients" and "/patients/:id" both render Dashboard -- it reads
+        the :id itself (via useRoute) to decide between list and detail
+        view. Both must be registered here or Dashboard.tsx's own URL sync
+        would navigate to a path this Switch doesn't recognize and fall
+        through to the 404 route below.
+      */}
+      <Route path="/patients" component={() => <ProtectedRoute component={DashboardWithLayout} />} />
+      <Route path="/patients/:id" component={() => <ProtectedRoute component={DashboardWithLayout} />} />
+      <Route path="/claims" component={() => <ProtectedRoute component={ClaimsWithLayout} />} />
       <Route path="/404" component={NotFound} />
       {/* Final fallback route */}
       <Route component={NotFound} />
