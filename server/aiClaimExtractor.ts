@@ -2,8 +2,14 @@ import { invokeLLM } from "./_core/llm";
 import { ENV } from "./_core/env";
 import type { ExtractedClaim } from "./insuranceTemplates";
 
+/** A claim as returned by the AI extractor, with patient attribution preserved
+ *  per-claim (documents like a combined multi-patient EOB list many different
+ *  patients on one page — the top-level `patientName` on the result is only
+ *  set when every claim happens to share one name). */
+export type AIExtractedClaim = ExtractedClaim & { patientName?: string | null };
+
 export interface AIClaimExtractionResult {
-  claims: ExtractedClaim[];
+  claims: AIExtractedClaim[];
   confidence: number; // 0-1 score indicating extraction confidence
   detectedInsurer?: string;
   extractionNotes?: string;
@@ -62,27 +68,44 @@ export async function extractClaimsWithAI(
 
   const systemPrompt =
     uploadType === "reimbursement"
-      ? `You are a medical claims data extraction specialist. Extract all Explanation of Benefits (EOB) claim information accurately from the provided document text.
+      ? `You are a medical claims data extraction specialist with deep experience reading Explanation of Benefits (EOB) and remittance advice documents from every major US payer (Aetna, UnitedHealthcare/Optum, Cigna, Humana, Medicare/Medicare Advantage administrators like Wellpoint/NGS, BCBS, Meritain, and others). Extract all claim information accurately from the provided document text.
 
-*** CRITICAL: You MUST extract the PATIENT NAME for EACH claim. This is required for matching against the clinic's patient database. ***
+*** CRITICAL: You MUST extract the PATIENT NAME for EACH claim, individually. This is required for matching against the clinic's patient database. ***
 
-For each claim, extract:
-- patientName: REQUIRED - full name as shown on document (e.g., "JOHN SMITH" or "Smith, John" or "JOHN M SMITH")
+Payers lay these documents out very differently — a table of many patients on one page, a single-patient web-portal export, a per-claim narrative block, etc. Do not assume there is only one patient name at the top of the document: scan the ENTIRE document and re-identify the patient name at each claim/service-line block, since one EOB commonly covers many different patients (e.g. a check remitting payment for a whole clinic's batch of claims).
+
+For each claim/service line, extract:
+- patientName: REQUIRED - full name exactly as shown next to that specific claim (e.g., "JOHN SMITH" or "Smith, John" or "JOHN M SMITH"). Never reuse a different claim's patient name.
 - dateOfService: MM/DD/YYYY format
-- cptCodes: CPT code(s), comma-separated if multiple
-- chargeAmount: total charge amount (numeric only, no $ sign)
-- insuranceReimbursement: insurance reimbursement/allowed amount (numeric only)
-- patientAmountPaid: patient co-pay amount (numeric only)
-- patientAmountDue: patient balance due (numeric only)
-- oaClaimNumber: claim number
-- checkDate: check/payment date in MM/DD/YYYY format
-- checkNumberVirtualCard: check number or virtual card number
-- claimStatus: one of "approved", "denied", or "submitted"
+- placeOfService: place of service code (e.g. "11", "12") or description if no code is shown
+- cptCodes: CPT/HCPCS code(s), comma-separated if multiple
+- unitsBilled: units/quantity billed (numeric; default to 1 if the document doesn't show a units column)
+- diagnosisCodes: ICD-10 diagnosis code(s) if visible anywhere near the claim, comma-separated (many EOBs simply don't print diagnosis codes — leave null rather than guessing)
+- modifier: CPT modifier code(s) if shown (e.g. "GP", "59", "KX")
+- chargeAmount: total charge/billed amount (numeric only, no $ sign)
+- insuranceReimbursement: insurance reimbursement/allowed/paid amount (numeric only)
+- patientAmountPaid: patient co-pay amount already paid (numeric only)
+- patientAmountDue: patient balance/responsibility still due (numeric only)
+- oaClaimNumber: claim number/ID/ICN/reference number for this claim
+- checkDate: check/payment/EFT date in MM/DD/YYYY format
+- checkNumberVirtualCard: check number, EFT trace number, or virtual card number
+- claimStatus: one of "approved", "denied", or "submitted" (infer from context — e.g. a $0 paid line with a denial code is "denied"; a line with a payment amount is "approved")
+
+FIELD NAME VARIATIONS — the same data point is labeled differently across payers; map by meaning, not by exact label. Some payers print several *different, non-interchangeable* dollar columns — read carefully, don't just grab the first similar-sounding label:
+- Place of Service = "POS", "PL", "Service Location"
+- Diagnosis = "DIAG", "ICD-10", "Dx", or diagnosis codes listed near a diagnosis pointer
+- Units = "Units", "Qty", "NUM. SVCS", "Days"
+- Charge = "Billed", "Charges", "Submitted Charges", "Amount Charged"
+- Insurance Reimbursement = the amount the payer actually PAID/will pay: "Paid Amount", "Payable Amount", "Plan Paid", "Claim Payment Amount". This is NOT the same as "Allowed Amount"/"Allowable"/"QPA" — that is only the contractually recognized rate the patient-responsibility math is based on, and is often larger than what was actually paid (especially out-of-network). If both an "Allowed" and a "Paid"/"Payable" column exist, use the "Paid"/"Payable" one.
+- Patient Due = the patient's owed balance under the plan: "Patient Responsibility", "Patient Resp", "Balance Due", or Copay + Deductible + Coinsurance summed. Some EOBs separately print a "Not Payable"/"Not Covered" column for amounts the plan simply doesn't cover — that is a different concept from Patient Responsibility (it's often only billable to the patient if a separate balance-billing agreement applies) — prefer the explicit "Patient Responsibility" figure when both are present.
+- Claim Number = "Claim ID", "ICN", "Reference #", "Claim #", "Transaction ID", "Control Number"
+- Check/Payment Date = "Payment Date", "Check Date", "Direct Deposit Date", "EFT Date"
 
 IMPORTANT:
-- If patient name appears in document header/top section, use it for ALL claims in that section
-- If multiple patients in document, create separate claim objects for each patient
+- Re-identify patient name per claim/service-line block — do NOT assume one name applies to the whole document
+- If multiple patients are in the document, create separate claim objects for each patient's claims
 - Patient name is REQUIRED - never leave it null or empty
+- Use null (not a guess) for any field that isn't actually visible in the document
 - Return ONLY valid JSON, no markdown or explanations.`
       : `You are a medical claims data extraction specialist. Extract all CMS-1500 Health Insurance Claim Form information accurately from the provided document text.
 
@@ -172,14 +195,37 @@ IMPORTANT:
                     unitsBilled: { type: ["number", "null"] },
                     modifier: { type: ["string", "null"] },
                   },
-                  required: ["patientName", "claimStatus"],
+                  // OpenAI's strict json_schema mode rejects the request unless every
+                  // property is listed here (use a nullable type for "optional" fields)
+                  // and additionalProperties is explicitly false — Anthropic's tool-use
+                  // schema validation is more lenient and accepts this shape too, so one
+                  // schema definition works for both adapters.
+                  required: [
+                    "patientName",
+                    "dateOfService",
+                    "cptCodes",
+                    "chargeAmount",
+                    "insuranceReimbursement",
+                    "patientAmountPaid",
+                    "patientAmountDue",
+                    "oaClaimNumber",
+                    "checkDate",
+                    "checkNumberVirtualCard",
+                    "claimStatus",
+                    "placeOfService",
+                    "diagnosisCodes",
+                    "unitsBilled",
+                    "modifier",
+                  ],
+                  additionalProperties: false,
                 },
               },
               detectedInsurer: { type: ["string", "null"] },
               confidence: { type: "number" },
               extractionNotes: { type: ["string", "null"] },
             },
-            required: ["claims"],
+            required: ["claims", "detectedInsurer", "confidence", "extractionNotes"],
+            additionalProperties: false,
           },
         },
       },
@@ -199,8 +245,12 @@ IMPORTANT:
     const claimsArray: any[] = Array.isArray(parsed.claims) ? parsed.claims : [];
 
     // Normalize the response to match ExtractedClaim format
-    const normalizedClaims: ExtractedClaim[] = claimsArray.map(
+    const normalizedClaims: AIExtractedClaim[] = claimsArray.map(
       (claim: any) => ({
+        // Preserved per-claim (not just the aggregate top-level patientName below)
+        // so multi-patient documents — e.g. a single combined EOB covering many
+        // patients on one check — don't lose per-claim patient attribution.
+        patientName: claim.patientName ? String(claim.patientName).trim() : null,
         dateOfService: claim.dateOfService || null,
         cptCodes: claim.cptCodes || null,
         chargeAmount:
@@ -315,6 +365,7 @@ Return ONLY valid JSON, no markdown.`,
               confidence: { type: "number" },
             },
             required: ["insurer", "documentType", "confidence"],
+            additionalProperties: false,
           },
         },
       },
