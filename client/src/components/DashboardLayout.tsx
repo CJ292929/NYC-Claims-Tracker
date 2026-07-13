@@ -74,26 +74,6 @@ const DEFAULT_WIDTH = 280;
 const MIN_WIDTH = 200;
 const MAX_WIDTH = 480;
 
-/**
- * The underlying shadcn Sidebar primitive writes an `open` cookie
- * (sidebar_state) on every toggle but never reads it back on mount -- this
- * is a Vite SPA, not SSR, so nothing ever consulted that cookie, and the
- * collapse state didn't actually survive a reload despite appearing to.
- * Reading it here (via SidebarProvider's own `defaultOpen` prop) fixes
- * that, and also gives tablet widths a collapsed-by-default starting
- * point distinct from desktop, without touching the shared primitive.
- */
-function getInitialSidebarOpen(): boolean {
-  if (typeof document !== "undefined") {
-    const cookieMatch = document.cookie.match(/(?:^|; )sidebar_state=(true|false)/);
-    if (cookieMatch) return cookieMatch[1] === "true";
-  }
-  if (typeof window !== "undefined" && window.innerWidth >= 768 && window.innerWidth < 1024) {
-    return false;
-  }
-  return true;
-}
-
 export default function DashboardLayout({
   children,
 }: {
@@ -103,7 +83,6 @@ export default function DashboardLayout({
     const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
     return saved ? parseInt(saved, 10) : DEFAULT_WIDTH;
   });
-  const [defaultSidebarOpen] = useState(getInitialSidebarOpen);
   const { loading, user } = useAuth();
   const [, setLocation] = useLocation();
 
@@ -148,7 +127,6 @@ export default function DashboardLayout({
 
   return (
     <SidebarProvider
-      defaultOpen={defaultSidebarOpen}
       style={
         {
           "--sidebar-width": `${sidebarWidth}px`,
