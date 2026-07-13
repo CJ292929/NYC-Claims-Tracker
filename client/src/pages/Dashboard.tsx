@@ -14,7 +14,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
-import { findMatchingPatient } from '@/lib/nameMatch';
+import { findMatchingPatient, fuzzyNameMatch } from '@/lib/nameMatch';
 import logoIcon from '@/assets/logos/logo-icon.png';
 
 /**
@@ -1303,10 +1303,25 @@ export default function Dashboard() {
             toast.success(`Extracted ${normalized.length} claim${normalized.length !== 1 ? 's' : ''} (${rawRows.length} CPT lines) for ${activePatient.name} from ${file.name} (${json.templateUsed})`);
             return;
           } else if (showDetailView && json.claims && json.claims.length > 0) {
-            // Matched group has no claims, but we have flat claims from the response
-            // Use those for single-patient mode
-            console.log('[EOB Upload] Matched group has no claims, using flat claims from response');
-            const rawRows = json.claims.map((c: any, i: number) => ({
+            // Recovery path for when matchedGroupData came back empty/unmatched:
+            // json.claims is the FLAT multi-patient list (every patient the AI
+            // found in the document), so it must be filtered down to only the
+            // active patient's claims before use here — using it unfiltered
+            // would silently display/save every patient in the file under
+            // activePatient's name (real cross-patient contamination bug).
+            const targetClaims = json.claims.filter(
+              (c: any) => c.patientName && fuzzyNameMatch(c.patientName, activePatient.name)
+            );
+            if (targetClaims.length === 0) {
+              console.log('[EOB Upload] No claims in flat response matched active patient; falling back to bulk review.');
+              setEobPatientGroups(json.patientGroups);
+              toast.error(
+                `No data found for ${activePatient.name} in this file. Detected patients: ${json.patientGroups.map((g: any) => g.patientName).join(', ')} — review below.`
+              );
+              return;
+            }
+            console.log(`[EOB Upload] Matched group had no claims; recovered ${targetClaims.length} claim(s) for ${activePatient.name} from flat response.`);
+            const rawRows = targetClaims.map((c: any, i: number) => ({
               _key: i,
               placeOfService: c.placeOfService ?? '',
               dateOfService: c.dateOfService ?? '',
