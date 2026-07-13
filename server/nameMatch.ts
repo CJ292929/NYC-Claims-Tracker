@@ -15,29 +15,41 @@
  *              "Auyeung, Allison"  (mixed case)
  *              "GARCIA, ISABELA"   (already Last, First)
  *              "SMITH, JOHN JR"    (generational/professional suffix)
+ *              "RAMATI, RAQUEL M"  (middle initial — common on government-
+ *                                   services/NGS-style EOBs, e.g. "NAME
+ *                                   LASTNAME, FIRSTNAME MID")
+ *              "O'BRIEN, JAMES"    (apostrophe) / "GARCIA-LOPEZ, MARIA" (hyphen)
  *
  * Matching strategy (in order of confidence):
  *   1. Exact match (case-insensitive) — fastest path
  *   2. Token-set match — split both names into tokens, check if same set of tokens
  *   3. Reversed-order match — "FIRST LAST" vs "LAST, FIRST" by swapping tokens
- *   4. Suffix-tolerant match — "SMITH, JOHN" matches "JOHN SMITH JR" (surplus
- *      tokens must be a recognized generational/professional suffix, e.g. JR,
- *      SR, II, MD — never an arbitrary extra token, which could belong to a
+ *   4. Suffix-tolerant match — "SMITH, JOHN" matches "JOHN SMITH JR" or
+ *      "JOHN Q SMITH" (every surplus token must be a recognized generational/
+ *      professional suffix, e.g. JR, SR, II, MD, OR a bare 1-2 character
+ *      initial — never an arbitrary full extra token, which could belong to a
  *      different person of a similar name)
  *
  * Deliberately NOT included: matching on last name + first initial alone
- * (e.g. "SMITH J"), or on an arbitrary subset of tokens. Both produce false
- * positives whenever two different patients share a last name and first
- * initial, or one patient's full name happens to contain another's — an
- * unacceptable risk when the result determines where a claim's money and
- * diagnosis history get recorded.
+ * (e.g. "SMITH J" as the ENTIRE input, with no full first name anywhere), or
+ * on an arbitrary subset of tokens. Both produce false positives whenever two
+ * different patients share a last name and first initial, or one patient's
+ * full name happens to contain another's — an unacceptable risk when the
+ * result determines where a claim's money and diagnosis history get recorded.
+ * This is different from tolerating a middle initial ADDED alongside an
+ * otherwise-complete first+last match (see suffixTolerantMatch), which can't
+ * create that kind of collision.
  */
 
-/** Normalize a name: uppercase, remove commas/punctuation, collapse whitespace */
+/** Normalize a name: uppercase, drop apostrophes, turn other punctuation/
+ *  hyphens into spaces, collapse whitespace. Apostrophes are dropped rather
+ *  than spaced so "O'BRIEN" and "OBRIEN" normalize to the same token; hyphens
+ *  become spaces so "GARCIA-LOPEZ" and "GARCIA LOPEZ" tokenize the same way. */
 function normalizeName(name: string): string {
   return name
     .toUpperCase()
-    .replace(/[,\.]/g, ' ')   // commas and dots → space
+    .replace(/['']/g, '')     // apostrophes (straight or curly) → dropped
+    .replace(/[,.\-]/g, ' ')  // commas, dots, hyphens → space
     .replace(/\s+/g, ' ')     // collapse multiple spaces
     .trim();
 }
@@ -82,36 +94,42 @@ function nameVariants(name: string): string[] {
   return Array.from(variants);
 }
 
-/** Generational/professional suffixes tolerated as the one surplus token in
- *  suffixTolerantMatch — anything else is treated as a genuinely different
- *  name, not a formatting variation. */
+/** Generational/professional suffixes tolerated as a surplus token in
+ *  suffixTolerantMatch — anything else must be a bare initial (see below) or
+ *  the match is treated as a genuinely different name, not a formatting
+ *  variation. */
 const NAME_SUFFIXES = new Set([
   'JR', 'SR', 'II', 'III', 'IV', 'V', 'MD', 'DO', 'PT', 'DPT', 'RN', 'PHD', 'ESQ',
 ]);
 
 /**
- * Suffix-tolerant match: the longer name may have exactly ONE surplus token
- * beyond the shorter name's full token set, and only if that surplus token is
- * a recognized generational/professional suffix (e.g. "JOHN SMITH JR" vs
- * "SMITH, JOHN"). An arbitrary extra token is never accepted — allowing that
- * would mean e.g. "MARY ANN JONES" matches an unrelated "ANN JONES", which is
- * exactly the kind of false positive that misattributes a claim to the wrong
- * patient.
+ * Suffix-tolerant match: the longer name may have surplus tokens beyond the
+ * shorter name's full token set, as long as EVERY surplus token is either a
+ * recognized generational/professional suffix ("JOHN SMITH JR" vs
+ * "SMITH, JOHN") or a bare 1-2 character initial ("NAME RAMATI, RAQUEL M" —
+ * common on government-services/NGS-style EOBs that print a middle initial —
+ * vs "RAMATI, RAQUEL"). An arbitrary full extra token is never accepted —
+ * allowing that would mean e.g. "MARY ANN JONES" matches an unrelated "ANN
+ * JONES", which is exactly the kind of false positive that misattributes a
+ * claim to the wrong patient. A short token can't create that risk: two
+ * different real patients differing only by inserted initials would need the
+ * same first+last name tokens to begin with, which is already a vanishingly
+ * rare collision this system treats as out of scope (see file header).
  */
 function suffixTolerantMatch(tokensA: string[], tokensB: string[]): boolean {
   const [shorter, longer] = tokensA.length <= tokensB.length
     ? [tokensA, tokensB]
     : [tokensB, tokensA];
 
-  if (longer.length !== shorter.length + 1) return false;
+  if (longer.length === shorter.length) return false; // handled by exact/token-set match already
 
   const remaining = [...longer];
   for (const t of shorter) {
     const idx = remaining.indexOf(t);
-    if (idx === -1) return false; // a shorter-name token is missing entirely — not just a suffix difference
+    if (idx === -1) return false; // a shorter-name token is missing entirely — not just a suffix/initial difference
     remaining.splice(idx, 1);
   }
-  return remaining.length === 1 && NAME_SUFFIXES.has(remaining[0]);
+  return remaining.length > 0 && remaining.every(t => NAME_SUFFIXES.has(t) || t.length <= 2);
 }
 
 /**

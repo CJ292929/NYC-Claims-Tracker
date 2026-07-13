@@ -13,18 +13,25 @@
  *   EOB:       "ALLISON AUYEUNG"   (First Last)
  *   Dashboard: "AUYEUNG, ALLISON"  (Last, First)
  *   Also:      "SMITH, JOHN JR"    (generational/professional suffix)
+ *              "RAMATI, RAQUEL M"  (middle initial — common on government-
+ *                                   services/NGS-style EOBs)
+ *              "O'BRIEN, JAMES"    (apostrophe) / "GARCIA-LOPEZ, MARIA" (hyphen)
  *
  * Deliberately NOT included: matching on last name + first initial alone
- * (e.g. "SMITH J"), or on an arbitrary subset of tokens. Both produce false
- * positives whenever two different patients share a last name and first
- * initial, or one patient's full name happens to contain another's.
+ * (e.g. "SMITH J" as the ENTIRE input), or on an arbitrary subset of tokens.
+ * Both produce false positives whenever two different patients share a last
+ * name and first initial, or one patient's full name happens to contain
+ * another's. This is different from tolerating a middle initial ADDED
+ * alongside an otherwise-complete first+last match (see suffixTolerantMatch).
  */
 
-/** Normalize a name: uppercase, remove commas/punctuation, collapse whitespace */
+/** Normalize a name: uppercase, drop apostrophes, turn other punctuation/
+ *  hyphens into spaces, collapse whitespace. */
 function normalizeName(name: string): string {
   return name
     .toUpperCase()
-    .replace(/[,.]/g, ' ')
+    .replace(/['']/g, '')
+    .replace(/[,.\-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -54,18 +61,19 @@ function nameVariants(name: string): string[] {
   return Array.from(variants);
 }
 
-/** Generational/professional suffixes tolerated as the one surplus token in
- *  suffixTolerantMatch — anything else is treated as a genuinely different
- *  name, not a formatting variation. */
+/** Generational/professional suffixes tolerated as a surplus token in
+ *  suffixTolerantMatch — anything else must be a bare initial (see below) or
+ *  the match is treated as a genuinely different name. */
 const NAME_SUFFIXES = new Set([
   'JR', 'SR', 'II', 'III', 'IV', 'V', 'MD', 'DO', 'PT', 'DPT', 'RN', 'PHD', 'ESQ',
 ]);
 
 /**
- * Suffix-tolerant match: the longer name may have exactly ONE surplus token
- * beyond the shorter name's full token set, and only if that surplus token is
- * a recognized generational/professional suffix. An arbitrary extra token is
- * never accepted — allowing that would mean e.g. "MARY ANN JONES" matches an
+ * Suffix-tolerant match: the longer name may have surplus tokens beyond the
+ * shorter name's full token set, as long as EVERY surplus token is either a
+ * recognized generational/professional suffix or a bare 1-2 character
+ * initial (e.g. a middle initial). An arbitrary full extra token is never
+ * accepted — allowing that would mean e.g. "MARY ANN JONES" matches an
  * unrelated "ANN JONES".
  */
 function suffixTolerantMatch(tokensA: string[], tokensB: string[]): boolean {
@@ -73,7 +81,7 @@ function suffixTolerantMatch(tokensA: string[], tokensB: string[]): boolean {
     ? [tokensA, tokensB]
     : [tokensB, tokensA];
 
-  if (longer.length !== shorter.length + 1) return false;
+  if (longer.length === shorter.length) return false;
 
   const remaining = [...longer];
   for (const t of shorter) {
@@ -81,7 +89,7 @@ function suffixTolerantMatch(tokensA: string[], tokensB: string[]): boolean {
     if (idx === -1) return false;
     remaining.splice(idx, 1);
   }
-  return remaining.length === 1 && NAME_SUFFIXES.has(remaining[0]);
+  return remaining.length > 0 && remaining.every(t => NAME_SUFFIXES.has(t) || t.length <= 2);
 }
 
 /**

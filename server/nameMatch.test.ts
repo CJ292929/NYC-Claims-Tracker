@@ -48,6 +48,28 @@ describe('fuzzyNameMatch', () => {
     expect(fuzzyNameMatch('JANE DOE MD', 'DOE, JANE')).toBe(true);
   });
 
+  // ── Middle initials (e.g. government-services/NGS EOBs print "NAME
+  //    LASTNAME, FIRSTNAME MID") — a real "patient not found despite being
+  //    in the file" bug: the dashboard name has no middle initial, the EOB
+  //    name does, and the old suffix tolerance only recognized generational/
+  //    professional suffixes, not bare initials ─────────────────────────────
+  it('matches "RAMATI, RAQUEL M" against "RAMATI, RAQUEL" (middle initial)', () => {
+    expect(fuzzyNameMatch('RAMATI, RAQUEL M', 'RAMATI, RAQUEL')).toBe(true);
+  });
+
+  it('matches "RAQUEL M RAMATI" (reversed order + middle initial) against "RAMATI, RAQUEL"', () => {
+    expect(fuzzyNameMatch('RAQUEL M RAMATI', 'RAMATI, RAQUEL')).toBe(true);
+  });
+
+  // ── Apostrophes and hyphens ───────────────────────────────────────────────
+  it('matches "O\'BRIEN, JAMES" against "OBRIEN, JAMES" (apostrophe dropped)', () => {
+    expect(fuzzyNameMatch("O'BRIEN, JAMES", 'OBRIEN, JAMES')).toBe(true);
+  });
+
+  it('matches "GARCIA-LOPEZ, MARIA" against "GARCIA LOPEZ, MARIA" (hyphen as space)', () => {
+    expect(fuzzyNameMatch('GARCIA-LOPEZ, MARIA', 'GARCIA LOPEZ, MARIA')).toBe(true);
+  });
+
   // ── Should NOT match different people ────────────────────────────────────
   it('does not match completely different names', () => {
     expect(fuzzyNameMatch('JOHN SMITH', 'ALLISON AUYEUNG')).toBe(false);
