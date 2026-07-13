@@ -85,6 +85,29 @@ function verifyClaimAgainstSourceText(claim: ExtractedClaim, sourceText: string)
   checkAmount("Reimbursement", claim.insuranceReimbursement);
   checkAmount("Patient due", claim.patientAmountDue);
 
+  // Co-occurrence check: catches "right values, wrong row" fabrication that
+  // the independent checks above can't see — e.g. a model that sees the same
+  // 4 CPT codes repeat across two dates and extends that pattern to a third
+  // date that actually only has 2 service lines. Each individual value
+  // (CPT, charge) is real and passes the checks above, since it's copied
+  // verbatim from a DIFFERENT line elsewhere in the document; only checking
+  // that they appear TOGETHER on one line catches the fabricated combination.
+  if (claim.cptCodes && claim.chargeAmount != null) {
+    const cptCore = claim.cptCodes.match(/^[A-Z]?\d{4,5}/)?.[0] ?? claim.cptCodes;
+    const chargeStr = claim.chargeAmount.toFixed(2);
+    const chargeStrNoCents = String(Math.trunc(claim.chargeAmount));
+    const coOccurs = sourceText.split("\n").some(
+      (line) =>
+        (line.includes(claim.cptCodes!) || line.includes(cptCore)) &&
+        (line.includes(chargeStr) || line.includes(chargeStrNoCents))
+    );
+    if (!coOccurs) {
+      warnings.push(
+        `CPT "${claim.cptCodes}" and charge ${chargeStr} each appear somewhere in source text but never together on the same line — possible pattern-completion fabrication`
+      );
+    }
+  }
+
   return warnings;
 }
 
@@ -160,6 +183,7 @@ IMPORTANT:
 - Use null (not a guess) for any field that isn't actually visible in the document — do not use outside/training knowledge to fill a gap (e.g. don't infer an insurer's usual claim number format, or a typical charge for a CPT code); if it isn't printed in this text, it's null
 - Each individual service line is its own claim object — never combine two service lines (e.g. two different CPT codes) into one object. If you see two CPT codes on what looks like one row, that's two service lines that got visually close together; output them as two separate claim objects, never as one object with a comma-joined cptCodes value.
 - Never output a CLAIM TOTALS, SUBTOTAL, or grand-total row as a service line — those summary rows repeat/sum the individual lines' amounts (e.g. a $700 total when the actual lines are $350/$175/$175) and must be skipped entirely, not extracted as their own claim or used as any line's chargeAmount.
+- Do not complete patterns. If one date has 4 service lines and a later date for the same patient has only 2, output exactly 2 for that date — do not add the other 2 CPT codes just because they appeared on the earlier dates. Repetition across dates is a coincidence of the data, not a rule to extend. Count the actual service lines under each date before outputting; never output more rows for a date than that date actually has.
 - Return ONLY valid JSON, no markdown or explanations.`
       : `You are a medical claims data extraction specialist. Extract all CMS-1500 Health Insurance Claim Form information accurately from the provided document text.
 
