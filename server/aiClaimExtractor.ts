@@ -54,6 +54,41 @@ function recoverJson(raw: string): any | null {
 }
 
 /**
+ * Checks whether a claim's CPT code and dollar amounts actually appear as
+ * substrings in the exact source text the model was given. Returns a list of
+ * human-readable warnings (empty if everything checks out) — see the call
+ * site for why this flags rather than discards.
+ */
+function verifyClaimAgainstSourceText(claim: ExtractedClaim, sourceText: string): string[] {
+  const warnings: string[] = [];
+
+  if (claim.cptCodes) {
+    // Some source documents fuse the CPT code and its modifier together with
+    // no separator (e.g. "9714059GP" = CPT 97140 + modifiers 59/GP) — check
+    // the raw string first, then fall back to just the leading CPT portion
+    // so that fusion alone doesn't trigger a false warning.
+    const cptCore = claim.cptCodes.match(/^[A-Z]?\d{4,5}/)?.[0] ?? claim.cptCodes;
+    if (!sourceText.includes(claim.cptCodes) && !sourceText.includes(cptCore)) {
+      warnings.push(`CPT "${claim.cptCodes}" not found in source text`);
+    }
+  }
+
+  const checkAmount = (label: string, value: number | null | undefined) => {
+    if (value === null || value === undefined) return;
+    const withCents = value.toFixed(2);
+    const withoutCents = String(Math.trunc(value));
+    if (!sourceText.includes(withCents) && !sourceText.includes(withoutCents)) {
+      warnings.push(`${label} ${withCents} not found in source text`);
+    }
+  };
+  checkAmount("Charge", claim.chargeAmount);
+  checkAmount("Reimbursement", claim.insuranceReimbursement);
+  checkAmount("Patient due", claim.patientAmountDue);
+
+  return warnings;
+}
+
+/**
  * Extract claims from PDF text using the configured AI provider's structured
  * JSON capabilities (see server/_core/llm.ts — OpenAI GPT-4 Vision by
  * default, swappable via AI_PROVIDER). Handles both Reimbursement (EOB) and
@@ -303,6 +338,28 @@ IMPORTANT:
         notes: parsed.extractionNotes || null,
       })
     );
+
+    // Cheap, deterministic anti-hallucination check — only possible when we
+    // have the exact source text the model saw (not for the 'pdf' vision
+    // path, where there's no separately-extracted text to compare against).
+    // Never discards a claim on failure: a false positive here (unusual
+    // source formatting, e.g. a CPT code fused with its modifier) is far
+    // cheaper than silently dropping real data, so mismatches are surfaced
+    // in `notes` for staff review instead of filtered out.
+    if (source.kind === "text") {
+      for (const claim of normalizedClaims) {
+        const warnings = verifyClaimAgainstSourceText(claim, source.text);
+        if (warnings.length > 0) {
+          console.warn(
+            `[AIExtractor] Verification warning (CPT ${claim.cptCodes}, DOS ${claim.dateOfService}):`,
+            warnings.join("; ")
+          );
+          claim.notes = [claim.notes, `⚠️ Unverified against source: ${warnings.join("; ")}`]
+            .filter(Boolean)
+            .join(" | ");
+        }
+      }
+    }
 
     // Extract top-level patient name if all claims are for the same patient
     const uniquePatientNames = new Set(
