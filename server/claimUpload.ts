@@ -35,40 +35,103 @@ import { extractClaimsWithAI, detectInsuranceType, type ExtractionSource } from 
 // (those fields are always null on an EOB, so hasMissingFields would fire on
 // every single reimbursement upload) and populate a value that
 // enforceFieldBoundary would strip right back out before saving.
-const CMS1500_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
+//
+// Each list is further split into claim-level vs. line-level fields.
+// parseCMS1500/parseMeritainEOB group service lines under a shared date via
+// DateClaimGroup.cptLines[] (server/insuranceTemplates.ts) — per-CPT-line
+// data (cptCodes, chargeAmount, unitsBilled, modifier, diagnosisCodes,
+// insuranceReimbursement, patientAmountPaid, patientAmountDue) only ever
+// lives in cptLines, never on the DateClaimGroup object itself, and
+// bulkImportFromEOB (server/routers.ts) reads line.* — not claim.* — for
+// those fields when saving. Checking/backfilling only the claim-level object
+// silently misses them entirely.
+const CMS1500_CLAIM_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
   'placeOfService',
-  'unitsBilled',
   'diagnosisCodes',
-  'modifier',
   'claimSubmittedDate',
 ];
+const CMS1500_LINE_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
+  'cptCodes',
+  'chargeAmount',
+  'unitsBilled',
+  'modifier',
+  'diagnosisCodes',
+];
 
-const REIMBURSEMENT_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
-  'insuranceReimbursement',
-  'patientAmountPaid',
-  'patientAmountDue',
+const REIMBURSEMENT_CLAIM_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
   'oaClaimNumber',
   'checkDate',
   'checkNumberVirtualCard',
 ];
+const REIMBURSEMENT_LINE_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
+  'insuranceReimbursement',
+  'patientAmountPaid',
+  'patientAmountDue',
+];
 
-function hasMissingFields(claims: ExtractedClaim[], fields: (keyof ExtractedClaim)[]): boolean {
-  return claims.some(claim => fields.some(field => claim[field] === null || claim[field] === undefined));
+/** A partial ExtractedClaim that may carry a DateClaimGroup-style cptLines[] array. */
+type ClaimWithLines = ExtractedClaim & { cptLines?: Array<Record<string, unknown>> };
+
+function hasMissingFields(
+  claims: ClaimWithLines[],
+  claimFields: (keyof ExtractedClaim)[],
+  lineFields: (keyof ExtractedClaim)[]
+): boolean {
+  return claims.some(claim => {
+    if (claimFields.some(field => claim[field] === null || claim[field] === undefined)) return true;
+    const lines = claim.cptLines;
+    if (lines === undefined) return false; // flat claim (no line-level structure) — claim-level check above is authoritative
+    if (lines.length === 0) return lineFields.length > 0; // date group found but zero service lines extracted
+    return lines.some(line => lineFields.some(field => line[field] === null || line[field] === undefined));
+  });
 }
 
 // Mutates `claims` in place so it stays in sync with any other array (e.g.
 // patientGroups) that references the same claim objects.
-function backfillMissingFields(claims: ExtractedClaim[], aiClaims: ExtractedClaim[], fields: (keyof ExtractedClaim)[]): void {
+function backfillMissingFields(
+  claims: ClaimWithLines[],
+  aiClaims: ExtractedClaim[],
+  claimFields: (keyof ExtractedClaim)[],
+  lineFields: (keyof ExtractedClaim)[]
+): void {
   claims.forEach((claim, i) => {
-    const match =
-      aiClaims.find(a => a.cptCodes === claim.cptCodes && a.dateOfService === claim.dateOfService) ??
-      aiClaims[i];
-    if (!match) return;
-    for (const field of fields) {
-      if ((claim[field] === null || claim[field] === undefined) && match[field] !== null && match[field] !== undefined) {
-        (claim as any)[field] = match[field];
+    // Every AI claim sharing this claim's date of service — a date group can
+    // have several CPT lines, and each corresponds to its own AI-extracted
+    // claim object, so matching must consider all of them, not just one.
+    const dateMatches = aiClaims.filter(a => a.dateOfService === claim.dateOfService);
+    const claimMatch = dateMatches[0] ?? aiClaims[i];
+    if (claimMatch) {
+      for (const field of claimFields) {
+        if ((claim[field] === null || claim[field] === undefined) && claimMatch[field] !== null && claimMatch[field] !== undefined) {
+          (claim as any)[field] = claimMatch[field];
+        }
       }
     }
+
+    const lines = claim.cptLines;
+    if (lines === undefined) return; // flat claim — nothing further to backfill at the line level
+    if (lines.length === 0) {
+      // Regex found the date/claim-level fields but no service lines at
+      // all — rebuild cptLines entirely from the AI's claims for this date.
+      for (const aiClaim of dateMatches) {
+        const newLine: Record<string, unknown> = {};
+        for (const field of lineFields) newLine[field] = aiClaim[field] ?? null;
+        lines.push(newLine);
+      }
+      return;
+    }
+    lines.forEach((line, li) => {
+      const lineMatch =
+        dateMatches.find(a => a.cptCodes && a.cptCodes === line.cptCodes) ??
+        dateMatches[li] ??
+        dateMatches[0];
+      if (!lineMatch) return;
+      for (const field of lineFields) {
+        if ((line[field] === null || line[field] === undefined) && lineMatch[field] !== null && lineMatch[field] !== undefined) {
+          line[field] = lineMatch[field];
+        }
+      }
+    });
   });
 }
 
@@ -474,7 +537,7 @@ export function registerClaimUploadRoute(app: Express) {
           const flatClaims = patientGroups.flatMap(g => g.claims);
 
           if (flatClaims.length > 0) {
-            if (hasMissingFields(flatClaims, CMS1500_FIELDS_TO_BACKFILL)) {
+            if (hasMissingFields(flatClaims, CMS1500_CLAIM_FIELDS_TO_BACKFILL, CMS1500_LINE_FIELDS_TO_BACKFILL)) {
               try {
                 const cms1500Source: ExtractionSource = (cms1500Text || extractedText).trim()
                   ? { kind: 'text', text: cms1500Text || extractedText }
@@ -482,7 +545,7 @@ export function registerClaimUploadRoute(app: Express) {
                 console.log('[ClaimUpload] Stage 4b/7 — CMS1500 regex parser left fields blank, running AI to backfill place of service / units / diagnosis / modifier...');
                 const backfillResult = await extractClaimsWithAI(cms1500Source, 'cms1500');
                 if (backfillResult.claims.length > 0) {
-                  backfillMissingFields(flatClaims, backfillResult.claims, CMS1500_FIELDS_TO_BACKFILL);
+                  backfillMissingFields(flatClaims, backfillResult.claims, CMS1500_CLAIM_FIELDS_TO_BACKFILL, CMS1500_LINE_FIELDS_TO_BACKFILL);
                 }
               } catch (backfillError) {
                 console.error('[ClaimUpload] CMS1500 AI backfill failed (continuing with regex-only result):', backfillError);
@@ -574,7 +637,7 @@ export function registerClaimUploadRoute(app: Express) {
         console.log('[ClaimUpload] Stage 4/7 — Template detection (reimbursement)...');
         const templateResult = tryTemplateExtraction(reimbursementText, originalname);
         if (templateResult && templateResult.claims.length > 0) {
-          if (hasMissingFields(templateResult.claims, REIMBURSEMENT_FIELDS_TO_BACKFILL)) {
+          if (hasMissingFields(templateResult.claims, REIMBURSEMENT_CLAIM_FIELDS_TO_BACKFILL, REIMBURSEMENT_LINE_FIELDS_TO_BACKFILL)) {
             try {
               const reimbursementBackfillSource: ExtractionSource = reimbursementText.trim()
                 ? { kind: 'text', text: reimbursementText }
@@ -582,12 +645,12 @@ export function registerClaimUploadRoute(app: Express) {
               console.log(`[ClaimUpload] Stage 4b/7 — Template "${templateResult.templateName}" left fields blank, running AI to backfill place of service / units / diagnosis / modifier...`);
               const backfillResult = await extractClaimsWithAI(reimbursementBackfillSource, 'reimbursement');
               if (backfillResult.claims.length > 0) {
-                backfillMissingFields(templateResult.claims, backfillResult.claims, REIMBURSEMENT_FIELDS_TO_BACKFILL);
+                backfillMissingFields(templateResult.claims, backfillResult.claims, REIMBURSEMENT_CLAIM_FIELDS_TO_BACKFILL, REIMBURSEMENT_LINE_FIELDS_TO_BACKFILL);
                 // templateResult.claims and templateResult.patientGroups[].claims come from
                 // two independent parse calls (see tryTemplateExtraction), not shared
                 // object references — each group's claims need the same backfill applied.
                 templateResult.patientGroups?.forEach((group: PatientClaimGroup) => {
-                  backfillMissingFields(group.claims, backfillResult.claims, REIMBURSEMENT_FIELDS_TO_BACKFILL);
+                  backfillMissingFields(group.claims, backfillResult.claims, REIMBURSEMENT_CLAIM_FIELDS_TO_BACKFILL, REIMBURSEMENT_LINE_FIELDS_TO_BACKFILL);
                 });
               }
             } catch (backfillError) {
