@@ -10,9 +10,6 @@ import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
@@ -22,52 +19,20 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
 import { cn } from "@/lib/utils";
-import {
-  BarChart3,
-  FileText,
-  LayoutDashboard,
-  LogOut,
-  PanelLeft,
-  Settings,
-  User,
-  Users,
-} from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, Users } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { Logo } from "./Logo";
 import { Button } from "./ui/button";
 
-// Session 3 will wire these to real wouter routes. For now, path is used only
-// for the (currently hardcoded) mobile top-bar label lookup.
-const mainNavItems = [
-  { id: "dashboard", icon: LayoutDashboard, label: "Dashboard", path: "/" },
-  { id: "patients", icon: Users, label: "Patients", path: "/patients" },
-  { id: "claims", icon: FileText, label: "Claims", path: "/claims" },
-  { id: "reports", icon: BarChart3, label: "Reports", path: "/reports", disabled: true },
+const menuItems = [
+  { icon: LayoutDashboard, label: "Page 1", path: "/" },
+  { icon: Users, label: "Page 2", path: "/some-path" },
 ];
-
-const toolsNavItems = [
-  // Bulk Upload is intentionally not listed here -- it's a real, working
-  // feature already in Dashboard.tsx's header (showUploadDialog /
-  // handleBulkUpload), not an unbuilt one. Labeling a sidebar item "Coming
-  // Soon" next to a live feature of the same name would be misleading.
-  { id: "settings", icon: Settings, label: "Settings", path: "/settings", disabled: true },
-];
-
-const accountNavItems = [
-  { id: "profile", icon: User, label: "Profile", path: "/profile", disabled: true },
-];
-
-const menuItems = [...mainNavItems, ...toolsNavItems, ...accountNavItems];
-
-// Session 2: no routes are wired up yet, so "active" is hardcoded to
-// whichever nav item matches what the single "/" route currently shows
-// (the patient list/detail dashboard). Session 3 replaces this with a
-// real derived-from-URL active state.
-const SESSION_2_ACTIVE_NAV_ID = "patients";
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_WIDTH = 280;
@@ -84,7 +49,6 @@ export default function DashboardLayout({
     return saved ? parseInt(saved, 10) : DEFAULT_WIDTH;
   });
   const { loading, user } = useAuth();
-  const [, setLocation] = useLocation();
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_WIDTH_KEY, sidebarWidth.toString());
@@ -95,10 +59,6 @@ export default function DashboardLayout({
   }
 
   if (!user) {
-    // In practice App.tsx's ProtectedRoute already redirects to /login before
-    // this ever renders. This is a fallback, not the primary sign-in path --
-    // it must point at the real /login route (username/password form), not
-    // an OAuth portal URL this app doesn't use.
     return (
       <div className="flex items-center justify-center min-h-screen bg-brand-cream">
         <div className="flex flex-col items-center gap-8 p-8 max-w-md w-full bg-card rounded-xl border border-border shadow-brand">
@@ -114,7 +74,9 @@ export default function DashboardLayout({
             </div>
           </div>
           <Button
-            onClick={() => setLocation("/login")}
+            onClick={() => {
+              window.location.href = getLoginUrl();
+            }}
             size="lg"
             className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white shadow-md hover:shadow-lg transition-all"
           >
@@ -155,9 +117,7 @@ function DashboardLayoutContent({
   const isCollapsed = state === "collapsed";
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
-  // Session 2: hardcoded to match the sidebar's hardcoded active item, since
-  // no real routes exist yet. Session 3 will derive this from `location`.
-  const activeMenuItem = menuItems.find(item => item.id === SESSION_2_ACTIVE_NAV_ID);
+  const activeMenuItem = menuItems.find(item => item.path === location);
   const isMobile = useIsMobile();
 
   useEffect(() => {
@@ -227,97 +187,29 @@ function DashboardLayoutContent({
           </SidebarHeader>
 
           <SidebarContent className="gap-0">
-            <SidebarGroup>
-              <SidebarGroupLabel>Main</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu className="px-2 py-1">
-                  {mainNavItems.map(item => {
-                    const isActive = item.id === SESSION_2_ACTIVE_NAV_ID;
-                    return (
-                      <SidebarMenuItem key={item.id}>
-                        <SidebarMenuButton
-                          isActive={isActive}
-                          aria-disabled={item.disabled}
-                          onClick={() => {
-                            if (item.disabled) return;
-                            console.log(`[nav] ${item.label} clicked -- routing added in Session 3`);
-                          }}
-                          tooltip={item.disabled ? "Coming Soon" : item.label}
-                          className={cn(
-                            "h-10 transition-all font-normal border-l-4 border-transparent",
-                            isActive && "border-l-brand-gold font-medium",
-                            item.disabled && "cursor-not-allowed"
-                          )}
-                        >
-                          <item.icon
-                            className={`h-4 w-4 ${isActive ? "text-sidebar-accent-foreground" : ""}`}
-                          />
-                          <span>{item.label}</span>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    );
-                  })}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
-
-            <SidebarGroup>
-              <SidebarGroupLabel>Tools</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu className="px-2 py-1">
-                  {toolsNavItems.map(item => (
-                    <SidebarMenuItem key={item.id}>
-                      <SidebarMenuButton
-                        aria-disabled={item.disabled}
-                        onClick={() => {
-                          if (item.disabled) return;
-                          console.log(`[nav] ${item.label} clicked -- routing added in Session 3`);
-                        }}
-                        tooltip="Coming Soon"
-                        className="h-10 transition-all font-normal border-l-4 border-transparent cursor-not-allowed"
-                      >
-                        <item.icon className="h-4 w-4" />
-                        <span>{item.label}</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
-
-            <SidebarGroup className="mt-auto">
-              <SidebarGroupLabel>Account</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu className="px-2 py-1">
-                  {accountNavItems.map(item => (
-                    <SidebarMenuItem key={item.id}>
-                      <SidebarMenuButton
-                        aria-disabled={item.disabled}
-                        onClick={() => {
-                          if (item.disabled) return;
-                          console.log(`[nav] ${item.label} clicked -- routing added in Session 3`);
-                        }}
-                        tooltip="Coming Soon"
-                        className="h-10 transition-all font-normal border-l-4 border-transparent cursor-not-allowed"
-                      >
-                        <item.icon className="h-4 w-4" />
-                        <span>{item.label}</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  ))}
-                  <SidebarMenuItem>
+            <SidebarMenu className="px-2 py-1">
+              {menuItems.map(item => {
+                const isActive = location === item.path;
+                return (
+                  <SidebarMenuItem key={item.path}>
                     <SidebarMenuButton
-                      onClick={logout}
-                      tooltip="Sign Out"
-                      className="h-10 transition-all font-normal border-l-4 border-transparent text-destructive hover:text-destructive"
+                      isActive={isActive}
+                      onClick={() => setLocation(item.path)}
+                      tooltip={item.label}
+                      className={cn(
+                        "h-10 transition-all font-normal border-l-4 border-transparent",
+                        isActive && "border-l-brand-gold font-medium"
+                      )}
                     >
-                      <LogOut className="h-4 w-4" />
-                      <span>Sign Out</span>
+                      <item.icon
+                        className={`h-4 w-4 ${isActive ? "text-sidebar-accent-foreground" : ""}`}
+                      />
+                      <span>{item.label}</span>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+                );
+              })}
+            </SidebarMenu>
           </SidebarContent>
 
           <SidebarFooter className="p-3">
