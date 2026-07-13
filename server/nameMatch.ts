@@ -1,7 +1,12 @@
 /**
  * server/nameMatch.ts
  *
- * Fuzzy patient name matching utility.
+ * Fuzzy patient name matching utility. This result drives which patient record
+ * an extracted claim gets saved against (see bulkImportFromEOB in routers.ts),
+ * so a false-positive match silently misattributes real financial/medical data
+ * to the wrong patient — every strategy here requires the FULL set of name
+ * tokens to match (just possibly reordered), never a partial/initial-only
+ * overlap, so two different people can never satisfy a match by coincidence.
  *
  * Handles the common mismatch between EOB/CMS1500 formats and dashboard formats:
  *   EOB:       "ALLISON AUYEUNG"   (First Last)
@@ -9,13 +14,23 @@
  *   Also:      "AUYEUNG ALLISON"   (Last First, no comma)
  *              "Auyeung, Allison"  (mixed case)
  *              "GARCIA, ISABELA"   (already Last, First)
+ *              "SMITH, JOHN JR"    (generational/professional suffix)
  *
  * Matching strategy (in order of confidence):
  *   1. Exact match (case-insensitive) — fastest path
  *   2. Token-set match — split both names into tokens, check if same set of tokens
  *   3. Reversed-order match — "FIRST LAST" vs "LAST, FIRST" by swapping tokens
- *   4. Last-name + first-initial match — "AUYEUNG A" matches "ALLISON AUYEUNG"
- *   5. Partial token overlap — all tokens of the shorter name appear in the longer
+ *   4. Suffix-tolerant match — "SMITH, JOHN" matches "JOHN SMITH JR" (surplus
+ *      tokens must be a recognized generational/professional suffix, e.g. JR,
+ *      SR, II, MD — never an arbitrary extra token, which could belong to a
+ *      different person of a similar name)
+ *
+ * Deliberately NOT included: matching on last name + first initial alone
+ * (e.g. "SMITH J"), or on an arbitrary subset of tokens. Both produce false
+ * positives whenever two different patients share a last name and first
+ * initial, or one patient's full name happens to contain another's — an
+ * unacceptable risk when the result determines where a claim's money and
+ * diagnosis history get recorded.
  */
 
 /** Normalize a name: uppercase, remove commas/punctuation, collapse whitespace */
@@ -67,38 +82,36 @@ function nameVariants(name: string): string[] {
   return Array.from(variants);
 }
 
+/** Generational/professional suffixes tolerated as the one surplus token in
+ *  suffixTolerantMatch — anything else is treated as a genuinely different
+ *  name, not a formatting variation. */
+const NAME_SUFFIXES = new Set([
+  'JR', 'SR', 'II', 'III', 'IV', 'V', 'MD', 'DO', 'PT', 'DPT', 'RN', 'PHD', 'ESQ',
+]);
+
 /**
- * Check if two name token sets overlap sufficiently.
- * Returns true if every token in the shorter name appears in the longer name.
+ * Suffix-tolerant match: the longer name may have exactly ONE surplus token
+ * beyond the shorter name's full token set, and only if that surplus token is
+ * a recognized generational/professional suffix (e.g. "JOHN SMITH JR" vs
+ * "SMITH, JOHN"). An arbitrary extra token is never accepted — allowing that
+ * would mean e.g. "MARY ANN JONES" matches an unrelated "ANN JONES", which is
+ * exactly the kind of false positive that misattributes a claim to the wrong
+ * patient.
  */
-function tokenSetMatch(tokensA: string[], tokensB: string[]): boolean {
+function suffixTolerantMatch(tokensA: string[], tokensB: string[]): boolean {
   const [shorter, longer] = tokensA.length <= tokensB.length
     ? [tokensA, tokensB]
     : [tokensB, tokensA];
-  return shorter.every(t => longer.includes(t));
-}
 
-/**
- * Last-name + first-initial match.
- * "AUYEUNG A" matches "ALLISON AUYEUNG" or "AUYEUNG ALLISON".
- */
-function lastNameFirstInitialMatch(tokensA: string[], tokensB: string[]): boolean {
-  if (tokensA.length < 1 || tokensB.length < 1) return false;
+  if (longer.length !== shorter.length + 1) return false;
 
-  // Try: last token of A matches any token of B, and first char of first token of A matches first char of any token of B
-  for (const a of tokensA) {
-    for (const b of tokensB) {
-      if (a === b) {
-        // Same last name found — now check if first initials match
-        const aOthers = tokensA.filter(t => t !== a);
-        const bOthers = tokensB.filter(t => t !== b);
-        if (aOthers.length === 0 || bOthers.length === 0) continue;
-        // Check if first initials of remaining tokens match
-        if (aOthers[0][0] === bOthers[0][0]) return true;
-      }
-    }
+  const remaining = [...longer];
+  for (const t of shorter) {
+    const idx = remaining.indexOf(t);
+    if (idx === -1) return false; // a shorter-name token is missing entirely — not just a suffix difference
+    remaining.splice(idx, 1);
   }
-  return false;
+  return remaining.length === 1 && NAME_SUFFIXES.has(remaining[0]);
 }
 
 /**
@@ -137,14 +150,12 @@ export function fuzzyNameMatch(eobName: string, dashName: string): boolean {
     }
   }
 
-  // 4. Last-name + first-initial match
-  if (lastNameFirstInitialMatch(tokensEob, tokensDash)) return true;
-
-  // 5. Partial token overlap (all tokens of shorter appear in longer)
-  //    Only apply when both names have ≥2 tokens to avoid false positives
-  if (tokensEob.length >= 2 && tokensDash.length >= 2) {
-    if (tokenSetMatch(tokensEob, tokensDash)) return true;
-  }
+  // 4. Suffix-tolerant match (e.g. "SMITH, JOHN" vs "JOHN SMITH JR") — the
+  //    only case where token sets are allowed to differ, and only by one
+  //    recognized suffix token. See suffixTolerantMatch for why the previous
+  //    last-name+first-initial and arbitrary-subset heuristics were removed:
+  //    both could match two genuinely different patients.
+  if (suffixTolerantMatch(tokensEob, tokensDash)) return true;
 
   return false;
 }
