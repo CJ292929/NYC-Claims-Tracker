@@ -1591,7 +1591,7 @@ export default function Dashboard() {
       const cptLines: any[] = row.cptLines && row.cptLines.length > 0 ? row.cptLines : [row];
       for (const line of cptLines) {
         try {
-          const lineReimb = line.insuranceReimbursement ? parseFloat(line.insuranceReimbursement) : null;
+          const lineReimb = line.insuranceReimbursement !== '' && line.insuranceReimbursement != null ? parseFloat(line.insuranceReimbursement) : null;
           await upsertClaim.mutateAsync({
             patientId: activePatient.id,
             authPeriod: claimUploadPeriod,
@@ -1604,8 +1604,8 @@ export default function Dashboard() {
             modifier: line.modifier || row.modifier || null,
             chargeAmount: line.chargeAmount ? parseFloat(line.chargeAmount) : null,
             insuranceReimbursement: lineReimb,
-            patientAmountPaid: line.patientAmountPaid ? parseFloat(line.patientAmountPaid) : null,
-            patientAmountDue: line.patientAmountDue ? parseFloat(line.patientAmountDue) : null,
+            patientAmountPaid: line.patientAmountPaid !== '' && line.patientAmountPaid != null ? parseFloat(line.patientAmountPaid) : null,
+            patientAmountDue: line.patientAmountDue !== '' && line.patientAmountDue != null ? parseFloat(line.patientAmountDue) : null,
             insuranceBilled: row.insuranceBilled || line.insuranceBilled || null,
             oaClaimNumber: row.oaClaimNumber || line.oaClaimNumber || null,
             claimSubmittedDate: row.claimSubmittedDate || line.claimSubmittedDate || null,
@@ -2547,8 +2547,8 @@ export default function Dashboard() {
                   modifier: claimFormData.modifier || null,
                   chargeAmount: claimFormData.chargeAmount ? parseFloat(claimFormData.chargeAmount) : null,
                   insuranceReimbursement: claimFormData.insuranceReimbursement ? parseFloat(claimFormData.insuranceReimbursement) : null,
-                  patientAmountPaid: claimFormData.patientAmountPaid ? parseFloat(claimFormData.patientAmountPaid) : null,
-                  patientAmountDue: claimFormData.patientAmountDue ? parseFloat(claimFormData.patientAmountDue) : null,
+                  patientAmountPaid: claimFormData.patientAmountPaid !== '' ? parseFloat(claimFormData.patientAmountPaid) : null,
+                  patientAmountDue: claimFormData.patientAmountDue !== '' ? parseFloat(claimFormData.patientAmountDue) : null,
                   insuranceBilled: claimFormData.insuranceBilled || null,
                   oaClaimNumber: claimFormData.oaClaimNumber || null,
                   claimSubmittedDate: claimFormData.claimSubmittedDate || null,
@@ -2736,9 +2736,9 @@ export default function Dashboard() {
                                         ) : null}
                                       </td>
                                       <td className="px-3 py-1 font-mono text-gray-800">{line.cptCodes || '—'}</td>
-                                      <td className="px-3 py-1 text-right text-gray-700">{line.chargeAmount ? `$${parseFloat(line.chargeAmount).toFixed(2)}` : '—'}</td>
-                                      <td className="px-3 py-1 text-right text-gray-700">{line.insuranceReimbursement ? `$${parseFloat(line.insuranceReimbursement).toFixed(2)}` : '—'}</td>
-                                      <td className="px-3 py-1 text-right text-gray-700">{line.patientAmountPaid ? `$${parseFloat(line.patientAmountPaid).toFixed(2)}` : '—'}</td>
+                                      <td className="px-3 py-1 text-right text-gray-700">{line.chargeAmount != null && line.chargeAmount !== '' ? `$${parseFloat(line.chargeAmount).toFixed(2)}` : '—'}</td>
+                                      <td className="px-3 py-1 text-right text-gray-700">{line.insuranceReimbursement != null && line.insuranceReimbursement !== '' ? `$${parseFloat(line.insuranceReimbursement).toFixed(2)}` : '—'}</td>
+                                      <td className="px-3 py-1 text-right text-gray-700">{line.patientAmountPaid != null && line.patientAmountPaid !== '' ? `$${parseFloat(line.patientAmountPaid).toFixed(2)}` : '—'}</td>
                                     </tr>
                                   ));
                                 })}
@@ -2836,9 +2836,9 @@ export default function Dashboard() {
                               ) : null}
                             </span>
                           </td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.chargeAmount ? `$${parseFloat(line.chargeAmount).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.insuranceReimbursement ? `$${parseFloat(line.insuranceReimbursement).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.patientAmountPaid ? `$${parseFloat(line.patientAmountPaid).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
+                          <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.chargeAmount != null && line.chargeAmount !== '' ? `$${parseFloat(line.chargeAmount).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
+                          <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.insuranceReimbursement != null && line.insuranceReimbursement !== '' ? `$${parseFloat(line.insuranceReimbursement).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
+                          <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.patientAmountPaid != null && line.patientAmountPaid !== '' ? `$${parseFloat(line.patientAmountPaid).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
                           {/* Status — show only on first line */}
                           <td className="px-3 py-1.5 border-r border-gray-200">
                             {lIdx === 0 && (

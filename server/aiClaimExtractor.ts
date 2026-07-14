@@ -53,6 +53,40 @@ function recoverJson(raw: string): any | null {
   return null;
 }
 
+// Insurer names the model might mistakenly write into insuranceBilled
+// despite the prompt instructing it to extract a numeric identifier instead
+// (e.g. hallucinating from the document's letterhead). Matched as a
+// case-insensitive substring, not an exact match, since a payer name is
+// often printed with extra words ("Aetna Choice PPO", "Meritain Health").
+const KNOWN_INSURER_NAMES = [
+  "aetna", "bcbs", "blue cross", "blue shield", "cigna", "unitedhealthcare",
+  "united healthcare", "uhc", "humana", "meritain", "anthem", "medicare",
+  "medicaid", "optum", "wellpoint", "molina", "kaiser", "tricare", "geico",
+  "oxford", "empire", "health net", "centene", "ambetter",
+];
+
+/**
+ * insuranceBilled must hold a numeric billing/group/payer identifier, never
+ * the insurance company name — some payers print a value that already looks
+ * like an identifier right next to their own letterhead, which can lead a
+ * model to substitute the company name instead. Mutates the claim in place,
+ * clearing the field to null (with a note) rather than discarding the whole
+ * claim, since every other field can still be correct.
+ */
+function sanitizeInsuranceBilled(claim: ExtractedClaim): void {
+  if (!claim.insuranceBilled) return;
+  const lower = claim.insuranceBilled.toLowerCase();
+  if (KNOWN_INSURER_NAMES.some((name) => lower.includes(name))) {
+    claim.notes = [
+      claim.notes,
+      `⚠️ insuranceBilled "${claim.insuranceBilled}" looks like an insurance company name, not a billing identifier — cleared to null`,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    claim.insuranceBilled = null;
+  }
+}
+
 /**
  * Checks whether a claim's CPT code and dollar amounts actually appear as
  * substrings in the exact source text the model was given. Returns a list of
@@ -93,6 +127,7 @@ function verifyClaimAgainstSourceText(claim: ExtractedClaim, sourceText: string)
   };
   checkStringField("Claim #", claim.oaClaimNumber);
   checkStringField("Check/EFT", claim.checkNumberVirtualCard);
+  checkStringField("Ins. Billed", claim.insuranceBilled);
 
   // Co-occurrence check: catches "right values, wrong row" fabrication that
   // the independent checks above can't see — e.g. a model that sees the same
@@ -170,7 +205,7 @@ For each claim/service line, extract EVERY one of these fields when it appears a
 - checkDate: check/payment/EFT date in MM/DD/YYYY format
 - checkNumberVirtualCard: check number, EFT trace number, or virtual card number
 - claimStatus: one of "approved", "denied", or "submitted" (infer from context — e.g. a $0 paid line with a denial code is "denied"; a line with a payment amount is "approved")
-- insuranceBilled: the specific payer THIS claim was billed to/forwarded to — read the text right next to this claim (e.g. a "CLAIM INFORMATION FORWARDED TO: <payer>" line, or a payer name printed within this claim's own block). Do NOT default to the document's letterhead/logo — some documents (e.g. a Medicare administrator's EOB) print one org's letterhead at the top but list a DIFFERENT payer per claim/per patient below it, and each claim's own payer can differ from its neighbors'. Only fall back to the letterhead org if no claim-specific payer text exists at all.
+- insuranceBilled: the NUMERIC billing/group/payer identifier for this claim — e.g. "Group #", "Group Number", "Group No", "Group ID", "Billing ID", "Billing Number", "Payer ID", "Payer Number", or a slash-separated identifier like "16404/137040261". This is NEVER the insurance company/payer name (do not write "Aetna", "Meritain Health", "BCBS", "Cigna", etc. here — that is a completely different field, not this one). If no such numeric identifier is visible anywhere in this claim's block, use null — do not substitute the payer name as a fallback.
 
 FIELD NAME VARIATIONS — the same data point is labeled differently across payers; map by meaning, not by exact label. Some payers print several *different, non-interchangeable* dollar columns — read carefully, don't just grab the first similar-sounding label:
 - Insurance Reimbursement = the amount the payer actually PAID/will pay: "Paid Amount", "Payable Amount", "Plan Paid", "Claim Payment Amount". This is NOT the same as "Allowed Amount"/"Allowable"/"QPA" — that is only the contractually recognized rate the patient-responsibility math is based on, and is often larger than what was actually paid (especially out-of-network). If both an "Allowed" and a "Paid"/"Payable" column exist, use the "Paid"/"Payable" one.
@@ -204,7 +239,7 @@ For each service line, extract EVERY one of these fields when it appears anywher
 - modifier: modifier codes if present (from Box 24D, immediately after the CPT code)
 - chargeAmount: total charge amount for this line (numeric only, from Box 24F)
 - claimSubmittedDate: MM/DD/YYYY format — the physician/supplier signature date (from Box 31, usually printed after "SIGNED"/"DATE")
-- insuranceBilled: the insurance plan/payer name this form was submitted to (from Box 11c "Insurance Plan Name" if present, otherwise Box 1 "Other" plan name, otherwise the carrier name printed in the form's letterhead/address block)
+- insuranceBilled: the NUMERIC billing/group/payer identifier printed near Box 11 — e.g. "Group #", "Group Number", "Group No", "Group ID", "Billing ID", "Billing Number", "Payer ID", "Payer Number", or a slash-separated identifier like "16404/137040261". This is NEVER the insurance plan/payer name (do not write "Aetna", "Blue Cross", etc. here). If no such numeric identifier is visible on the form, use null.
 
 IMPORTANT:
 - Patient name is REQUIRED - never leave it null or empty
@@ -379,13 +414,12 @@ IMPORTANT:
             ? Number(claim.unitsBilled)
             : null,
         modifier: claim.modifier || null,
-        // Prefer the payer identified for THIS specific claim (e.g. its own
-        // "forwarded to" line) over the document-wide detectedInsurer — some
-        // documents print one org's letterhead but list a different payer per
-        // claim/per patient below it (see the multi-patient scanning note
-        // above), so applying detectedInsurer to every claim uniformly would
-        // mislabel any claim whose actual payer differs from the letterhead.
-        insuranceBilled: claim.insuranceBilled || parsed.detectedInsurer || "Unknown",
+        // insuranceBilled is the numeric billing/group/payer identifier, not
+        // a payer name — must never fall back to detectedInsurer (a company
+        // name) or a placeholder string. sanitizeInsuranceBilled() below also
+        // strips it back to null if the model ignores the prompt and returns
+        // a company name anyway.
+        insuranceBilled: claim.insuranceBilled || null,
         claimSubmittedDate: claim.claimSubmittedDate || null,
         expireBcbsClaimNumber: null,
         paymentReceived: null,
@@ -397,6 +431,12 @@ IMPORTANT:
         notes: parsed.extractionNotes || null,
       })
     );
+
+    // Runs regardless of source kind — a static string check, not dependent
+    // on having separately-extracted source text to compare against.
+    for (const claim of normalizedClaims) {
+      sanitizeInsuranceBilled(claim);
+    }
 
     // Cheap, deterministic anti-hallucination check — only possible when we
     // have the exact source text the model saw (not for the 'pdf' vision
