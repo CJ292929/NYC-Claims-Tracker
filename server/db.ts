@@ -664,6 +664,46 @@ export function sortByFollowUpUrgency<T extends { urgency: FollowUpUrgency }>(it
   return [...items].sort((a, b) => FOLLOW_UP_URGENCY_RANK[a.urgency] - FOLLOW_UP_URGENCY_RANK[b.urgency]);
 }
 
+// ─── Claims status counts ──────────────────────────────────────────────────────
+// Powers the "Claims Status" sidebar filter panel. Always aggregates directly
+// from claims_records rows — never from the stale patients.claims_status
+// per-patient roll-up column, which is what caused every count to read 0.
+
+const CLAIM_STATUS_KEYS = [
+  "submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted",
+] as const;
+
+export type ClaimStatusKey = (typeof CLAIM_STATUS_KEYS)[number] | "none";
+
+export type ClaimStatusCounts = { all: number } & Record<ClaimStatusKey, number>;
+
+export function aggregateClaimStatusCounts(
+  rows: Array<{ claimStatus: string | null; patientId: string }>
+): { counts: ClaimStatusCounts; patientIdsByStatus: Record<ClaimStatusKey, string[]> } {
+  const counts = { all: rows.length } as ClaimStatusCounts;
+  const patientIdSets: Record<ClaimStatusKey, Set<string>> = {} as Record<ClaimStatusKey, Set<string>>;
+  for (const key of [...CLAIM_STATUS_KEYS, "none" as const]) {
+    counts[key] = 0;
+    patientIdSets[key] = new Set();
+  }
+
+  for (const row of rows) {
+    const status = row.claimStatus?.trim();
+    const key: ClaimStatusKey =
+      status && (CLAIM_STATUS_KEYS as readonly string[]).includes(status)
+        ? (status as ClaimStatusKey)
+        : "none";
+    counts[key] += 1;
+    patientIdSets[key].add(row.patientId);
+  }
+
+  const patientIdsByStatus = Object.fromEntries(
+    Object.entries(patientIdSets).map(([key, set]) => [key, Array.from(set)])
+  ) as Record<ClaimStatusKey, string[]>;
+
+  return { counts, patientIdsByStatus };
+}
+
 // ─── Claims record helpers ────────────────────────────────────────────────────
 
 export async function getClaimsByPatientAndPeriod(patientId: string, authPeriod: number): Promise<any[]> {
