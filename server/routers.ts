@@ -28,6 +28,7 @@ import {
   upsertClaimRecord,
   classifyClaimFollowUp,
   sortByFollowUpUrgency,
+  aggregateClaimStatusCounts,
 } from "./db";
 import { sdk } from "./_core/sdk";
 import { ONE_YEAR_MS } from "@shared/const";
@@ -692,14 +693,19 @@ export const appRouter = router({
       }),
 
     getFollowUpClaims: protectedProcedure
-      .query(async () => {
+      .input(z.object({ insurance: z.string().optional() }).optional())
+      .query(async ({ input }) => {
         // Fetch every unresolved claim in a status that can ever need follow-up,
         // then classify each one in JS via classifyClaimFollowUp (server/db.ts).
         // A claim needs follow-up if it is rejected/denied/pended (explicit
         // problem states), approved-but-unpaid (data-entry gap), or
         // pending/submitted/resubmitted and stale (see FOLLOW_UP_STALE_DAYS).
+        //
+        // Scoped by the selected insurance filter (when provided) so this panel
+        // can never disagree with the Claims Status counts or the Patients list,
+        // which are scoped the same way — see getStatusCounts below.
         const { supabase } = await import('./supabase');
-        const { data, error } = await supabase
+        let query = supabase
           .from('claims_records')
           .select(`
             id,
@@ -716,6 +722,10 @@ export const appRouter = router({
           `)
           .in('claim_status', ['denied', 'rejected', 'pended', 'resubmitted', 'pending', 'submitted', 'approved'])
           .neq('is_resolved', true);
+        if (input?.insurance) {
+          query = query.eq('patients.insurance', input.insurance);
+        }
+        const { data, error } = await query;
 
         if (error) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: error.message });
 
@@ -745,6 +755,34 @@ export const appRouter = router({
         });
 
         return sortByFollowUpUrgency(classified);
+      }),
+
+    getStatusCounts: protectedProcedure
+      .input(z.object({ insurance: z.string().optional() }).optional())
+      .query(async ({ input }) => {
+        // Powers the "Claims Status" sidebar panel. Always counts claims_records
+        // rows directly (via aggregateClaimStatusCounts in server/db.ts) — never
+        // the stale patients.claims_status per-patient roll-up, which is why
+        // every count previously read 0. Scoped by insurance the same way as
+        // getFollowUpClaims above, so the two panels can never contradict
+        // each other on screen.
+        const { supabase } = await import('./supabase');
+        let query = supabase
+          .from('claims_records')
+          .select('claim_status, patient_id, patients!inner(insurance)');
+        if (input?.insurance) {
+          query = query.eq('patients.insurance', input.insurance);
+        }
+        const { data, error } = await query;
+
+        if (error) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: error.message });
+
+        return aggregateClaimStatusCounts(
+          (data ?? []).map((row: any) => ({
+            claimStatus: row.claim_status as string | null,
+            patientId: row.patient_id as string,
+          }))
+        );
       }),
   }),
 });
