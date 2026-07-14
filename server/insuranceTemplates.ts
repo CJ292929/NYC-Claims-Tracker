@@ -80,6 +80,22 @@ function parseMoney(raw: string): number | null {
   return isNaN(n) ? null : n;
 }
 
+/**
+ * Look for an explicit "Visit #"/"Session #"/"Session Number"/"Visit Number"/
+ * "Encounter #" label in a small window of text and return the labeled
+ * integer, or null if no such label is present. Never used as a substitute
+ * for genuinely-missing data — callers fall back to null (or, for CMS1500,
+ * the service line's own printed row position), never a fabricated default.
+ */
+function extractVisitLabel(windowText: string): number | null {
+  const m = windowText.match(
+    /(?:Visit|Session)\s*(?:#|No\.?|Number)\s*:?\s*(\d{1,3})\b|Encounter\s*#\s*:?\s*(\d{1,3})\b/i
+  );
+  if (!m) return null;
+  const n = parseInt(m[1] || m[2], 10);
+  return isNaN(n) ? null : n;
+}
+
 // ─── Meritain Health EOB Template ───────────────────────────────────────────
 
 /**
@@ -211,6 +227,14 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
       if (notPaymentAmount !== null && notPaymentAmount > 0) claimStatus = 'approved';
       else if (notPaymentAmount === 0) claimStatus = 'denied';
 
+      // Prefer an explicit Visit#/Session#/Encounter# label near this service
+      // line if the EOB prints one; Meritain EOBs usually don't, so fall back
+      // to the running per-patient service-line count (not a fabricated
+      // value — it reflects this line's actual position in the claim list).
+      const lineWindow = section.slice(Math.max(0, lineMatch.index - 150), lineMatch.index + 150);
+      const labeledVisit = extractVisitLabel(lineWindow);
+      const positionalVisit = visitNum++; // always advances, regardless of whether a label was found
+
       patientClaims.push({
         dateOfService: parsedDate,
         cptCodes: cptCode || null,
@@ -232,7 +256,7 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
         dateReceived: docPaymentDate,
         referenceNo: epcDraftNo,
         checkNumberVirtualCard: checkEftNumber,
-        visitNumber: visitNum++,
+        visitNumber: labeledVisit ?? positionalVisit,
         placeOfService: null,
         unitsBilled: null,
         diagnosisCodes: null,
@@ -374,18 +398,29 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
   // Some PDFs render: "06 10 26 06 10 26 11 97530 GP ABCD 350.00 2"
   const compactPattern = /(\d{2})\s+(\d{2})\s+(\d{2})\s+(\d{2})\s+(\d{2})\s+(\d{2})\s+(\d{1,2})\s+((?:9|G|H|T)\d{4})\s+([A-Z0-9 ]+?)\s+([A-Z]{2,6})\s+([\d,]+\.\d{2})\s+(\d+)/g;
   let cm2: RegExpExecArray | null;
+  let compactRowCounter = 0; // fallback visit number = this row's position, matching Box 24's own printed row numbers (1-6)
   while ((cm2 = compactPattern.exec(serviceArea)) !== null) {
+    compactRowCounter++;
     const fromDate = parseCMS1500Date(cm2[1], cm2[2], cm2[3]);
     const placeOfService = cm2[7];
     const cptCode = cm2[8];
     const modifier = cm2[9].trim().split(/\s+/)[0];
     const chargeAmount = parseMoney(cm2[11]);
     const units = parseInt(cm2[12], 10);
+    // Prefer an explicit Visit#/Session#/Encounter# label near this row; reject
+    // it if it's actually a copy of units/charge (a common misread) and fall
+    // back to the row's own position instead.
+    const rowContext = serviceArea.slice(Math.max(0, cm2.index - 150), cm2.index + cm2[0].length + 150);
+    const labeledVisit = extractVisitLabel(rowContext);
+    const visitNumber =
+      labeledVisit !== null && labeledVisit !== units && labeledVisit !== Math.trunc(chargeAmount ?? NaN)
+        ? labeledVisit
+        : compactRowCounter;
     const dateKey = fromDate || 'no-date';
     if (!dateMap.has(dateKey)) {
       dateMap.set(dateKey, {
         dateOfService: fromDate, placeOfService, diagnosisCodes: allDiagCodes || null,
-        claimSubmittedDate: dateSubmitted,
+        claimSubmittedDate: dateSubmitted, visitNumber,
         cptCodes: null, chargeAmount: null, insuranceReimbursement: null,
         patientAmountPaid: null, patientAmountDue: null, unitsBilled: null, modifier: null, cptLines: [],
         // Reimbursement/EOB-only fields — explicit null (not undefined) since
@@ -409,9 +444,11 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
     // In layout mode dates appear as: "06 I   I" "10 II 26" or "I 10 I 26 I 06 I 10 I 26 I 11 I"
     const dateFragRe = /(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{1,2})\s*(?:I\s*)?/;
 
+    let layoutRowCounter = 0; // fallback visit number = this row's position, matching Box 24's own printed row numbers (1-6)
     for (let i = 0; i < lines.length; i++) {
       const cptMatch = lines[i].match(cptLineRe);
       if (!cptMatch) continue;
+      layoutRowCounter++;
       const cptCode = cptMatch[1];
 
       // Look in a window of ±15 lines for date, modifier, charge, units
@@ -508,11 +545,20 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
         }
       }
 
+      // Prefer an explicit Visit#/Session#/Encounter# label near this row;
+      // reject it if it's actually a copy of units/charge (a common misread)
+      // and fall back to the row's own position instead.
+      const labeledVisit = extractVisitLabel(window);
+      const visitNumber =
+        labeledVisit !== null && labeledVisit !== units && labeledVisit !== Math.trunc(chargeAmount ?? NaN)
+          ? labeledVisit
+          : layoutRowCounter;
+
       const dateKey = fromDate || 'no-date';
       if (!dateMap.has(dateKey)) {
         dateMap.set(dateKey, {
           dateOfService: fromDate, placeOfService, diagnosisCodes: allDiagCodes || null,
-          claimSubmittedDate: dateSubmitted,
+          claimSubmittedDate: dateSubmitted, visitNumber,
           cptCodes: null, chargeAmount: null, insuranceReimbursement: null,
           patientAmountPaid: null, patientAmountDue: null, unitsBilled: null, modifier: null, cptLines: [],
         });
