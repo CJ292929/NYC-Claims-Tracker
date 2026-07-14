@@ -509,25 +509,29 @@ const FOLLOW_UP_CARD_STYLES: Record<string, { card: string; hover: string; borde
   resubmitted: { card: 'bg-violet-500', hover: 'hover:bg-violet-600', border: 'border-violet-400', patientText: 'text-white', metaText: 'text-violet-100', chargedLabel: 'text-violet-200', chargedVal: 'text-white',   badge: 'bg-white/25',  badgeText: 'text-white', reasonText: 'text-violet-100' },
 };
 
-function ClaimsFollowUpPanel({ onSelectPatient }: { onSelectPatient: (id: string) => void }) {
+function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?: string; onSelectPatient: (id: string) => void }) {
   const utils = trpc.useUtils();
-  const { data: followUpClaims = [], isLoading } = trpc.claims.getFollowUpClaims.useQuery();
+  // Scoped by the same insurance filter as the Claims Status counts and the
+  // Patients list, so this panel can never disagree with them on screen.
+  const queryInput = { insurance: insurance || undefined };
+  const { data: followUpClaims = [], isLoading } = trpc.claims.getFollowUpClaims.useQuery(queryInput);
   const markResolved = trpc.claims.markResolved.useMutation({
     onMutate: async ({ id }) => {
       // Optimistically remove the card immediately
-      await utils.claims.getFollowUpClaims.cancel();
-      const prev = utils.claims.getFollowUpClaims.getData();
-      utils.claims.getFollowUpClaims.setData(undefined, (old) =>
+      await utils.claims.getFollowUpClaims.cancel(queryInput);
+      const prev = utils.claims.getFollowUpClaims.getData(queryInput);
+      utils.claims.getFollowUpClaims.setData(queryInput, (old) =>
         (old ?? []).filter((c) => c.id !== id)
       );
       return { prev };
     },
     onError: (_err, _vars, ctx) => {
       // Rollback on error
-      if (ctx?.prev) utils.claims.getFollowUpClaims.setData(undefined, ctx.prev);
+      if (ctx?.prev) utils.claims.getFollowUpClaims.setData(queryInput, ctx.prev);
     },
     onSettled: () => {
       utils.claims.getFollowUpClaims.invalidate();
+      utils.claims.getStatusCounts.invalidate();
       // Also invalidate the claims tracker queries so the table rows
       // immediately reflect the updated 'pending' status
       utils.claims.getByPatientAndPeriod.invalidate();
@@ -833,6 +837,11 @@ export default function Dashboard() {
   const { data: patients = [], isLoading: patientsLoading, refetch: refetchPatients } =
     trpc.patients.list.useQuery();
 
+  // The patient explicitly selected via selectedPatientId — unlike activePatient
+  // below, this has NO fallback to patients[0], so it's only truthy when a
+  // patient was actually chosen (by clicking a row, an alert card, etc.).
+  const selectedPatient: DbPatient | null = patients.find(p => p.id === selectedPatientId) ?? null;
+
   const activePatient: DbPatient | null =
     patients.find(p => p.id === selectedPatientId) ??
     (patients.length > 0 ? patients[0] : null);
@@ -887,6 +896,22 @@ export default function Dashboard() {
     }
   }, [patients, selectedPatientId]);
 
+  // Keep the Insurance filter in sync with whichever patient is actually
+  // selected (via the Patients list, the Auth Alert panel, the Claims
+  // Follow-Up panel, or the auto-select above). Without this, selecting a
+  // patient on a different insurance than the active filter leaves the
+  // Insurance sidebar, Claims Status counts, and Patients list all scoped to
+  // the WRONG insurance while the detail view shows the right patient —
+  // exactly the "Aetna highlighted but viewing a Meritain patient" bug.
+  // Keyed on selectedPatient (no patients[0] fallback), so manually picking a
+  // different insurance while no patient is selected is left alone.
+  useEffect(() => {
+    if (selectedPatient?.insurance && selectedPatient.insurance !== selectedInsurance) {
+      setSelectedInsurance(selectedPatient.insurance);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPatient?.id]);
+
   // ── Mutations ──────────────────────────────────────────────────────────────
   const createPatient = trpc.patients.create.useMutation({
     onSuccess: () => {
@@ -916,6 +941,10 @@ export default function Dashboard() {
   const updatePatient = trpc.patients.update.useMutation({
     onSuccess: () => {
       utils.patients.list.invalidate();
+      // A patient's insurance (or claims_status) may have changed — both the
+      // Claims Status counts and the Follow-Up panel are scoped by insurance.
+      utils.claims.getStatusCounts.invalidate();
+      utils.claims.getFollowUpClaims.invalidate();
       toast.success('Patient updated');
     },
     onError: (e) => toast.error(`Failed to update patient: ${e.message}`),
@@ -998,6 +1027,7 @@ export default function Dashboard() {
     onSuccess: () => {
       utils.claims.getByPatientAndPeriod.invalidate();
       utils.claims.getFollowUpClaims.invalidate();
+      utils.claims.getStatusCounts.invalidate();
       setEditingCell(null);
     },
     onError: (e) => toast.error(`Failed to update claim: ${e.message}`),
@@ -1010,6 +1040,7 @@ export default function Dashboard() {
       // Invalidate all claims queries for the active patient
       utils.claims.getByPatientAndPeriod.invalidate();
       utils.claims.getFollowUpClaims.invalidate();
+      utils.claims.getStatusCounts.invalidate();
       toast.success('Claim record saved successfully!');
       setShowAddClaimDialog(false);
       setIsSavingClaim(false);
@@ -1035,6 +1066,7 @@ export default function Dashboard() {
       setBulkImportResults(data.results);
       utils.claims.getByPatientAndPeriod.invalidate();
       utils.claims.getFollowUpClaims.invalidate();
+      utils.claims.getStatusCounts.invalidate();
     },
     onError: (e) => toast.error(`Bulk import failed: ${e.message}`),
   });
@@ -1116,6 +1148,19 @@ export default function Dashboard() {
   const activePatients = patients.filter(p => p.isActive !== false);
   const dischargedPatients = patients.filter(p => p.isActive === false);
 
+  // Claims Status counts — aggregated server-side directly from claims_records
+  // (never from the stale patients.claims_status roll-up), scoped by the same
+  // insurance filter as the Patients list and the Follow-Up panel so none of
+  // the three can ever disagree on screen.
+  const { data: statusCountsData } = trpc.claims.getStatusCounts.useQuery({
+    insurance: selectedInsurance || undefined,
+  });
+  const claimStatusCounts = statusCountsData?.counts ?? {
+    all: 0, submitted: 0, approved: 0, pending: 0, denied: 0,
+    pended: 0, rejected: 0, resubmitted: 0, none: 0,
+  };
+  const patientIdsByStatus = statusCountsData?.patientIdsByStatus ?? {};
+
   // filteredPatients = active patients matching the selected insurance AND claims status filter
   // The sidebar count and the patient list both use the same filter so they always match.
   const filteredPatients = useMemo(() => {
@@ -1123,14 +1168,11 @@ export default function Dashboard() {
       ? activePatients.filter(p => p.insurance === selectedInsurance)
       : activePatients;
     if (selectedClaimsFilter && selectedClaimsFilter !== 'all') {
-      if (selectedClaimsFilter === 'none') {
-        result = result.filter(p => !p.claimsStatus);
-      } else {
-        result = result.filter(p => p.claimsStatus === selectedClaimsFilter);
-      }
+      const matchingIds = new Set((patientIdsByStatus as Record<string, string[]>)[selectedClaimsFilter] ?? []);
+      result = result.filter(p => matchingIds.has(p.id));
     }
     return result;
-  }, [activePatients, selectedInsurance, selectedClaimsFilter]);
+  }, [activePatients, selectedInsurance, selectedClaimsFilter, patientIdsByStatus]);
 
   const completedPatients = activePatients.filter(p => completedSet.has(p.id));
 
@@ -1645,6 +1687,7 @@ export default function Dashboard() {
       toast.success(`${saved} claim${saved !== 1 ? 's' : ''} saved successfully!`);
       utils.claims.getByPatientAndPeriod.invalidate();
       utils.claims.getFollowUpClaims.invalidate();
+      utils.claims.getStatusCounts.invalidate();
     }
     if (failedRows.length === 0) {
       setShowClaimUploadDialog(false);
@@ -3068,7 +3111,26 @@ export default function Dashboard() {
         <AuthAlertPanel onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }} />
 
         {/* ─── Claims Follow-Up Alert Panel ─────────────────────────────────── */}
-        <ClaimsFollowUpPanel onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }} />
+        <ClaimsFollowUpPanel
+          insurance={selectedInsurance}
+          onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }}
+        />
+
+        {/* ─── Active insurance filter chip ──────────────────────────────────── */}
+        {selectedInsurance && (
+          <div className="mb-4 flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-brand-gold/15 text-brand-blue border border-brand-gold/30">
+              Filtered by: {selectedInsurance}
+              <button
+                onClick={() => setSelectedInsurance('')}
+                aria-label="Clear insurance filter"
+                className="ml-1 text-brand-blue/60 hover:text-brand-blue"
+              >
+                ×
+              </button>
+            </span>
+          </div>
+        )}
 
         {/* Main Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-6 gap-6">
@@ -3083,7 +3145,15 @@ export default function Dashboard() {
                   return (
                     <button
                       key={insurance}
-                      onClick={() => setSelectedInsurance(insurance)}
+                      onClick={() => {
+                        setSelectedInsurance(insurance);
+                        // Switching insurance while viewing a patient on a
+                        // different one would leave the detail view showing
+                        // someone outside the new filter — back out to the list.
+                        if (selectedPatient && selectedPatient.insurance !== insurance) {
+                          setShowDetailView(false);
+                        }
+                      }}
                       className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md cursor-pointer transition font-semibold text-sm ${
                         isSelected ? 'bg-brand-gold text-white' : 'text-brand-blue hover:bg-brand-cream'
                       }`}
@@ -3115,12 +3185,7 @@ export default function Dashboard() {
                   { value: 'resubmitted', label: 'Resubmitted', color: 'bg-violet-100 text-violet-800' },
                   { value: 'none', label: 'No Status', color: 'bg-gray-50 text-gray-500' },
                 ].map(({ value, label, color }) => {
-                  const count = value === 'all'
-                    ? activePatients.filter(p => selectedInsurance ? p.insurance === selectedInsurance : true).length
-                    : activePatients.filter(p =>
-                        (selectedInsurance ? p.insurance === selectedInsurance : true) &&
-                        (p.claimsStatus ?? 'none') === value
-                      ).length;
+                  const count = claimStatusCounts[value as keyof typeof claimStatusCounts] ?? 0;
                   const isSelected = selectedClaimsFilter === value;
                   return (
                     <button
@@ -3145,7 +3210,7 @@ export default function Dashboard() {
           <div className="lg:col-span-1 space-y-4">
             <div className="bg-white rounded-xl shadow-sm p-4">
               <h3 className="text-lg font-serif font-bold text-brand-blue mb-1">Patients</h3>
-              <p className="text-xs text-[#6B7280] mb-4">{filteredPatients.length} in {selectedInsurance}</p>
+              <p className="text-xs text-[#6B7280] mb-4">{filteredPatients.length} in {selectedInsurance || 'all insurances'}</p>
               <div className="space-y-1 max-h-96 overflow-y-auto">
                 {filteredPatients.length > 0 ? filteredPatients.map(patient => {
                     const isActive = activePatient?.id === patient.id;
