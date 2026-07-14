@@ -495,27 +495,39 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
   );
 }
 
-// ─── Zero Reimbursement Alert Panel ─────────────────────────────────────────
+// ─── Claims Follow-Up Alert Panel ───────────────────────────────────────────
+// Card color per claim_status, per product spec:
+// Rejected=Black, Denied=Red, Pending=Yellow, Pended=Orange, Approved=Green,
+// Resubmitted=Violet, Submitted=Blue.
+const FOLLOW_UP_CARD_STYLES: Record<string, { card: string; hover: string; border: string; patientText: string; metaText: string; chargedLabel: string; chargedVal: string; badge: string; badgeText: string; reasonText: string }> = {
+  rejected:    { card: 'bg-gray-900',   hover: 'hover:bg-gray-800',   border: 'border-gray-700',   patientText: 'text-white', metaText: 'text-gray-300',   chargedLabel: 'text-gray-400',   chargedVal: 'text-red-300', badge: 'bg-white/20',  badgeText: 'text-white', reasonText: 'text-red-300' },
+  denied:      { card: 'bg-red-600',    hover: 'hover:bg-red-700',    border: 'border-red-500',    patientText: 'text-white', metaText: 'text-red-100',    chargedLabel: 'text-red-200',    chargedVal: 'text-white',   badge: 'bg-white/25',  badgeText: 'text-white', reasonText: 'text-red-100' },
+  pended:      { card: 'bg-orange-500', hover: 'hover:bg-orange-600', border: 'border-orange-400', patientText: 'text-white', metaText: 'text-orange-100', chargedLabel: 'text-orange-200', chargedVal: 'text-white',   badge: 'bg-white/25',  badgeText: 'text-white', reasonText: 'text-orange-100' },
+  pending:     { card: 'bg-yellow-400', hover: 'hover:bg-yellow-500', border: 'border-yellow-300', patientText: 'text-gray-900', metaText: 'text-gray-700', chargedLabel: 'text-gray-600', chargedVal: 'text-gray-900', badge: 'bg-black/10',  badgeText: 'text-gray-900', reasonText: 'text-gray-800' },
+  submitted:   { card: 'bg-blue-600',   hover: 'hover:bg-blue-700',   border: 'border-blue-500',   patientText: 'text-white', metaText: 'text-blue-100',   chargedLabel: 'text-blue-200',   chargedVal: 'text-white',   badge: 'bg-white/25',  badgeText: 'text-white', reasonText: 'text-blue-100' },
+  approved:    { card: 'bg-green-600',  hover: 'hover:bg-green-700',  border: 'border-green-500',  patientText: 'text-white', metaText: 'text-green-100',  chargedLabel: 'text-green-200',  chargedVal: 'text-white',   badge: 'bg-white/25',  badgeText: 'text-white', reasonText: 'text-green-100' },
+  resubmitted: { card: 'bg-violet-500', hover: 'hover:bg-violet-600', border: 'border-violet-400', patientText: 'text-white', metaText: 'text-violet-100', chargedLabel: 'text-violet-200', chargedVal: 'text-white',   badge: 'bg-white/25',  badgeText: 'text-white', reasonText: 'text-violet-100' },
+};
 
-function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: string) => void }) {
+function ClaimsFollowUpPanel({ onSelectPatient }: { onSelectPatient: (id: string) => void }) {
   const utils = trpc.useUtils();
-  const { data: unpaidClaims = [], isLoading } = trpc.claims.getZeroReimbursement.useQuery();
+  const { data: followUpClaims = [], isLoading } = trpc.claims.getFollowUpClaims.useQuery();
   const markResolved = trpc.claims.markResolved.useMutation({
     onMutate: async ({ id }) => {
       // Optimistically remove the card immediately
-      await utils.claims.getZeroReimbursement.cancel();
-      const prev = utils.claims.getZeroReimbursement.getData();
-      utils.claims.getZeroReimbursement.setData(undefined, (old) =>
+      await utils.claims.getFollowUpClaims.cancel();
+      const prev = utils.claims.getFollowUpClaims.getData();
+      utils.claims.getFollowUpClaims.setData(undefined, (old) =>
         (old ?? []).filter((c) => c.id !== id)
       );
       return { prev };
     },
     onError: (_err, _vars, ctx) => {
       // Rollback on error
-      if (ctx?.prev) utils.claims.getZeroReimbursement.setData(undefined, ctx.prev);
+      if (ctx?.prev) utils.claims.getFollowUpClaims.setData(undefined, ctx.prev);
     },
     onSettled: () => {
-      utils.claims.getZeroReimbursement.invalidate();
+      utils.claims.getFollowUpClaims.invalidate();
       // Also invalidate the claims tracker queries so the table rows
       // immediately reflect the updated 'pending' status
       utils.claims.getByPatientAndPeriod.invalidate();
@@ -529,12 +541,12 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
           <AlertCircle className="w-5 h-5 text-orange-500" />
           <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up Needed</h2>
         </div>
-        <div className="text-sm text-gray-500">Loading unpaid claims…</div>
+        <div className="text-sm text-gray-500">Loading claims…</div>
       </div>
     );
   }
 
-  if (unpaidClaims.length === 0) {
+  if (followUpClaims.length === 0) {
     return (
       <div className="mb-6 bg-green-50 border-l-4 border-green-500 rounded-lg p-4">
         <div className="flex items-center gap-2 mb-2">
@@ -547,34 +559,21 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
   }
 
   return (
-    <div className="mb-6 bg-orange-50 border-l-4 border-orange-500 rounded-lg p-4">
+    <div className="mb-6 bg-amber-50 border-l-4 border-amber-500 rounded-lg p-4">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <AlertCircle className="w-5 h-5 text-orange-500 animate-pulse" />
+          <AlertCircle className="w-5 h-5 text-amber-500 animate-pulse" />
           <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up Needed</h2>
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 text-orange-800">
-            {unpaidClaims.length} claim{unpaidClaims.length !== 1 ? 's' : ''}
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800">
+            {followUpClaims.length} claim{followUpClaims.length !== 1 ? 's' : ''}
           </span>
         </div>
-        <p className="text-xs text-gray-500">$0 reimbursement received — contact insurance</p>
+        <p className="text-xs text-gray-500">Rejected, denied, pended, or stale claims — review below</p>
       </div>
       <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-        {unpaidClaims.map((claim) => {
+        {followUpClaims.map((claim) => {
           const status = claim.claimStatus ?? 'submitted';
-          const actionLabels: Record<string, string> = {
-            denied:      'NEED TO APPEAL',
-            rejected:    'NEED RESUBMISSION DUE TO ERRORS',
-            pended:      'NEED SUBMISSION OF RECORDS',
-            resubmitted: 'RESUBMITTED — AWAITING RESPONSE',
-          };
-          const actionLabel = actionLabels[status] ?? '';
-          const cardStyles: Record<string, { card: string; hover: string; border: string; patientText: string; metaText: string; chargedLabel: string; chargedVal: string; reimburseLabel: string; reimburseVal: string; badge: string; badgeText: string; actionText: string }> = {
-            rejected:    { card: 'bg-gray-900',    hover: 'hover:bg-gray-800',   border: 'border-gray-700',   patientText: 'text-white',        metaText: 'text-gray-300',   chargedLabel: 'text-gray-400', chargedVal: 'text-red-300',    reimburseLabel: 'text-gray-400', reimburseVal: 'text-red-300',   badge: 'bg-white/20',      badgeText: 'text-white',  actionText: 'text-red-300' },
-            denied:      { card: 'bg-red-600',     hover: 'hover:bg-red-700',    border: 'border-red-500',    patientText: 'text-white',        metaText: 'text-red-100',    chargedLabel: 'text-red-200',  chargedVal: 'text-white',      reimburseLabel: 'text-red-200',  reimburseVal: 'text-white',     badge: 'bg-white/25',      badgeText: 'text-white',  actionText: 'text-red-100' },
-            pended:      { card: 'bg-orange-500',  hover: 'hover:bg-orange-600', border: 'border-orange-400', patientText: 'text-white',        metaText: 'text-orange-100', chargedLabel: 'text-orange-200',chargedVal: 'text-white',      reimburseLabel: 'text-orange-200',reimburseVal: 'text-white',     badge: 'bg-white/25',      badgeText: 'text-white',  actionText: 'text-orange-100' },
-            resubmitted: { card: 'bg-violet-500',  hover: 'hover:bg-violet-600', border: 'border-violet-400', patientText: 'text-white',        metaText: 'text-violet-100', chargedLabel: 'text-violet-200',chargedVal: 'text-white',      reimburseLabel: 'text-violet-200',reimburseVal: 'text-white',     badge: 'bg-white/25',      badgeText: 'text-white',  actionText: 'text-violet-100' },
-          };
-          const s = cardStyles[status] ?? cardStyles.rejected;
+          const s = FOLLOW_UP_CARD_STYLES[status] ?? FOLLOW_UP_CARD_STYLES.rejected;
           return (
             <div
               key={claim.id}
@@ -585,8 +584,18 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className={`font-semibold text-sm truncate ${s.patientText}`}>{claim.patientName}</span>
                   <span className={`text-xs shrink-0 ${s.metaText}`}>Period {claim.authPeriod}</span>
-                  {actionLabel && (
-                    <span className={`text-xs font-bold uppercase tracking-wide ${s.actionText}`}>⚠ {actionLabel}</span>
+                  {claim.dateOfService && (
+                    <span className={`text-xs shrink-0 ${s.metaText}`}>
+                      DOS: {new Date(claim.dateOfService).toLocaleDateString()}
+                    </span>
+                  )}
+                  {claim.cptCodes && (
+                    <span className={`text-xs shrink-0 ${s.metaText}`}>CPT: {claim.cptCodes}</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                  {claim.followUpReason && (
+                    <span className={`text-xs font-bold uppercase tracking-wide ${s.reasonText}`}>⚠ {claim.followUpReason}</span>
                   )}
                 </div>
                 <div className="flex items-center gap-3 mt-0.5">
@@ -609,8 +618,10 @@ function ZeroReimbursementPanel({ onSelectPatient }: { onSelectPatient: (id: str
                   </div>
                 )}
                 <div className="text-right">
-                  <div className={`text-xs ${s.reimburseLabel}`}>Reimbursed</div>
-                  <div className={`text-sm font-bold ${s.reimburseVal}`}>$0.00</div>
+                  <div className={`text-xs ${s.chargedLabel}`}>Reimbursed</div>
+                  <div className={`text-sm font-bold ${s.chargedVal}`}>
+                    ${(claim.insuranceReimbursement != null ? parseFloat(String(claim.insuranceReimbursement)) : 0).toFixed(2)}
+                  </div>
                 </div>
                 <span className={`text-xs px-2 py-1 rounded-full font-bold capitalize ${s.badge} ${s.badgeText}`}>{status}</span>
                 <button
@@ -986,6 +997,7 @@ export default function Dashboard() {
   const updateClaim = trpc.claims.update.useMutation({
     onSuccess: () => {
       utils.claims.getByPatientAndPeriod.invalidate();
+      utils.claims.getFollowUpClaims.invalidate();
       setEditingCell(null);
     },
     onError: (e) => toast.error(`Failed to update claim: ${e.message}`),
@@ -997,6 +1009,7 @@ export default function Dashboard() {
     onSuccess: () => {
       // Invalidate all claims queries for the active patient
       utils.claims.getByPatientAndPeriod.invalidate();
+      utils.claims.getFollowUpClaims.invalidate();
       toast.success('Claim record saved successfully!');
       setShowAddClaimDialog(false);
       setIsSavingClaim(false);
@@ -1021,6 +1034,7 @@ export default function Dashboard() {
     onSuccess: (data) => {
       setBulkImportResults(data.results);
       utils.claims.getByPatientAndPeriod.invalidate();
+      utils.claims.getFollowUpClaims.invalidate();
     },
     onError: (e) => toast.error(`Bulk import failed: ${e.message}`),
   });
@@ -1630,6 +1644,7 @@ export default function Dashboard() {
     if (saved > 0) {
       toast.success(`${saved} claim${saved !== 1 ? 's' : ''} saved successfully!`);
       utils.claims.getByPatientAndPeriod.invalidate();
+      utils.claims.getFollowUpClaims.invalidate();
     }
     if (failedRows.length === 0) {
       setShowClaimUploadDialog(false);
@@ -3053,7 +3068,7 @@ export default function Dashboard() {
         <AuthAlertPanel onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }} />
 
         {/* ─── Claims Follow-Up Alert Panel ─────────────────────────────────── */}
-        <ZeroReimbursementPanel onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }} />
+        <ClaimsFollowUpPanel onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }} />
 
         {/* Main Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-6 gap-6">

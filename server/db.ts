@@ -586,6 +586,84 @@ export async function getClinicUserByUsername(username: string): Promise<ClinicU
   return data ? toClinicUser(data) : undefined;
 }
 
+// ─── Claims follow-up classification ──────────────────────────────────────────
+// A claim needing staff attention falls into one of 7 mutually-exclusive
+// urgency buckets. Ranked 1 (most urgent) → 7 (least urgent) per product spec.
+
+export const FOLLOW_UP_STALE_DAYS = 30;
+
+export type FollowUpUrgency =
+  | "rejected"
+  | "denied"
+  | "pended"
+  | "approved_unpaid"
+  | "pending_stale"
+  | "submitted_stale"
+  | "resubmitted_stale";
+
+export type ClaimFollowUpCandidate = {
+  claimStatus: string | null;
+  insuranceReimbursement: number | null;
+  claimSubmittedDate: string | null;
+};
+
+const FOLLOW_UP_URGENCY_RANK: Record<FollowUpUrgency, number> = {
+  rejected: 1,
+  denied: 2,
+  pended: 3,
+  approved_unpaid: 4,
+  pending_stale: 5,
+  submitted_stale: 6,
+  resubmitted_stale: 7,
+};
+
+const FOLLOW_UP_REASONS: Record<FollowUpUrgency, string> = {
+  rejected: "Claim rejected — needs review",
+  denied: "Claim denied — needs appeal or resubmission",
+  pended: "Claim pended — waiting on additional info",
+  approved_unpaid: "Approved but no reimbursement recorded",
+  pending_stale: `Pending >${FOLLOW_UP_STALE_DAYS} days — follow up with payer`,
+  submitted_stale: `Submitted >${FOLLOW_UP_STALE_DAYS} days ago — no payment received`,
+  resubmitted_stale: `Resubmitted >${FOLLOW_UP_STALE_DAYS} days ago — no response`,
+};
+
+function daysSince(dateStr: string | null, now: Date): number | null {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return null;
+  return (now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24);
+}
+
+/**
+ * Classifies a claim into a follow-up urgency bucket, or returns null if the
+ * claim needs no staff attention. See FOLLOW_UP_REASONS for the 7 conditions.
+ */
+export function classifyClaimFollowUp(
+  claim: ClaimFollowUpCandidate,
+  now: Date = new Date()
+): { urgency: FollowUpUrgency; followUpReason: string } | null {
+  const status = claim.claimStatus ?? "";
+  const unpaid = claim.insuranceReimbursement == null || claim.insuranceReimbursement === 0;
+  const days = daysSince(claim.claimSubmittedDate, now);
+  const isStale = days != null && days > FOLLOW_UP_STALE_DAYS;
+
+  let urgency: FollowUpUrgency | null = null;
+  if (status === "rejected") urgency = "rejected";
+  else if (status === "denied") urgency = "denied";
+  else if (status === "pended") urgency = "pended";
+  else if (status === "approved" && unpaid) urgency = "approved_unpaid";
+  else if (status === "pending" && isStale) urgency = "pending_stale";
+  else if (status === "submitted" && unpaid && isStale) urgency = "submitted_stale";
+  else if (status === "resubmitted" && isStale) urgency = "resubmitted_stale";
+
+  if (!urgency) return null;
+  return { urgency, followUpReason: FOLLOW_UP_REASONS[urgency] };
+}
+
+export function sortByFollowUpUrgency<T extends { urgency: FollowUpUrgency }>(items: T[]): T[] {
+  return [...items].sort((a, b) => FOLLOW_UP_URGENCY_RANK[a.urgency] - FOLLOW_UP_URGENCY_RANK[b.urgency]);
+}
+
 // ─── Claims record helpers ────────────────────────────────────────────────────
 
 export async function getClaimsByPatientAndPeriod(patientId: string, authPeriod: number): Promise<any[]> {
