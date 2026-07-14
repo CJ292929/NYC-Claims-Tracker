@@ -81,19 +81,13 @@ function parseMoney(raw: string): number | null {
 }
 
 /**
- * Look for an explicit "Visit #"/"Session #"/"Session Number"/"Visit Number"/
- * "Encounter #" label in a small window of text and return the labeled
- * integer, or null if no such label is present. Never used as a substitute
- * for genuinely-missing data — callers fall back to null (or, for CMS1500,
- * the service line's own printed row position), never a fabricated default.
+ * CMS-1500 Box 24 has exactly 6 service-line slots (numbered 1-6 down the
+ * form). visitNumber is the printed row position, not a labeled field —
+ * any value outside that range means the row counter mis-tracked (e.g. a
+ * false-positive CPT match) and the value must not be trusted.
  */
-function extractVisitLabel(windowText: string): number | null {
-  const m = windowText.match(
-    /(?:Visit|Session)\s*(?:#|No\.?|Number)\s*:?\s*(\d{1,3})\b|Encounter\s*#\s*:?\s*(\d{1,3})\b/i
-  );
-  if (!m) return null;
-  const n = parseInt(m[1] || m[2], 10);
-  return isNaN(n) ? null : n;
+function clampVisitNumber(n: number): number | null {
+  return n >= 1 && n <= 6 ? n : null;
 }
 
 // ─── Meritain Health EOB Template ───────────────────────────────────────────
@@ -209,7 +203,6 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
     //                                            it can be absent from the CPT line itself
     const serviceLinePattern = /(\d{1,2}\/\d{1,2}\/\d{2,4})-(\d{1,2}\/\d{1,2}\/\d{2,4})\s+([A-Z0-9]+)\s+\d+\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)(?:\s+(\d+\.\d+))?/g;
     let lineMatch: RegExpExecArray | null;
-    let visitNum = patientClaims.length + 1;
     while ((lineMatch = serviceLinePattern.exec(section)) !== null) {
       const rawDate = lineMatch[1];
       const cptCode = lineMatch[3];
@@ -226,14 +219,6 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
       let claimStatus = 'submitted';
       if (notPaymentAmount !== null && notPaymentAmount > 0) claimStatus = 'approved';
       else if (notPaymentAmount === 0) claimStatus = 'denied';
-
-      // Prefer an explicit Visit#/Session#/Encounter# label near this service
-      // line if the EOB prints one; Meritain EOBs usually don't, so fall back
-      // to the running per-patient service-line count (not a fabricated
-      // value — it reflects this line's actual position in the claim list).
-      const lineWindow = section.slice(Math.max(0, lineMatch.index - 150), lineMatch.index + 150);
-      const labeledVisit = extractVisitLabel(lineWindow);
-      const positionalVisit = visitNum++; // always advances, regardless of whether a label was found
 
       patientClaims.push({
         dateOfService: parsedDate,
@@ -256,7 +241,10 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
         dateReceived: docPaymentDate,
         referenceNo: epcDraftNo,
         checkNumberVirtualCard: checkEftNumber,
-        visitNumber: labeledVisit ?? positionalVisit,
+        // EOBs never print the CMS-1500 Box 24 line number — visitNumber
+        // comes only from a CMS-1500 upload and is preserved through the
+        // upsert merge (see enforceFieldBoundary's CMS1500_ONLY_FIELDS).
+        visitNumber: null,
         placeOfService: null,
         unitsBilled: null,
         diagnosisCodes: null,
@@ -407,15 +395,10 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
     const modifier = cm2[9].trim().split(/\s+/)[0];
     const chargeAmount = parseMoney(cm2[11]);
     const units = parseInt(cm2[12], 10);
-    // Prefer an explicit Visit#/Session#/Encounter# label near this row; reject
-    // it if it's actually a copy of units/charge (a common misread) and fall
-    // back to the row's own position instead.
-    const rowContext = serviceArea.slice(Math.max(0, cm2.index - 150), cm2.index + cm2[0].length + 150);
-    const labeledVisit = extractVisitLabel(rowContext);
-    const visitNumber =
-      labeledVisit !== null && labeledVisit !== units && labeledVisit !== Math.trunc(chargeAmount ?? NaN)
-        ? labeledVisit
-        : compactRowCounter;
+    // visitNumber is the service line's printed position in Box 24 (1-6) —
+    // a positional value, not a text label. compactRowCounter already
+    // increments once per matched service line in document order.
+    const visitNumber = clampVisitNumber(compactRowCounter);
     const dateKey = fromDate || 'no-date';
     if (!dateMap.has(dateKey)) {
       dateMap.set(dateKey, {
@@ -545,14 +528,10 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
         }
       }
 
-      // Prefer an explicit Visit#/Session#/Encounter# label near this row;
-      // reject it if it's actually a copy of units/charge (a common misread)
-      // and fall back to the row's own position instead.
-      const labeledVisit = extractVisitLabel(window);
-      const visitNumber =
-        labeledVisit !== null && labeledVisit !== units && labeledVisit !== Math.trunc(chargeAmount ?? NaN)
-          ? labeledVisit
-          : layoutRowCounter;
+      // visitNumber is the service line's printed position in Box 24 (1-6) —
+      // a positional value, not a text label. layoutRowCounter already
+      // increments once per matched service line in document order.
+      const visitNumber = clampVisitNumber(layoutRowCounter);
 
       const dateKey = fromDate || 'no-date';
       if (!dateMap.has(dateKey)) {
