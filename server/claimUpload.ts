@@ -211,7 +211,7 @@ const COLUMN_DESCRIPTIONS = `
 Extract claim line items and map each one to these columns (use null if not found):
 - placeOfService: string — place of service code or description (e.g. "11", "Home", "Office")
 - dateOfService: string — date of service in YYYY-MM-DD format
-- visitNumber: integer — the sequential visit/session number (1, 2, 3, ...); look for "Visit #"/"Session #"/"Session Number"/"Visit Number"/"Encounter #" labels — use null if not present in the document, never default to 0
+- visitNumber: integer — CMS-1500 only: the Box 24 service line's position (1-6), assigned top-to-bottom in printed order, not a text label. Always null for Reimbursement/EOB documents.
 - cptCodes: string — CPT/procedure codes (comma-separated if multiple)
 - unitsBilled: number — units billed
 - diagnosisCodes: string — ICD-10 diagnosis codes (comma-separated)
