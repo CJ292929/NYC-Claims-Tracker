@@ -221,7 +221,11 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
         chargeAmount: null,
         insuranceReimbursement: notPaymentAmount,
         patientAmountPaid: coPayAmountFromLine,
-        insuranceBilled: 'Meritain Health',
+        // groupName ("16404/137040261") is the Group Name/Check billing
+        // identifier printed on the EOB, not the payer name — insuranceBilled
+        // must never hold the insurance company name (see anti-hallucination
+        // check in aiClaimExtractor.ts).
+        insuranceBilled: groupName,
         oaClaimNumber: claimNo,
         claimStatus,
         checkDate: docPaymentDate,

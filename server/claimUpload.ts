@@ -213,7 +213,7 @@ Extract claim line items and map each one to these columns (use null if not foun
 - insuranceReimbursement: number — amount paid/reimbursed by insurance (numeric, no $ sign)
 - patientAmountPaid: number — amount paid by patient
 - patientAmountDue: number — patient balance/amount due
-- insuranceBilled: string — insurance company name
+- insuranceBilled: string — the numeric billing/group/payer identifier (e.g. Group #, Billing ID, Payer ID); NEVER the insurance company name (do not write "Aetna", "Meritain Health", etc.) — use null if no such identifier is visible
 - oaClaimNumber: string — OA or internal claim number
 - claimSubmittedDate: string — date claim was submitted in YYYY-MM-DD format
 - expireBcbsClaimNumber: string — BCBS or external claim/reference number
