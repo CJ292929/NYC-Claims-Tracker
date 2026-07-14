@@ -26,6 +26,8 @@ import {
   updateClaimRecord,
   deleteClaimRecord,
   upsertClaimRecord,
+  classifyClaimFollowUp,
+  sortByFollowUpUrgency,
 } from "./db";
 import { sdk } from "./_core/sdk";
 import { ONE_YEAR_MS } from "@shared/const";
@@ -689,11 +691,13 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    getZeroReimbursement: protectedProcedure
+    getFollowUpClaims: protectedProcedure
       .query(async () => {
-        // Fetch all claim records where insurance_reimbursement is 0 or null
-        // and the claim has a charge amount > 0 (meaning a bill was sent)
-        // and is not yet resolved
+        // Fetch every unresolved claim in a status that can ever need follow-up,
+        // then classify each one in JS via classifyClaimFollowUp (server/db.ts).
+        // A claim needs follow-up if it is rejected/denied/pended (explicit
+        // problem states), approved-but-unpaid (data-entry gap), or
+        // pending/submitted/resubmitted and stale (see FOLLOW_UP_STALE_DAYS).
         const { supabase } = await import('./supabase');
         const { data, error } = await supabase
           .from('claims_records')
@@ -702,6 +706,7 @@ export const appRouter = router({
             patient_id,
             auth_period,
             date_of_service,
+            cpt_codes,
             charge_amount,
             insurance_reimbursement,
             claim_status,
@@ -709,26 +714,37 @@ export const appRouter = router({
             expire_bcbs_claim_number,
             patients!inner(id, name, insurance)
           `)
-          .or('insurance_reimbursement.is.null,insurance_reimbursement.eq.0')
-          .gt('charge_amount', 0)
-          .in('claim_status', ['denied', 'rejected', 'pended', 'resubmitted'])
-          .neq('is_resolved', true)
-          .order('claim_submitted_date', { ascending: true });
+          .in('claim_status', ['denied', 'rejected', 'pended', 'resubmitted', 'pending', 'submitted', 'approved'])
+          .neq('is_resolved', true);
 
         if (error) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: error.message });
-        return (data ?? []).map((row: any) => ({
-          id: row.id as string,
-          patientId: row.patient_id as string,
-          patientName: row.patients?.name as string,
-          insurance: row.patients?.insurance as string,
-          authPeriod: row.auth_period as number,
-          dateOfService: row.date_of_service as string | null,
-          chargeAmount: row.charge_amount as number | null,
-          insuranceReimbursement: row.insurance_reimbursement as number | null,
-          claimStatus: row.claim_status as string,
-          claimSubmittedDate: row.claim_submitted_date as string | null,
-          claimNumber: row.expire_bcbs_claim_number as string | null,
-        }));
+
+        const classified = (data ?? []).flatMap((row: any) => {
+          const result = classifyClaimFollowUp({
+            claimStatus: row.claim_status as string | null,
+            insuranceReimbursement: row.insurance_reimbursement as number | null,
+            claimSubmittedDate: row.claim_submitted_date as string | null,
+          });
+          if (!result) return [];
+          return [{
+            id: row.id as string,
+            patientId: row.patient_id as string,
+            patientName: row.patients?.name as string,
+            insurance: row.patients?.insurance as string,
+            authPeriod: row.auth_period as number,
+            dateOfService: row.date_of_service as string | null,
+            cptCodes: row.cpt_codes as string | null,
+            chargeAmount: row.charge_amount as number | null,
+            insuranceReimbursement: row.insurance_reimbursement as number | null,
+            claimStatus: row.claim_status as string,
+            claimSubmittedDate: row.claim_submitted_date as string | null,
+            claimNumber: row.expire_bcbs_claim_number as string | null,
+            urgency: result.urgency,
+            followUpReason: result.followUpReason,
+          }];
+        });
+
+        return sortByFollowUpUrgency(classified);
       }),
   }),
 });
