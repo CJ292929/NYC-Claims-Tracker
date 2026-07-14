@@ -2051,21 +2051,21 @@ export default function Dashboard() {
                     {/* Claims Tracking Card — Below Authorization Period */}
                     <Card key={`claims-${period}`} className="border border-border border-t-4 border-t-brand-gold shadow-brand rounded-xl mb-6 ml-0">
                       <CardHeader className="bg-white rounded-t-xl">
-                        <div className="flex flex-row items-center justify-between">
-                          <div>
-                            <CardTitle className="text-xl font-serif text-brand-blue">
+                        <div className="flex items-start justify-between gap-4 mb-4">
+                          <div className="space-y-1">
+                            <CardTitle className="text-xl font-serif font-semibold tracking-tight text-brand-blue">
                               Claims Tracker — Period {period}
                             </CardTitle>
-                            <CardDescription className="text-muted-foreground">
+                            <CardDescription className="text-sm text-muted-foreground">
                               Comprehensive claim details and payment tracking
                             </CardDescription>
                           </div>
-                          <div className="flex items-center gap-3">
+                          <div className="flex items-center gap-2 flex-wrap justify-end">
                             {/* Column visibility toggle */}
                             <Popover>
                               <PopoverTrigger asChild>
-                                <Button variant="outline" size="sm" className="border-2 border-brand-blue text-brand-blue hover:bg-brand-blue hover:text-white rounded-lg flex items-center gap-2">
-                                  <Columns3 className="w-4 h-4" />
+                                <Button variant="outline" size="sm" className="inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap">
+                                  <Columns3 className="h-4 w-4" />
                                   Columns
                                   {hiddenClaimsColumns.size > 0 && (
                                     <span className="ml-1 bg-brand-gold text-brand-blue text-[10px] rounded-full w-4 h-4 flex items-center justify-center font-bold">
@@ -2130,7 +2130,7 @@ export default function Dashboard() {
                             <Button
                               variant="outline"
                               size="sm"
-                              className="border-2 border-brand-blue text-brand-blue hover:bg-brand-blue hover:text-white rounded-lg flex items-center gap-2"
+                              className="inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap"
                               disabled={(claimsDataMap[period] ?? []).length === 0}
                               onClick={() => {
                                 const csv = claimsToCSV(claimsDataMap[period] ?? []);
@@ -2138,18 +2138,18 @@ export default function Dashboard() {
                                 downloadCSV(filename, csv);
                               }}
                             >
-                              <Download className="w-4 h-4" />
+                              <Download className="h-4 w-4" />
                               Export
                             </Button>
                             {/* Reimbursement Insurance Upload button */}
                             <label
                               htmlFor={`claim-upload-reimb-${period}`}
-                              className="cursor-pointer inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-white border-2 border-brand-gold text-brand-blue hover:bg-brand-gold transition-colors"
+                              className="cursor-pointer inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap"
                               title="Upload Reimbursement Insurance EOB (PDF/CSV) to auto-fill insurance reimbursement, CPT codes, charge amounts"
                             >
                               {isExtractingClaims && claimUploadPeriod === period && claimUploadType === 'reimbursement'
-                                ? <><Loader2 className="w-4 h-4 animate-spin" /> Extracting…</>
-                                : <><Upload className="w-4 h-4" /> Reimbursement Insurance Upload</>
+                                ? <><Loader2 className="h-4 w-4 animate-spin" /> Extracting…</>
+                                : <><Upload className="h-4 w-4" /> Reimbursement Insurance Upload</>
                               }
                             </label>
                             <input
@@ -2171,12 +2171,12 @@ export default function Dashboard() {
                             {/* CMS1500 Upload button */}
                             <label
                               htmlFor={`claim-upload-cms-${period}`}
-                              className="cursor-pointer inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-white border-2 border-brand-gold text-brand-blue hover:bg-brand-gold transition-colors"
+                              className="cursor-pointer inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap"
                               title="Upload CMS1500 claim form (PDF) to auto-fill dates, place of service, CPT codes, modifiers, diagnosis codes, units"
                             >
                               {isExtractingClaims && claimUploadPeriod === period && claimUploadType === 'cms1500'
-                                ? <><Loader2 className="w-4 h-4 animate-spin" /> Extracting…</>
-                                : <><Upload className="w-4 h-4" /> CMS1500 Upload</>
+                                ? <><Loader2 className="h-4 w-4 animate-spin" /> Extracting…</>
+                                : <><Upload className="h-4 w-4" /> CMS1500 Upload</>
                               }
                             </label>
                             <input
@@ -2193,16 +2193,6 @@ export default function Dashboard() {
                                 e.target.value = '';
                               }}
                             />
-                            <Button
-                              onClick={() => {
-                                setAddClaimPeriod(period);
-                                setShowAddClaimDialog(true);
-                              }}
-                              className="bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold shadow-md rounded-lg flex items-center gap-2"
-                            >
-                              <Plus className="w-4 h-4" />
-                              Add Claim
-                            </Button>
                           </div>
                         </div>
                       </CardHeader>
