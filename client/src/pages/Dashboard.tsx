@@ -1597,7 +1597,7 @@ export default function Dashboard() {
             authPeriod: claimUploadPeriod,
             placeOfService: row.placeOfService || line.placeOfService || null,
             dateOfService: row.dateOfService || line.dateOfService || null,
-            visitNumber: row.visitNumber ? parseFloat(row.visitNumber) : null,
+            visitNumber: row.visitNumber !== '' && row.visitNumber != null ? parseInt(row.visitNumber, 10) : null,
             cptCodes: line.cptCodes || null,
             unitsBilled: line.unitsBilled ? parseInt(line.unitsBilled) : (row.unitsBilled ? parseInt(row.unitsBilled) : null),
             diagnosisCodes: line.diagnosisCodes || row.diagnosisCodes || null,
@@ -2275,7 +2275,7 @@ export default function Dashboard() {
                                       </td>
                                     );
 
-                                    const EditableNumber = ({ field, value, prefix = '' }: { field: string; value: number | string | null; prefix?: string }) => {
+                                    const EditableNumber = ({ field, value, prefix = '', decimals = 2 }: { field: string; value: number | string | null; prefix?: string; decimals?: number }) => {
                                       const numVal = value != null ? parseFloat(value as string) : null;
                                       return (
                                         <td className={`${cellClass} text-right`} onClick={() => !isEditing(field) && startEdit(field, numVal?.toString() ?? '')}>
@@ -2283,7 +2283,7 @@ export default function Dashboard() {
                                             <input
                                               autoFocus
                                               type="number"
-                                              step="0.01"
+                                              step={decimals === 0 ? '1' : '0.01'}
                                               className={inputClass}
                                               value={editingValue}
                                               onChange={e => setEditingValue(e.target.value)}
@@ -2291,7 +2291,7 @@ export default function Dashboard() {
                                               onKeyDown={e => { if (e.key === 'Enter') commitEdit(field, true); if (e.key === 'Escape') setEditingCell(null); }}
                                             />
                                           ) : (
-                                            <span>{numVal != null && !isNaN(numVal) ? `${prefix}${numVal.toFixed(2)}` : <span className="text-gray-300">—</span>}</span>
+                                            <span>{numVal != null && !isNaN(numVal) ? `${prefix}${numVal.toFixed(decimals)}` : <span className="text-gray-300">—</span>}</span>
                                           )}
                                         </td>
                                       );
@@ -2340,7 +2340,7 @@ export default function Dashboard() {
                                             <EditableDate field="dateOfService" value={claim.date_of_service} />
                                           )
                                         )}
-                                        {!hide('visitNumber') && <EditableNumber field="visitNumber" value={claim.visit_number ?? null} />}
+                                        {!hide('visitNumber') && <EditableNumber field="visitNumber" value={claim.visit_number ?? null} decimals={0} />}
                                         {!hide('cptCodes') && <EditableText field="cptCodes" value={claim.cpt_codes} />}
                                         {!hide('unitsBilled') && <EditableNumber field="unitsBilled" value={claim.units_billed} />}
                                         {!hide('diagnosisCodes') && <EditableText field="diagnosisCodes" value={claim.diagnosis_codes} />}
@@ -2540,7 +2540,7 @@ export default function Dashboard() {
                   authPeriod: addClaimPeriod,
                   placeOfService: claimFormData.placeOfService || null,
                   dateOfService: claimFormData.dateOfService || null,
-                  visitNumber: claimFormData.visitNumber ? parseFloat(claimFormData.visitNumber) : null,
+                  visitNumber: claimFormData.visitNumber !== '' ? parseInt(claimFormData.visitNumber, 10) : null,
                   cptCodes: claimFormData.cptCodes || null,
                   unitsBilled: claimFormData.unitsBilled ? parseInt(claimFormData.unitsBilled) : null,
                   diagnosisCodes: claimFormData.diagnosisCodes || null,

@@ -88,6 +88,29 @@ function sanitizeInsuranceBilled(claim: ExtractedClaim): void {
 }
 
 /**
+ * visitNumber must be the document's own printed visit/session number, never
+ * an accidental copy of a nearby field the model misread as one — the most
+ * common failure mode is repeating unitsBilled or chargeAmount. Mutates the
+ * claim in place, clearing to null (with a note) rather than discarding the
+ * whole claim.
+ */
+function sanitizeVisitNumber(claim: ExtractedClaim): void {
+  if (claim.visitNumber === null || claim.visitNumber === undefined) return;
+  const isCopyOfUnits = claim.unitsBilled != null && claim.visitNumber === claim.unitsBilled;
+  const isCopyOfCharge = claim.chargeAmount != null && claim.visitNumber === Math.trunc(claim.chargeAmount);
+  const isCopyOfCpt = claim.cptCodes != null && claim.cptCodes.trim() === String(claim.visitNumber);
+  if (isCopyOfUnits || isCopyOfCharge || isCopyOfCpt) {
+    claim.notes = [
+      claim.notes,
+      `⚠️ visitNumber ${claim.visitNumber} matches unitsBilled/chargeAmount/cptCodes for this line — likely a misread, cleared to null`,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    claim.visitNumber = null;
+  }
+}
+
+/**
  * Checks whether a claim's CPT code and dollar amounts actually appear as
  * substrings in the exact source text the model was given. Returns a list of
  * human-readable warnings (empty if everything checks out) — see the call
@@ -128,6 +151,23 @@ function verifyClaimAgainstSourceText(claim: ExtractedClaim, sourceText: string)
   checkStringField("Claim #", claim.oaClaimNumber);
   checkStringField("Check/EFT", claim.checkNumberVirtualCard);
   checkStringField("Ins. Billed", claim.insuranceBilled);
+
+  // visitNumber has no dedicated label most of the time (it may be inferred
+  // from a Box 24 row's printed position rather than an explicit "Visit #"
+  // tag), so this only warns — a legitimate row-position-derived value is
+  // expected NOT to appear next to a label — it never nulls the field itself
+  // (sanitizeVisitNumber handles the deterministic copy-detection case).
+  if (claim.visitNumber != null) {
+    const nearLabel = new RegExp(
+      `(?:Visit|Session|Encounter)\\s*(?:#|No\\.?|Number)?\\s*:?\\s*${claim.visitNumber}\\b`,
+      "i"
+    );
+    if (!nearLabel.test(sourceText)) {
+      warnings.push(
+        `visitNumber ${claim.visitNumber} not found next to a Visit#/Session#/Encounter# label in source text (may be inferred from row position)`
+      );
+    }
+  }
 
   // Co-occurrence check: catches "right values, wrong row" fabrication that
   // the independent checks above can't see — e.g. a model that sees the same
@@ -206,6 +246,7 @@ For each claim/service line, extract EVERY one of these fields when it appears a
 - checkNumberVirtualCard: check number, EFT trace number, or virtual card number
 - claimStatus: one of "approved", "denied", or "submitted" (infer from context — e.g. a $0 paid line with a denial code is "denied"; a line with a payment amount is "approved")
 - insuranceBilled: the NUMERIC billing/group/payer identifier for this claim — e.g. "Group #", "Group Number", "Group No", "Group ID", "Billing ID", "Billing Number", "Payer ID", "Payer Number", or a slash-separated identifier like "16404/137040261". This is NEVER the insurance company/payer name (do not write "Aetna", "Meritain Health", "BCBS", "Cigna", etc. here — that is a completely different field, not this one). If no such numeric identifier is visible anywhere in this claim's block, use null — do not substitute the payer name as a fallback.
+- visitNumber: The sequential visit or session number for this service line (integer: 1, 2, 3, etc.). Look for labels like "Visit #", "Session #", "Session Number", "Visit Number", "Encounter #". Return as an integer. If the field is not present in the document, return null — do NOT return 0.
 
 FIELD NAME VARIATIONS — the same data point is labeled differently across payers; map by meaning, not by exact label. Some payers print several *different, non-interchangeable* dollar columns — read carefully, don't just grab the first similar-sounding label:
 - Insurance Reimbursement = the amount the payer actually PAID/will pay: "Paid Amount", "Payable Amount", "Plan Paid", "Claim Payment Amount". This is NOT the same as "Allowed Amount"/"Allowable"/"QPA" — that is only the contractually recognized rate the patient-responsibility math is based on, and is often larger than what was actually paid (especially out-of-network). If both an "Allowed" and a "Paid"/"Payable" column exist, use the "Paid"/"Payable" one.
@@ -240,6 +281,7 @@ For each service line, extract EVERY one of these fields when it appears anywher
 - chargeAmount: total charge amount for this line (numeric only, from Box 24F)
 - claimSubmittedDate: MM/DD/YYYY format — the physician/supplier signature date (from Box 31, usually printed after "SIGNED"/"DATE")
 - insuranceBilled: the NUMERIC billing/group/payer identifier printed near Box 11 — e.g. "Group #", "Group Number", "Group No", "Group ID", "Billing ID", "Billing Number", "Payer ID", "Payer Number", or a slash-separated identifier like "16404/137040261". This is NEVER the insurance plan/payer name (do not write "Aetna", "Blue Cross", etc. here). If no such numeric identifier is visible on the form, use null.
+- visitNumber: The sequential visit or session number for this service line (integer: 1, 2, 3, etc.). Look for labels like "Visit #", "Session #", "Session Number", "Visit Number", "Encounter #" — a CMS-1500 form's Box 24 rows are also numbered 1-6 in printed order, so the row's own printed position may be the visit number when no separate label exists. Return as an integer. If the field is not present in the document, return null — do NOT return 0.
 
 IMPORTANT:
 - Patient name is REQUIRED - never leave it null or empty
@@ -296,6 +338,7 @@ IMPORTANT:
       enum: ["submitted", "approved", "denied"],
     },
     insuranceBilled: { type: ["string", "null"] },
+    visitNumber: { type: ["integer", "null"] },
   } as const;
 
   const cms1500ClaimProperties = {
@@ -313,6 +356,7 @@ IMPORTANT:
       enum: ["submitted", "approved", "denied"],
     },
     insuranceBilled: { type: ["string", "null"] },
+    visitNumber: { type: ["integer", "null"] },
   } as const;
 
   const claimItemProperties =
@@ -426,7 +470,14 @@ IMPORTANT:
         lmn: null,
         dateReceived: null,
         referenceNo: null,
-        visitNumber: 0,
+        // The sequential visit/session number — must stay null when the model
+        // didn't find one, never default to 0 (0 is not a valid visit number
+        // and was previously hardcoded here, causing every AI-extracted claim
+        // to show "0.00" in the Visit # column regardless of source content).
+        visitNumber:
+          claim.visitNumber !== null && claim.visitNumber !== undefined
+            ? Math.round(Number(claim.visitNumber))
+            : null,
         dateOfAppeal: null,
         notes: parsed.extractionNotes || null,
       })
@@ -436,6 +487,7 @@ IMPORTANT:
     // on having separately-extracted source text to compare against.
     for (const claim of normalizedClaims) {
       sanitizeInsuranceBilled(claim);
+      sanitizeVisitNumber(claim);
     }
 
     // Cheap, deterministic anti-hallucination check — only possible when we

@@ -49,6 +49,10 @@ const CMS1500_CLAIM_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
   'placeOfService',
   'diagnosisCodes',
   'claimSubmittedDate',
+  // visitNumber lives on the DateClaimGroup itself (bulkImportFromEOB reads
+  // claim.visitNumber, not line.visitNumber — see server/routers.ts), so it
+  // belongs in the claim-level list, not the line-level one below.
+  'visitNumber',
 ];
 const CMS1500_LINE_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
   'cptCodes',
@@ -148,6 +152,9 @@ const CMS1500_ONLY_FIELDS: (keyof ExtractedClaim)[] = [
   'modifier',
   'chargeAmount',
   'claimSubmittedDate',
+  // Matches the existing isCms gate in bulkImportFromEOB (server/routers.ts),
+  // which already only ever writes visitNumber for CMS-1500 claims.
+  'visitNumber',
 ];
 
 const REIMBURSEMENT_ONLY_FIELDS: (keyof ExtractedClaim)[] = [
@@ -204,7 +211,7 @@ const COLUMN_DESCRIPTIONS = `
 Extract claim line items and map each one to these columns (use null if not found):
 - placeOfService: string — place of service code or description (e.g. "11", "Home", "Office")
 - dateOfService: string — date of service in YYYY-MM-DD format
-- visitNumber: number — visit or service line number
+- visitNumber: integer — the sequential visit/session number (1, 2, 3, ...); look for "Visit #"/"Session #"/"Session Number"/"Visit Number"/"Encounter #" labels — use null if not present in the document, never default to 0
 - cptCodes: string — CPT/procedure codes (comma-separated if multiple)
 - unitsBilled: number — units billed
 - diagnosisCodes: string — ICD-10 diagnosis codes (comma-separated)
