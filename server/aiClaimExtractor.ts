@@ -88,22 +88,23 @@ function sanitizeInsuranceBilled(claim: ExtractedClaim): void {
 }
 
 /**
- * visitNumber must be the document's own printed visit/session number, never
- * an accidental copy of a nearby field the model misread as one — the most
- * common failure mode is repeating unitsBilled or chargeAmount. Mutates the
- * claim in place, clearing to null (with a note) rather than discarding the
- * whole claim.
+ * visitNumber is the CMS-1500 Box 24 service line's printed row position
+ * (1-6), a positional value assigned by the model counting lines top to
+ * bottom — never a copy of a nearby field, and never outside the 6 slots
+ * a CMS-1500 form actually has. Mutates the claim in place, clearing to
+ * null (with a note) rather than discarding the whole claim.
  */
 function sanitizeVisitNumber(claim: ExtractedClaim): void {
   if (claim.visitNumber === null || claim.visitNumber === undefined) return;
   const isCopyOfUnits = claim.unitsBilled != null && claim.visitNumber === claim.unitsBilled;
   const isCopyOfCharge = claim.chargeAmount != null && claim.visitNumber === Math.trunc(claim.chargeAmount);
   const isCopyOfCpt = claim.cptCodes != null && claim.cptCodes.trim() === String(claim.visitNumber);
-  if (isCopyOfUnits || isCopyOfCharge || isCopyOfCpt) {
-    claim.notes = [
-      claim.notes,
-      `⚠️ visitNumber ${claim.visitNumber} matches unitsBilled/chargeAmount/cptCodes for this line — likely a misread, cleared to null`,
-    ]
+  const outOfRange = claim.visitNumber < 1 || claim.visitNumber > 6;
+  if (isCopyOfUnits || isCopyOfCharge || isCopyOfCpt || outOfRange) {
+    const reason = outOfRange
+      ? `outside the valid 1-6 Box 24 row range`
+      : `matches unitsBilled/chargeAmount/cptCodes for this line — likely a misread`;
+    claim.notes = [claim.notes, `⚠️ visitNumber ${claim.visitNumber} ${reason}, cleared to null`]
       .filter(Boolean)
       .join(" | ");
     claim.visitNumber = null;
@@ -152,22 +153,10 @@ function verifyClaimAgainstSourceText(claim: ExtractedClaim, sourceText: string)
   checkStringField("Check/EFT", claim.checkNumberVirtualCard);
   checkStringField("Ins. Billed", claim.insuranceBilled);
 
-  // visitNumber has no dedicated label most of the time (it may be inferred
-  // from a Box 24 row's printed position rather than an explicit "Visit #"
-  // tag), so this only warns — a legitimate row-position-derived value is
-  // expected NOT to appear next to a label — it never nulls the field itself
-  // (sanitizeVisitNumber handles the deterministic copy-detection case).
-  if (claim.visitNumber != null) {
-    const nearLabel = new RegExp(
-      `(?:Visit|Session|Encounter)\\s*(?:#|No\\.?|Number)?\\s*:?\\s*${claim.visitNumber}\\b`,
-      "i"
-    );
-    if (!nearLabel.test(sourceText)) {
-      warnings.push(
-        `visitNumber ${claim.visitNumber} not found next to a Visit#/Session#/Encounter# label in source text (may be inferred from row position)`
-      );
-    }
-  }
+  // visitNumber is a positional value (the Box 24 row's printed order), not
+  // text printed anywhere in the document — substring verification does not
+  // apply. Range/copy-detection is handled deterministically by
+  // sanitizeVisitNumber instead.
 
   // Co-occurrence check: catches "right values, wrong row" fabrication that
   // the independent checks above can't see — e.g. a model that sees the same
@@ -246,7 +235,7 @@ For each claim/service line, extract EVERY one of these fields when it appears a
 - checkNumberVirtualCard: check number, EFT trace number, or virtual card number
 - claimStatus: one of "approved", "denied", or "submitted" (infer from context — e.g. a $0 paid line with a denial code is "denied"; a line with a payment amount is "approved")
 - insuranceBilled: the NUMERIC billing/group/payer identifier for this claim — e.g. "Group #", "Group Number", "Group No", "Group ID", "Billing ID", "Billing Number", "Payer ID", "Payer Number", or a slash-separated identifier like "16404/137040261". This is NEVER the insurance company/payer name (do not write "Aetna", "Meritain Health", "BCBS", "Cigna", etc. here — that is a completely different field, not this one). If no such numeric identifier is visible anywhere in this claim's block, use null — do not substitute the payer name as a fallback.
-- visitNumber: The sequential visit or session number for this service line (integer: 1, 2, 3, etc.). Look for labels like "Visit #", "Session #", "Session Number", "Visit Number", "Encounter #". Return as an integer. If the field is not present in the document, return null — do NOT return 0.
+- visitNumber: Always return null for EOB documents. Visit number comes only from CMS-1500 forms.
 
 FIELD NAME VARIATIONS — the same data point is labeled differently across payers; map by meaning, not by exact label. Some payers print several *different, non-interchangeable* dollar columns — read carefully, don't just grab the first similar-sounding label:
 - Insurance Reimbursement = the amount the payer actually PAID/will pay: "Paid Amount", "Payable Amount", "Plan Paid", "Claim Payment Amount". This is NOT the same as "Allowed Amount"/"Allowable"/"QPA" — that is only the contractually recognized rate the patient-responsibility math is based on, and is often larger than what was actually paid (especially out-of-network). If both an "Allowed" and a "Paid"/"Payable" column exist, use the "Paid"/"Payable" one.
@@ -281,7 +270,7 @@ For each service line, extract EVERY one of these fields when it appears anywher
 - chargeAmount: total charge amount for this line (numeric only, from Box 24F)
 - claimSubmittedDate: MM/DD/YYYY format — the physician/supplier signature date (from Box 31, usually printed after "SIGNED"/"DATE")
 - insuranceBilled: the NUMERIC billing/group/payer identifier printed near Box 11 — e.g. "Group #", "Group Number", "Group No", "Group ID", "Billing ID", "Billing Number", "Payer ID", "Payer Number", or a slash-separated identifier like "16404/137040261". This is NEVER the insurance plan/payer name (do not write "Aetna", "Blue Cross", etc. here). If no such numeric identifier is visible on the form, use null.
-- visitNumber: The sequential visit or session number for this service line (integer: 1, 2, 3, etc.). Look for labels like "Visit #", "Session #", "Session Number", "Visit Number", "Encounter #" — a CMS-1500 form's Box 24 rows are also numbered 1-6 in printed order, so the row's own printed position may be the visit number when no separate label exists. Return as an integer. If the field is not present in the document, return null — do NOT return 0.
+- visitNumber: The service line number from Box 24 of the CMS-1500 form. Assign integers 1, 2, 3, ... in the order the service lines appear top-to-bottom in Box 24. The first service line is visitNumber 1, the second is visitNumber 2, and so on. This is a positional value — do NOT search for a label. Return as integer.
 
 IMPORTANT:
 - Patient name is REQUIRED - never leave it null or empty
@@ -338,7 +327,10 @@ IMPORTANT:
       enum: ["submitted", "approved", "denied"],
     },
     insuranceBilled: { type: ["string", "null"] },
-    visitNumber: { type: ["integer", "null"] },
+    visitNumber: {
+      type: ["integer", "null"],
+      description: "Always null for EOB/Reimbursement documents — visit number comes only from CMS-1500 forms.",
+    },
   } as const;
 
   const cms1500ClaimProperties = {
@@ -356,7 +348,10 @@ IMPORTANT:
       enum: ["submitted", "approved", "denied"],
     },
     insuranceBilled: { type: ["string", "null"] },
-    visitNumber: { type: ["integer", "null"] },
+    visitNumber: {
+      type: ["integer", "null"],
+      description: "Box 24 service line position (1-6), assigned top-to-bottom in printed order — not a text label.",
+    },
   } as const;
 
   const claimItemProperties =
