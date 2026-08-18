@@ -1243,8 +1243,9 @@ export default function Dashboard() {
     const count = activePatients.filter(p => p.insurance === insurance).length;
     const isSelected = selectedInsurance === insurance;
     return (
-      <button
+      <Button
         key={insurance}
+        variant="ghost"
         onClick={() => {
           setSelectedInsurance(insurance);
           // Switching insurance while viewing a patient on a
@@ -1254,15 +1255,16 @@ export default function Dashboard() {
             setShowDetailView(false);
           }
         }}
-        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md cursor-pointer transition font-semibold text-sm ${
-          isSelected ? 'bg-brand-gold text-white' : 'text-brand-blue hover:bg-brand-cream'
+        aria-pressed={isSelected}
+        className={`w-full h-auto justify-between px-3 py-2.5 font-semibold text-sm ${
+          isSelected ? 'bg-brand-gold text-white hover:bg-brand-gold hover:text-white' : 'text-brand-blue hover:bg-brand-cream'
         }`}
       >
         <span className="truncate">{insurance}</span>
         <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
           isSelected ? 'bg-white/25 text-white' : 'bg-gray-100 text-gray-700'
         }`}>{count}</span>
-      </button>
+      </Button>
     );
   });
 
@@ -1270,18 +1272,20 @@ export default function Dashboard() {
     const count = claimStatusCounts[value as keyof typeof claimStatusCounts] ?? 0;
     const isSelected = selectedClaimsFilter === value;
     return (
-      <button
+      <Button
         key={value}
+        variant="ghost"
         onClick={() => setSelectedClaimsFilter(value)}
-        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md cursor-pointer transition text-sm ${
-          isSelected ? 'bg-brand-gold text-white font-semibold' : 'text-brand-blue hover:bg-brand-cream'
+        aria-pressed={isSelected}
+        className={`w-full h-auto justify-between px-3 py-2.5 text-sm ${
+          isSelected ? 'bg-brand-gold text-white font-semibold hover:bg-brand-gold hover:text-white' : 'text-brand-blue hover:bg-brand-cream'
         }`}
       >
         <span className="truncate">{label}</span>
         <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
           isSelected ? 'bg-white/25 text-white' : color
         }`}>{count}</span>
-      </button>
+      </Button>
     );
   });
 
