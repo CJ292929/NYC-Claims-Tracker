@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
@@ -122,6 +122,34 @@ const toInputDate = (d: Date | null | undefined): string => {
     return '';
   }
 };
+
+/** Compact colored dropdown for a visit's auth status. `onChange` receives the
+ *  same '' | 'Pending' | 'Approved' | 'Denied' shape handleUpdateAuthStatus expects. */
+function VisitAuthStatusSelect({ visit, onChange }: { visit: DbVisit; onChange: (visitId: string, status: string) => void }) {
+  const value = visit.authStatus === 'none' ? 'none' : visit.authStatus.charAt(0).toUpperCase() + visit.authStatus.slice(1);
+  const colorClass =
+    visit.authStatus === 'approved' ? 'bg-green-100 text-green-700' :
+    visit.authStatus === 'denied' ? 'bg-red-100 text-red-700' :
+    visit.authStatus === 'pending' ? 'bg-yellow-100 text-yellow-700' :
+    'bg-gray-100 text-gray-600';
+  return (
+    <Select value={value} onValueChange={(v) => onChange(visit.id, v === 'none' ? '' : v)}>
+      <SelectTrigger
+        size="sm"
+        aria-label="Auth status"
+        className={`h-auto w-auto border-0 rounded-full px-3 py-1 text-xs font-medium shadow-none ${colorClass}`}
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="none">— None —</SelectItem>
+        <SelectItem value="Pending">Pending</SelectItem>
+        <SelectItem value="Approved">Approved</SelectItem>
+        <SelectItem value="Denied">Denied</SelectItem>
+      </SelectContent>
+    </Select>
+  );
+}
 
 // ─── Authorization Alert Panel ──────────────────────────────────────────────────────
 
@@ -648,17 +676,19 @@ function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?: strin
                   </div>
                 </div>
                 <span className={`text-xs px-2 py-1 rounded-full font-bold capitalize ${s.badge} ${s.badgeText}`}>{status}</span>
-                <button
+                <Button
+                  size="sm"
                   onClick={(e) => {
                     e.stopPropagation();
                     markResolved.mutate({ id: claim.id });
                   }}
                   disabled={markResolved.isPending}
-                  className="ml-1 text-xs px-3 py-1 rounded-full font-bold bg-white/90 text-gray-800 hover:bg-white hover:scale-105 active:scale-95 transition-all duration-150 shadow-sm whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
+                  aria-label={`Mark claim for ${claim.patientName} as resolved`}
                   title="Mark as resolved and remove from follow-up list"
+                  className="ml-1 h-auto rounded-full bg-white/90 text-gray-800 hover:bg-white hover:scale-105 active:scale-95 px-3 py-1 shadow-sm whitespace-nowrap"
                 >
                   ✓ Resolved
-                </button>
+                </Button>
               </div>
             </div>
           );
@@ -2077,53 +2107,54 @@ export default function Dashboard() {
                         )}
                       </CardHeader>
                       <CardContent className="p-0">
-                        <div className="overflow-x-auto">
+                        {/* Desktop table */}
+                        <div className="overflow-x-auto hidden md:block">
                           <table className="w-full text-sm min-w-full">
                             <thead className="bg-brand-blue/95">
                               <tr>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Date</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider"># Authorized</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider"># Remaining</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Session #</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Date of Service</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Date</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider"># Authorized</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider"># Remaining</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Session #</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Date of Service</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
                                   Date ASH Submitted
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
                                 </th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Status</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Status</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-100">
                       {periodVisits.map((visit) => (
                         <tr key={visit.id} className="hover:bg-brand-cream/30 transition-colors">
                           {/* Auth Date */}
-                          <td className="px-6 py-4 text-sm text-brand-blue whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm text-brand-blue whitespace-nowrap">
                             {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* # Authorized */}
-                          <td className="px-6 py-4 text-sm whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             {visit.sessionsAuthorized != null ? (
                               <span className="font-semibold text-brand-blue text-base">{visit.sessionsAuthorized}</span>
                             ) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* # Remaining */}
-                          <td className="px-6 py-4 text-sm whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             {visit.sessionsRemaining != null ? (
                               <span className="font-bold text-brand-gold text-base">{visit.sessionsRemaining}</span>
                             ) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* Session # */}
-                          <td className="px-6 py-4 text-sm whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             {visit.sessionNumber != null ? (
                               <span className="font-medium text-gray-700 text-base">{visit.sessionNumber}</span>
                             ) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* Date of Service */}
-                          <td className="px-6 py-4 text-sm text-muted-foreground whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
                             {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* Date ASH Submitted — EDITABLE */}
-                          <td className="px-6 py-4 text-sm whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             {editingAshId === visit.id ? (
                               <div className="flex items-center gap-2">
                                 <input
@@ -2133,25 +2164,29 @@ export default function Dashboard() {
                                   className="border border-brand-gold rounded-md px-2 py-1.5 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
                                   autoFocus
                                 />
-                                <button
+                                <Button
+                                  size="sm"
                                   onClick={() => handleSaveAsh(visit.id)}
                                   disabled={updateVisit.isPending}
-                                  className="text-green-600 hover:text-green-800 font-bold text-xs px-2 py-1 rounded bg-green-50 hover:bg-green-100 transition-colors"
+                                  className="h-auto text-green-600 hover:text-green-800 font-bold text-xs px-2 py-1 bg-green-50 hover:bg-green-100"
                                 >
                                   {updateVisit.isPending ? '…' : 'Save'}
-                                </button>
-                                <button
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
                                   onClick={handleCancelAsh}
-                                  className="text-gray-500 hover:text-gray-700 font-bold text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200 transition-colors"
+                                  className="h-auto text-gray-500 hover:text-gray-700 font-bold text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200"
                                 >
                                   Cancel
-                                </button>
+                                </Button>
                               </div>
                             ) : (
                               <button
                                 onClick={() => handleStartEditAsh(visit)}
                                 className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue cursor-pointer transition-colors"
                                 title="Click to edit Date ASH Submitted"
+                                aria-label={visit.dateAshSubmitted ? `Edit Date ASH Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date ASH Submitted'}
                               >
                                 <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
                                 <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>
@@ -2161,27 +2196,76 @@ export default function Dashboard() {
                             )}
                           </td>
                           {/* Auth Status */}
-                          <td className="px-6 py-4 text-sm whitespace-nowrap">
-                            <select
-                              value={visit.authStatus === 'none' ? '' : visit.authStatus.charAt(0).toUpperCase() + visit.authStatus.slice(1)}
-                              onChange={e => handleUpdateAuthStatus(visit.id, e.target.value)}
-                              className={`text-xs font-medium px-3 py-1 rounded-full border-0 outline-none cursor-pointer transition-colors ${
-                                visit.authStatus === 'approved' ? 'bg-green-100 text-green-700' :
-                                visit.authStatus === 'denied' ? 'bg-red-100 text-red-700' :
-                                visit.authStatus === 'pending' ? 'bg-yellow-100 text-yellow-700' :
-                                'bg-gray-100 text-gray-600'
-                              }`}
-                            >
-                              <option value="">— None —</option>
-                              <option value="Pending">Pending</option>
-                              <option value="Approved">Approved</option>
-                              <option value="Denied">Denied</option>
-                            </select>
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
+                            <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
                           </td>
                         </tr>
                       ))}
                             </tbody>
                           </table>
+                        </div>
+
+                        {/* Mobile stacked cards */}
+                        <div className="md:hidden divide-y divide-gray-100">
+                          {periodVisits.map((visit) => (
+                            <div key={visit.id} className="p-4 space-y-2.5">
+                              <div className="flex items-center justify-between">
+                                <span className="text-sm font-semibold text-brand-blue">
+                                  {visit.sessionNumber != null ? `Session #${visit.sessionNumber}` : 'Session'}
+                                </span>
+                                <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
+                              </div>
+                              <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
+                                <div>
+                                  <p className="text-xs text-muted-foreground">Auth Date</p>
+                                  <p className="text-brand-blue">{visit.dateOfService ? formatDate(visit.dateOfService) : '—'}</p>
+                                </div>
+                                <div>
+                                  <p className="text-xs text-muted-foreground"># Authorized / Remaining</p>
+                                  <p>
+                                    <span className="font-semibold text-brand-blue">{visit.sessionsAuthorized ?? '—'}</span>
+                                    {' / '}
+                                    <span className="font-bold text-brand-gold">{visit.sessionsRemaining ?? '—'}</span>
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-xs text-muted-foreground">Date of Service</p>
+                                  <p className="text-muted-foreground">{visit.dateOfService ? formatDate(visit.dateOfService) : '—'}</p>
+                                </div>
+                                <div>
+                                  <p className="text-xs text-muted-foreground">Date ASH Submitted</p>
+                                  {editingAshId === visit.id ? (
+                                    <div className="flex items-center gap-1.5 mt-0.5">
+                                      <input
+                                        type="date"
+                                        value={editingAshValue}
+                                        onChange={e => setEditingAshValue(e.target.value)}
+                                        className="border border-brand-gold rounded-md px-1.5 py-1 text-xs text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
+                                        autoFocus
+                                      />
+                                      <Button size="sm" onClick={() => handleSaveAsh(visit.id)} disabled={updateVisit.isPending} className="h-auto text-xs px-2 py-1 bg-green-50 text-green-700 hover:bg-green-100">
+                                        {updateVisit.isPending ? '…' : 'Save'}
+                                      </Button>
+                                      <Button size="sm" variant="secondary" onClick={handleCancelAsh} className="h-auto text-xs px-2 py-1">
+                                        Cancel
+                                      </Button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => handleStartEditAsh(visit)}
+                                      className="flex items-center gap-1.5 text-gray-400 hover:text-brand-blue"
+                                      aria-label={visit.dateAshSubmitted ? `Edit Date ASH Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date ASH Submitted'}
+                                    >
+                                      <Calendar className="w-3.5 h-3.5 text-brand-gold shrink-0" />
+                                      <span className={visit.dateAshSubmitted ? 'text-brand-blue' : 'italic'}>
+                                        {visit.dateAshSubmitted ? formatDate(visit.dateAshSubmitted) : 'Set date'}
+                                      </span>
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       </CardContent>
                     </Card>
@@ -3435,13 +3519,15 @@ export default function Dashboard() {
                         <p className="text-3xl font-bold text-brand-blue">{activeMetrics.remaining}</p>
                       </div>
                     </div>
-                    <button
-                      onClick={() => setShowDetailView(true)}
-                      className="mt-6 w-full py-3 px-4 bg-brand-blue text-white rounded-lg hover:bg-brand-blue-dark transition font-semibold"
-                    >
-                      View Full Records & Edit Date ASH Submitted
-                    </button>
                   </CardContent>
+                  <CardFooter className="border-t pt-6">
+                    <Button
+                      onClick={() => setShowDetailView(true)}
+                      className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
+                    >
+                      View Full Records &amp; Edit Date ASH Submitted
+                    </Button>
+                  </CardFooter>
                 </Card>
 
                 {/* Progress Chart */}
