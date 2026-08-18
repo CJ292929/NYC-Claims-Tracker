@@ -251,8 +251,8 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     return (
       <div className="mb-6">
         <div className="flex items-center gap-2 mb-3">
-          <BellRing className="w-5 h-5 text-[#E8A93C]" />
-          <h2 className="text-lg font-bold text-[#1E3A5F]">Authorization Alerts</h2>
+          <BellRing className="w-5 h-5 text-brand-gold" />
+          <h2 className="text-lg font-bold text-brand-blue">Authorization Alerts</h2>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {[1, 2].map(i => (
@@ -279,13 +279,13 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     <>
     <div className="mb-6">
       <div className="flex items-center gap-2 mb-3">
-        <BellRing className="w-5 h-5 text-[#E8A93C] animate-bounce" />
-        <h2 className="text-lg font-bold text-[#1E3A5F]">Authorization Alerts</h2>
-        <span className="ml-1 inline-flex items-center justify-center w-6 h-6 rounded-full bg-red-600 text-white text-xs font-bold">
+        <BellRing className="w-5 h-5 text-brand-gold animate-bounce" />
+        <h2 className="text-lg font-bold text-brand-blue">Authorization Alerts</h2>
+        <Badge variant="destructive" className="ml-1 rounded-full w-6 h-6 p-0 justify-center">
           {urgent.length}
-        </span>
+        </Badge>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[28rem] overflow-y-auto pr-1">
         {urgent.map(alert => {
           const cfg = URGENCY_CONFIG[alert.urgency];
           const isRequesting = requestingId === alert.patientId;
@@ -305,8 +305,8 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
                 <div className="flex items-start gap-3">
                   <span className={`mt-0.5 shrink-0 ${cfg.iconClass}`}>{cfg.icon}</span>
                   <div className="min-w-0">
-                    <p className="font-bold text-[#1E3A5F] truncate">{alert.patientName}</p>
-                    <p className="text-xs text-[#6B7280] truncate">{alert.insurance}</p>
+                    <p className="font-bold text-brand-blue truncate">{alert.patientName}</p>
+                    <p className="text-xs text-muted-foreground truncate">{alert.insurance}</p>
                     <div className="flex flex-wrap gap-1 mt-2">
                       <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${cfg.badgeClass}`}>
                         {alert.authExpiryWarning ? 'Auth Expiring Soon' : cfg.label}
@@ -317,11 +317,11 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-[#6B7280] mt-1">
+                    <p className="text-xs text-muted-foreground mt-1">
                       {alert.authExpiryWarning ? 'Request new authorization before expiry date' : cfg.sublabel}
                     </p>
                     {alert.dateAshSubmitted && (
-                      <p className="text-xs text-[#6B7280] mt-0.5">
+                      <p className="text-xs text-muted-foreground mt-0.5">
                         Last submitted: {new Date(alert.dateAshSubmitted).toLocaleDateString()}
                       </p>
                     )}
@@ -351,26 +351,28 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               <div className="px-4 pb-3 flex gap-2">
                 {/* Mark as Requested — only for non-pending cards */}
                 {!alreadyPending && (
-                  <button
+                  <Button
+                    size="sm"
                     disabled={isRequesting}
                     onClick={(e) => {
                       e.stopPropagation();
                       markAsRequested.mutate({ patientId: alert.patientId });
                     }}
-                    className="flex-1 mt-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#1E3A5F] text-white hover:bg-[#152A47] disabled:opacity-60 disabled:cursor-not-allowed transition-all active:scale-[0.97]"
+                    className="flex-1 mt-1 bg-brand-blue text-white hover:bg-brand-blue-dark active:scale-[0.97]"
                   >
                     {isRequesting ? (
                       <><Loader2 className="w-3 h-3 animate-spin" /> Saving…</>
                     ) : (
                       <><CheckCircle2 className="w-3 h-3" /> Mark as Requested</>
                     )}
-                  </button>
+                  </Button>
                 )}
 
                 {/* Approved — only for pending cards */}
                 {alreadyPending && (
                   <>
-                    <button
+                    <Button
+                      size="sm"
                       onClick={(e) => {
                         e.stopPropagation();
                         setApproveDialogPatient({ id: alert.patientId, name: alert.patientName, insurance: alert.insurance ?? '' });
@@ -379,20 +381,21 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
                         setNewInsurance(alert.insurance ?? '');
                         setNewAuthValidUntil('');
                       }}
-                      className="flex-1 mt-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-green-600 text-white hover:bg-green-700 transition-all active:scale-[0.97]"
+                      className="flex-1 mt-1 bg-green-600 text-white hover:bg-green-700 active:scale-[0.97]"
                     >
                       <ShieldCheck className="w-3 h-3" /> Approved
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      size="sm"
                       disabled={isRequesting}
                       onClick={(e) => {
                         e.stopPropagation();
                         markAsRequested.mutate({ patientId: alert.patientId });
                       }}
-                      className="flex-1 mt-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-100 text-blue-700 hover:bg-blue-200 transition-all active:scale-[0.97]"
+                      className="flex-1 mt-1 bg-blue-100 text-blue-700 hover:bg-blue-200 active:scale-[0.97]"
                     >
                       <CheckCircle2 className="w-3 h-3" /> Re-request
-                    </button>
+                    </Button>
                   </>
                 )}
               </div>
@@ -406,7 +409,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     <Dialog open={!!approveDialogPatient} onOpenChange={(open) => { if (!open) { setApproveDialogPatient(null); setNewAuthValidUntil(''); } }}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="text-[#1E3A5F] flex items-center gap-2">
+          <DialogTitle className="text-brand-blue flex items-center gap-2">
             <ShieldCheck className="w-5 h-5 text-green-600" />
             New Authorization Approved
           </DialogTitle>
@@ -417,7 +420,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
         </DialogHeader>
         <div className="space-y-4 py-2">
           <div className="space-y-1.5">
-            <Label htmlFor="new-sessions" className="text-[#1E3A5F] font-semibold">
+            <Label htmlFor="new-sessions" className="text-brand-blue font-semibold">
               Sessions Authorized <span className="text-red-500">*</span>
             </Label>
             <Input
@@ -428,11 +431,11 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               placeholder="e.g. 20"
               value={newSessions}
               onChange={(e) => setNewSessions(e.target.value)}
-              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
+              className="border-brand-blue/30 focus:border-brand-blue"
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-auth-date" className="text-[#1E3A5F] font-semibold">
+            <Label htmlFor="new-auth-date" className="text-brand-blue font-semibold">
               Authorization Date
             </Label>
             <Input
@@ -440,18 +443,18 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               type="date"
               value={newAuthDate}
               onChange={(e) => setNewAuthDate(e.target.value)}
-              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
+              className="border-brand-blue/30 focus:border-brand-blue"
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-insurance" className="text-[#1E3A5F] font-semibold">
+            <Label htmlFor="new-insurance" className="text-brand-blue font-semibold">
               Insurance Company
             </Label>
             <Select
               value={newInsurance}
               onValueChange={setNewInsurance}
             >
-              <SelectTrigger id="new-insurance" className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]">
+              <SelectTrigger id="new-insurance" className="border-brand-blue/30 focus:border-brand-blue">
                 <SelectValue placeholder="Select insurance company" />
               </SelectTrigger>
               <SelectContent>
@@ -467,7 +470,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-auth-valid-until" className="text-[#1E3A5F] font-semibold">
+            <Label htmlFor="new-auth-valid-until" className="text-brand-blue font-semibold">
               Authorization Valid Until <span className="text-gray-400 font-normal">(optional)</span>
             </Label>
             <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
@@ -476,7 +479,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               type="date"
               value={newAuthValidUntil}
               onChange={(e) => setNewAuthValidUntil(e.target.value)}
-              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
+              className="border-brand-blue/30 focus:border-brand-blue"
             />
           </div>
           <div className="rounded-lg bg-blue-50 border border-blue-200 p-3 text-sm text-blue-800">
@@ -560,7 +563,7 @@ function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?: strin
       <div className="mb-6 bg-orange-50 border-l-4 border-orange-400 rounded-lg p-4">
         <div className="flex items-center gap-2 mb-3">
           <AlertCircle className="w-5 h-5 text-orange-500" />
-          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up Needed</h2>
+          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up Needed</h2>
         </div>
         <div className="text-sm text-gray-500">Loading claims…</div>
       </div>
@@ -572,7 +575,7 @@ function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?: strin
       <div className="mb-6 bg-green-50 border-l-4 border-green-500 rounded-lg p-4">
         <div className="flex items-center gap-2 mb-2">
           <CheckCircle2 className="w-5 h-5 text-green-500" />
-          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up</h2>
+          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up</h2>
         </div>
         <p className="text-sm text-green-700">All billed claims have received insurance reimbursement. No follow-up needed.</p>
       </div>
@@ -584,7 +587,7 @@ function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?: strin
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <AlertCircle className="w-5 h-5 text-amber-500 animate-pulse" />
-          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up Needed</h2>
+          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up Needed</h2>
           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800">
             {followUpClaims.length} claim{followUpClaims.length !== 1 ? 's' : ''}
           </span>
@@ -1867,9 +1870,9 @@ export default function Dashboard() {
 
   if (patientsLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-[#FAF5EE] to-white flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4 text-[#1E3A5F]">
-          <Loader2 className="w-10 h-10 animate-spin text-[#E8A93C]" />
+      <div className="min-h-screen bg-gradient-to-b from-brand-cream to-white flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4 text-brand-blue">
+          <Loader2 className="w-10 h-10 animate-spin text-brand-gold" />
           <p className="text-lg font-semibold">Loading patient data…</p>
         </div>
       </div>
@@ -1880,7 +1883,7 @@ export default function Dashboard() {
 
   if (showDetailView && activePatient) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-[#FAF5EE] to-white">
+      <div className="min-h-screen bg-gradient-to-b from-brand-cream to-white">
         {/* Header */}
         <div className="bg-brand-blue text-white py-4">
           <div className="container px-4 sm:px-6 lg:px-8">
@@ -1986,13 +1989,13 @@ export default function Dashboard() {
 
           {/* Visit Records — one Card per auth period */}
           {visitsLoading ? (
-            <div className="flex items-center justify-center py-12 text-[#1E3A5F]">
-              <Loader2 className="w-6 h-6 animate-spin mr-2 text-[#E8A93C]" />
+            <div className="flex items-center justify-center py-12 text-brand-blue">
+              <Loader2 className="w-6 h-6 animate-spin mr-2 text-brand-gold" />
               Loading visits…
             </div>
           ) : visits.length === 0 ? (
-            <Card className="border-[#F0E9DC] shadow-md">
-              <CardContent className="py-12 text-center text-[#6B7280]">No visit records yet. Log a session to get started.</CardContent>
+            <Card className="border-brand-cream-dark shadow-md">
+              <CardContent className="py-12 text-center text-muted-foreground">No visit records yet. Log a session to get started.</CardContent>
             </Card>
           ) : (
             <>
@@ -2038,20 +2041,20 @@ export default function Dashboard() {
                             </DialogTrigger>
                             <DialogContent className="bg-white">
                               <DialogHeader>
-                                <DialogTitle className="text-[#1E3A5F]">Log New Session</DialogTitle>
+                                <DialogTitle className="text-brand-blue">Log New Session</DialogTitle>
                                 <DialogDescription>Record a therapy session for {activePatient.name}</DialogDescription>
                               </DialogHeader>
                               <div className="space-y-4">
                                 <div>
-                                  <Label className="text-[#1E3A5F] font-semibold">Date of Service</Label>
+                                  <Label className="text-brand-blue font-semibold">Date of Service</Label>
                                   <Input
                                     type="date"
                                     value={sessionDate}
                                     onChange={e => setSessionDate(e.target.value)}
-                                    className="border-[#F0E9DC] mt-2"
+                                    className="border-brand-cream-dark mt-2"
                                   />
                                 </div>
-                                <div className="bg-[#FAF5EE] rounded-lg p-4 text-sm text-[#1E3A5F]">
+                                <div className="bg-brand-cream rounded-lg p-4 text-sm text-brand-blue">
                                   <p><strong>Sessions remaining:</strong> {activeMetrics.remaining}</p>
                                   <p><strong>After this session:</strong> {Math.max(0, activeMetrics.remaining - 1)}</p>
                                 </div>
@@ -2059,7 +2062,7 @@ export default function Dashboard() {
                                   <Button
                                     onClick={handleLogSession}
                                     disabled={createVisit.isPending}
-                                    className="flex-1 bg-[#1E3A5F] hover:bg-[#152A47] text-white font-semibold"
+                                    className="flex-1 bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
                                   >
                                     {createVisit.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <CheckCircle2 className="w-4 h-4 mr-2" />}
                                     Confirm Session
@@ -2094,7 +2097,7 @@ export default function Dashboard() {
                       {periodVisits.map((visit) => (
                         <tr key={visit.id} className="hover:bg-brand-cream/30 transition-colors">
                           {/* Auth Date */}
-                          <td className="px-6 py-4 text-sm text-[#1E3A5F] whitespace-nowrap">
+                          <td className="px-6 py-4 text-sm text-brand-blue whitespace-nowrap">
                             {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* # Authorized */}
@@ -2116,7 +2119,7 @@ export default function Dashboard() {
                             ) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* Date of Service */}
-                          <td className="px-6 py-4 text-sm text-[#6B7280] whitespace-nowrap">
+                          <td className="px-6 py-4 text-sm text-muted-foreground whitespace-nowrap">
                             {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* Date ASH Submitted — EDITABLE */}
@@ -2127,7 +2130,7 @@ export default function Dashboard() {
                                   type="date"
                                   value={editingAshValue}
                                   onChange={e => setEditingAshValue(e.target.value)}
-                                  className="border border-brand-gold rounded-md px-2 py-1.5 text-sm text-[#1E3A5F] focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
+                                  className="border border-brand-gold rounded-md px-2 py-1.5 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
                                   autoFocus
                                 />
                                 <button
@@ -2151,7 +2154,7 @@ export default function Dashboard() {
                                 title="Click to edit Date ASH Submitted"
                               >
                                 <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
-                                <span className={visit.dateAshSubmitted ? 'text-[#1E3A5F] text-sm' : 'text-sm italic'}>
+                                <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>
                                   {visit.dateAshSubmitted ? formatDate(visit.dateAshSubmitted) : 'Click to set date'}
                                 </span>
                               </button>
@@ -3215,7 +3218,7 @@ export default function Dashboard() {
           {/* Insurance Filter Sidebar — desktop only; mobile uses the compact Filters sheet below */}
           <div className="hidden lg:block lg:col-span-1">
             <div className="bg-white rounded-xl shadow-sm p-4 max-h-[600px] overflow-y-auto">
-              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-[#F0E9DC]">Insurance</h3>
+              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-brand-cream-dark">Insurance</h3>
               <div className="space-y-1">
                 {renderInsuranceFilterButtons()}
               </div>
@@ -3225,7 +3228,7 @@ export default function Dashboard() {
           {/* Claims Status Filter — desktop only; mobile uses the compact Filters sheet below */}
           <div className="hidden lg:block lg:col-span-1">
             <div className="bg-white rounded-xl shadow-sm p-4 max-h-[600px] overflow-y-auto">
-              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-[#F0E9DC]">Claims Status</h3>
+              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-brand-cream-dark">Claims Status</h3>
               <div className="space-y-1">
                 {renderClaimsStatusFilterButtons()}
               </div>
@@ -3236,7 +3239,7 @@ export default function Dashboard() {
           <div className="lg:col-span-1 space-y-4">
             <div className="bg-white rounded-xl shadow-sm p-4">
               <h3 className="text-lg font-serif font-bold text-brand-blue mb-1">Patients</h3>
-              <p className="text-xs text-[#6B7280] mb-4">{filteredPatients.length} in {selectedInsurance || 'all insurances'}</p>
+              <p className="text-xs text-muted-foreground mb-4">{filteredPatients.length} in {selectedInsurance || 'all insurances'}</p>
 
               {/* Search + mobile filters control */}
               <div className="mb-4 space-y-2">
@@ -3306,7 +3309,7 @@ export default function Dashboard() {
                       onDelete={() => { setDeletePatientId(patient.id); setDeletePatientName(patient.name); }}
                     />
                   )) : (
-                    <div className="p-4 text-center text-[#6B7280] text-sm">
+                    <div className="p-4 text-center text-muted-foreground text-sm">
                       {searchQuery.trim() ? 'No patients match your search.' : 'No patients for this insurance'}
                     </div>
                   )}
@@ -3388,12 +3391,12 @@ export default function Dashboard() {
           <div className="lg:col-span-3 space-y-6">
             {activePatient && (
               <>
-                <Card className="border-[#F0E9DC] shadow-sm rounded-xl">
+                <Card className="border-brand-cream-dark shadow-sm rounded-xl">
                   <CardHeader className="pb-3">
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <button onClick={() => setShowDetailView(true)} className="group">
-                          <CardTitle className="text-2xl font-serif font-bold text-brand-blue group-hover:text-[#E8A93C] transition-colors cursor-pointer">
+                          <CardTitle className="text-2xl font-serif font-bold text-brand-blue group-hover:text-brand-gold transition-colors cursor-pointer">
                             {activePatient.name}
                           </CardTitle>
                         </button>
@@ -3443,7 +3446,7 @@ export default function Dashboard() {
 
                 {/* Progress Chart */}
                 {patientProgressData.length > 0 && (
-                  <Card className="border-[#F0E9DC] shadow-sm rounded-xl">
+                  <Card className="border-brand-cream-dark shadow-sm rounded-xl">
                     <CardHeader>
                       <CardTitle className="text-lg font-serif font-bold text-brand-blue">Session Progress</CardTitle>
                       <CardDescription className="text-sm text-gray-600 mt-1">Sessions remaining over time</CardDescription>
@@ -3467,7 +3470,7 @@ export default function Dashboard() {
             )}
 
             {/* Clinic Overview */}
-            <Card className="border-[#F0E9DC] shadow-sm rounded-xl">
+            <Card className="border-brand-cream-dark shadow-sm rounded-xl">
               <CardHeader>
                 <CardTitle className="text-lg font-serif font-bold text-brand-blue">Clinic Overview</CardTitle>
                 <CardDescription className="text-sm text-gray-600 mt-1">Sessions for active patient</CardDescription>
@@ -3495,33 +3498,33 @@ export default function Dashboard() {
       <Dialog open={showDischargeDialog} onOpenChange={(open) => { if (!open) { setShowDischargeDialog(false); setPendingDischargePatientId(null); } }}>
         <DialogContent className="bg-white max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-[#1E3A5F] text-xl flex items-center gap-2">
+            <DialogTitle className="text-brand-blue text-xl flex items-center gap-2">
               <UserX className="w-5 h-5 text-gray-500" />
               Discharge Patient
             </DialogTitle>
-            <DialogDescription className="text-[#6B7280]">
+            <DialogDescription className="text-muted-foreground">
               Please fill in the discharge details. The patient will be moved to the Discharged Patients folder.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div>
-              <Label htmlFor="discharge-date" className="text-[#1E3A5F] font-semibold">Date of Discharge</Label>
+              <Label htmlFor="discharge-date" className="text-brand-blue font-semibold">Date of Discharge</Label>
               <Input
                 id="discharge-date"
                 type="date"
                 value={dischargeDate}
                 onChange={e => setDischargeDate(e.target.value)}
-                className="mt-1 border-[#F0E9DC] focus:border-[#1E3A5F]"
+                className="mt-1 border-brand-cream-dark focus:border-brand-blue"
               />
             </div>
             <div>
-              <Label htmlFor="discharge-reason" className="text-[#1E3A5F] font-semibold">Reason of Discharge</Label>
+              <Label htmlFor="discharge-reason" className="text-brand-blue font-semibold">Reason of Discharge</Label>
               <Input
                 id="discharge-reason"
                 placeholder="e.g. Goals met, Moved, Insurance ended…"
                 value={dischargeReason}
                 onChange={e => setDischargeReason(e.target.value)}
-                className="mt-1 border-[#F0E9DC] focus:border-[#1E3A5F]"
+                className="mt-1 border-brand-cream-dark focus:border-brand-blue"
               />
             </div>
           </div>
@@ -3549,14 +3552,14 @@ export default function Dashboard() {
       <AlertDialog open={deletePatientId !== null} onOpenChange={(open) => { if (!open) { setDeletePatientId(null); setDeletePatientName(''); } }}>
         <AlertDialogContent className="bg-white">
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-[#1E3A5F] text-xl">Delete Patient?</AlertDialogTitle>
-            <AlertDialogDescription className="text-[#6B7280]">
+            <AlertDialogTitle className="text-brand-blue text-xl">Delete Patient?</AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground">
               You are about to permanently delete <strong>{deletePatientName}</strong> and all of their visit records.
               This action <strong>cannot be undone</strong>.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="border-[#F0E9DC] text-[#1E3A5F] hover:bg-[#FAF5EE]">
+            <AlertDialogCancel className="border-brand-cream-dark text-brand-blue hover:bg-brand-cream">
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
