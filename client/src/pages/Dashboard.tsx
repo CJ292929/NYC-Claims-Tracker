@@ -2973,9 +2973,9 @@ export default function Dashboard() {
               <CardDescription className="text-xs">Filter, search, and review patients in one place</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              <div className="lg:grid lg:grid-cols-[260px_320px_minmax(0,1fr)]">
-                {/* Filters — desktop only; mobile uses the Filters sheet below */}
-                <div className="hidden lg:block border-r border-border p-4 max-h-[720px] overflow-y-auto">
+              <div className="lg:grid lg:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[260px_320px_minmax(0,1fr)]">
+                {/* Filters — xl+ only; below xl uses the Filters sheet */}
+                <div className="hidden xl:block border-r border-border p-4 max-h-[720px] overflow-y-auto">
                   <PatientFilters
                     insuranceList={insuranceList}
                     insuranceCounts={insuranceCounts}
@@ -3018,7 +3018,7 @@ export default function Dashboard() {
                         )}
                       </div>
 
-                      <div className="lg:hidden">
+                      <div className="xl:hidden">
                         <Sheet open={showMobileFilters} onOpenChange={setShowMobileFilters}>
                           <SheetTrigger asChild>
                             <Button variant="outline" size="sm" className="gap-1.5">
