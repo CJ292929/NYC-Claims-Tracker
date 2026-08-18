@@ -1129,8 +1129,20 @@ function registerOAuthRoutes(app2) {
 
 // server/_core/storageProxy.ts
 init_env();
+
+// server/_core/requireAuth.ts
+async function requireAuthenticatedUser(req, res, next) {
+  try {
+    await sdk.authenticateRequest(req);
+    next();
+  } catch {
+    res.status(401).json({ error: "Authentication required" });
+  }
+}
+
+// server/_core/storageProxy.ts
 function registerStorageProxy(app2) {
-  app2.get("/manus-storage/*", async (req, res) => {
+  app2.get("/manus-storage/*", requireAuthenticatedUser, async (req, res) => {
     const key = req.params[0];
     if (!key) {
       res.status(400).send("Missing storage key");
@@ -2459,14 +2471,6 @@ ${pdfText.substring(0, 2e3)}`
 }
 
 // server/claimUpload.ts
-async function requireAuthenticatedUser(req, res, next) {
-  try {
-    await sdk.authenticateRequest(req);
-    next();
-  } catch {
-    res.status(401).json({ error: "Authentication required" });
-  }
-}
 var CMS1500_CLAIM_FIELDS_TO_BACKFILL = [
   "placeOfService",
   "diagnosisCodes",
