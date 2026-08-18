@@ -5,6 +5,11 @@
  * These types use camelCase field names and string UUIDs to match what the rest of the app
  * (tRPC routers, frontend, sdk.ts) expects. The db.ts layer converts between Supabase
  * snake_case rows and these camelCase types.
+ *
+ * This file is a hand-maintained TypeScript mirror, not the schema source of truth.
+ * The authoritative schema is references/local-setup-schema.sql (applied directly in the
+ * Supabase SQL Editor). The drizzle-kit/MySQL migration pipeline under drizzle/ is legacy
+ * and unrelated to the current runtime database — see drizzle/LEGACY.md.
  */
 
 // ─── User ─────────────────────────────────────────────────────────────────────
@@ -80,7 +85,7 @@ export interface ClaimRecord {
   authPeriod: number;       // authorization period number
   placeOfService: string | null;
   dateOfService: Date | null;
-  visitNumber: string | null;
+  visitNumber: number | null;
   cptCodes: string | null;
   unitsBilled: number | null;
   diagnosisCodes: string | null;
@@ -100,6 +105,8 @@ export interface ClaimRecord {
   dateReceived: Date | null;
   dateOfAppeal: Date | null;
   referenceNo: string | null;
+  lmn: string | null;           // letter of medical necessity note/reference
+  isResolved: boolean;          // staff has cleared this claim from the follow-up queue
   createdAt: Date;
   updatedAt: Date;
 }
