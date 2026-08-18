@@ -12,6 +12,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { Separator } from '@/components/ui/separator';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
@@ -2300,15 +2301,17 @@ export default function Dashboard() {
                                 <div className="mb-2 flex items-center justify-between">
                                   <p className="text-sm font-semibold text-gray-700">Toggle Columns</p>
                                   {hiddenClaimsColumns.size > 0 && (
-                                    <button
+                                    <Button
+                                      variant="link"
+                                      size="sm"
                                       onClick={() => {
                                         setHiddenClaimsColumns(new Set());
                                         localStorage.removeItem('claims-hidden-columns');
                                       }}
-                                      className="text-xs text-brand-blue hover:underline"
+                                      className="h-auto p-0 text-xs text-brand-blue"
                                     >
                                       Show all
-                                    </button>
+                                    </Button>
                                   )}
                                 </div>
                                 <div className="space-y-1.5 max-h-64 overflow-y-auto">
@@ -2645,99 +2648,128 @@ export default function Dashboard() {
               Period {addClaimPeriod} for {activePatient?.name}
             </DialogDescription>
           </DialogHeader>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <Label>Place of Service</Label>
-              <Input value={claimFormData.placeOfService} onChange={(e) => setClaimFormData({...claimFormData, placeOfService: e.target.value})} />
+          <div className="space-y-5">
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-brand-blue">Claim Information</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <Label>Place of Service</Label>
+                  <Input value={claimFormData.placeOfService} onChange={(e) => setClaimFormData({...claimFormData, placeOfService: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Date of Service</Label>
+                  <Input type="date" value={claimFormData.dateOfService} onChange={(e) => setClaimFormData({...claimFormData, dateOfService: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Visit #</Label>
+                  <Input value={claimFormData.visitNumber} onChange={(e) => setClaimFormData({...claimFormData, visitNumber: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Insurance Billed</Label>
+                  <Input value={claimFormData.insuranceBilled} onChange={(e) => setClaimFormData({...claimFormData, insuranceBilled: e.target.value})} />
+                </div>
+              </div>
             </div>
-            <div>
-              <Label>Date of Service</Label>
-              <Input type="date" value={claimFormData.dateOfService} onChange={(e) => setClaimFormData({...claimFormData, dateOfService: e.target.value})} />
+
+            <Separator />
+
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-brand-blue">Codes</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <Label>CPT Codes</Label>
+                  <Input value={claimFormData.cptCodes} onChange={(e) => setClaimFormData({...claimFormData, cptCodes: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Units Billed</Label>
+                  <Input type="number" value={claimFormData.unitsBilled} onChange={(e) => setClaimFormData({...claimFormData, unitsBilled: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Diagnosis Codes</Label>
+                  <Input value={claimFormData.diagnosisCodes} onChange={(e) => setClaimFormData({...claimFormData, diagnosisCodes: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Modifier</Label>
+                  <Input value={claimFormData.modifier} onChange={(e) => setClaimFormData({...claimFormData, modifier: e.target.value})} />
+                </div>
+              </div>
             </div>
-            <div>
-              <Label>Visit #</Label>
-              <Input value={claimFormData.visitNumber} onChange={(e) => setClaimFormData({...claimFormData, visitNumber: e.target.value})} />
+
+            <Separator />
+
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-brand-blue">Billing</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <Label>Charge Amount</Label>
+                  <Input type="number" step="0.01" value={claimFormData.chargeAmount} onChange={(e) => setClaimFormData({...claimFormData, chargeAmount: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Insurance Reimbursement</Label>
+                  <Input type="number" step="0.01" value={claimFormData.insuranceReimbursement} onChange={(e) => setClaimFormData({...claimFormData, insuranceReimbursement: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Patient Amount Paid</Label>
+                  <Input type="number" step="0.01" value={claimFormData.patientAmountPaid} onChange={(e) => setClaimFormData({...claimFormData, patientAmountPaid: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Patient Amount Due</Label>
+                  <Input type="number" step="0.01" value={claimFormData.patientAmountDue} onChange={(e) => setClaimFormData({...claimFormData, patientAmountDue: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Check/Payment Date</Label>
+                  <Input type="date" value={claimFormData.checkDate} onChange={(e) => setClaimFormData({...claimFormData, checkDate: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Check/EFT #</Label>
+                  <Input value={claimFormData.checkNumberVirtualCard} onChange={(e) => setClaimFormData({...claimFormData, checkNumberVirtualCard: e.target.value})} />
+                </div>
+              </div>
             </div>
-            <div>
-              <Label>CPT Codes</Label>
-              <Input value={claimFormData.cptCodes} onChange={(e) => setClaimFormData({...claimFormData, cptCodes: e.target.value})} />
-            </div>
-            <div>
-              <Label>Units Billed</Label>
-              <Input type="number" value={claimFormData.unitsBilled} onChange={(e) => setClaimFormData({...claimFormData, unitsBilled: e.target.value})} />
-            </div>
-            <div>
-              <Label>Diagnosis Codes</Label>
-              <Input value={claimFormData.diagnosisCodes} onChange={(e) => setClaimFormData({...claimFormData, diagnosisCodes: e.target.value})} />
-            </div>
-            <div>
-              <Label>Modifier</Label>
-              <Input value={claimFormData.modifier} onChange={(e) => setClaimFormData({...claimFormData, modifier: e.target.value})} />
-            </div>
-            <div>
-              <Label>Charge Amount</Label>
-              <Input type="number" step="0.01" value={claimFormData.chargeAmount} onChange={(e) => setClaimFormData({...claimFormData, chargeAmount: e.target.value})} />
-            </div>
-            <div>
-              <Label>Insurance Reimbursement</Label>
-              <Input type="number" step="0.01" value={claimFormData.insuranceReimbursement} onChange={(e) => setClaimFormData({...claimFormData, insuranceReimbursement: e.target.value})} />
-            </div>
-            <div>
-              <Label>Patient Amount Paid</Label>
-              <Input type="number" step="0.01" value={claimFormData.patientAmountPaid} onChange={(e) => setClaimFormData({...claimFormData, patientAmountPaid: e.target.value})} />
-            </div>
-            <div>
-              <Label>Patient Amount Due</Label>
-              <Input type="number" step="0.01" value={claimFormData.patientAmountDue} onChange={(e) => setClaimFormData({...claimFormData, patientAmountDue: e.target.value})} />
-            </div>
-            <div>
-              <Label>Insurance Billed</Label>
-              <Input value={claimFormData.insuranceBilled} onChange={(e) => setClaimFormData({...claimFormData, insuranceBilled: e.target.value})} />
-            </div>
-            <div>
-              <Label>Date Submitted</Label>
-              <Input type="date" value={claimFormData.claimSubmittedDate} onChange={(e) => setClaimFormData({...claimFormData, claimSubmittedDate: e.target.value})} />
-            </div>
-            <div>
-              <Label>Claim #</Label>
-              <Input value={claimFormData.expireBcbsClaimNumber} onChange={(e) => setClaimFormData({...claimFormData, expireBcbsClaimNumber: e.target.value})} />
-            </div>
-            <div>
-              <Label>Claim Status</Label>
-              <Select value={claimFormData.claimStatus} onValueChange={(val) => setClaimFormData({...claimFormData, claimStatus: val})}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="submitted">Submitted</SelectItem>
-                  <SelectItem value="pending">Pending</SelectItem>
-                  <SelectItem value="approved">Approved</SelectItem>
-                  <SelectItem value="denied">Denied</SelectItem>
-                  <SelectItem value="pended">Pended</SelectItem>
-                  <SelectItem value="rejected">Rejected</SelectItem>
-                  <SelectItem value="resubmitted">Resubmitted</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label>LMN Documents Date Sent</Label>
-              <Input value={claimFormData.lmn ?? ''} onChange={(e) => setClaimFormData({...claimFormData, lmn: e.target.value})} placeholder="LMN documents date sent" />
-            </div>
-            <div>
-              <Label>Check/Payment Date</Label>
-              <Input type="date" value={claimFormData.checkDate} onChange={(e) => setClaimFormData({...claimFormData, checkDate: e.target.value})} />
-            </div>
-            <div>
-              <Label>Check/EFT #</Label>
-              <Input value={claimFormData.checkNumberVirtualCard} onChange={(e) => setClaimFormData({...claimFormData, checkNumberVirtualCard: e.target.value})} />
-            </div>
-            <div>
-              <Label>Appeal Date</Label>
-              <Input type="date" value={claimFormData.dateOfAppeal} onChange={(e) => setClaimFormData({...claimFormData, dateOfAppeal: e.target.value})} />
-            </div>
-            <div>
-              <Label>Appeal Ref #</Label>
-              <Input value={claimFormData.referenceNo} onChange={(e) => setClaimFormData({...claimFormData, referenceNo: e.target.value})} />
+
+            <Separator />
+
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-brand-blue">Status / Follow-Up</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <Label>Date Submitted</Label>
+                  <Input type="date" value={claimFormData.claimSubmittedDate} onChange={(e) => setClaimFormData({...claimFormData, claimSubmittedDate: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Claim #</Label>
+                  <Input value={claimFormData.expireBcbsClaimNumber} onChange={(e) => setClaimFormData({...claimFormData, expireBcbsClaimNumber: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Claim Status</Label>
+                  <Select value={claimFormData.claimStatus} onValueChange={(val) => setClaimFormData({...claimFormData, claimStatus: val})}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="submitted">Submitted</SelectItem>
+                      <SelectItem value="pending">Pending</SelectItem>
+                      <SelectItem value="approved">Approved</SelectItem>
+                      <SelectItem value="denied">Denied</SelectItem>
+                      <SelectItem value="pended">Pended</SelectItem>
+                      <SelectItem value="rejected">Rejected</SelectItem>
+                      <SelectItem value="resubmitted">Resubmitted</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label>LMN Documents Date Sent</Label>
+                  <Input value={claimFormData.lmn ?? ''} onChange={(e) => setClaimFormData({...claimFormData, lmn: e.target.value})} placeholder="LMN documents date sent" />
+                </div>
+                <div>
+                  <Label>Appeal Date</Label>
+                  <Input type="date" value={claimFormData.dateOfAppeal} onChange={(e) => setClaimFormData({...claimFormData, dateOfAppeal: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Appeal Ref #</Label>
+                  <Input value={claimFormData.referenceNo} onChange={(e) => setClaimFormData({...claimFormData, referenceNo: e.target.value})} />
+                </div>
+              </div>
             </div>
           </div>
           <div className="flex gap-3 justify-end mt-6">
