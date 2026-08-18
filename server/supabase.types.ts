@@ -2,6 +2,9 @@
  * TypeScript types for the Supabase PostgreSQL schema.
  * Matches the tables created in the Supabase SQL Editor.
  * IDs are UUIDs (string), timestamps are ISO strings.
+ *
+ * Hand-maintained, not generated. The authoritative schema snapshot lives at
+ * references/local-setup-schema.sql — keep this file's shapes in sync with it.
  */
 
 export type UserRole = "user" | "admin";
@@ -85,6 +88,8 @@ export interface ClaimRecordRow {
   date_received: string | null;         // ISO date "YYYY-MM-DD"
   date_of_appeal: string | null;        // ISO date "YYYY-MM-DD"
   reference_no: string | null;
+  lmn: string | null;                   // letter of medical necessity note/reference
+  is_resolved: boolean;                 // staff has cleared this claim from the follow-up queue
   created_at: string;
   updated_at: string;
 }
@@ -143,6 +148,8 @@ export type InsertClaimRecord = {
   date_received?: string | null;
   date_of_appeal?: string | null;
   reference_no?: string | null;
+  lmn?: string | null;
+  is_resolved?: boolean;
 };
 
 export type UpdatePatient = Partial<InsertPatient>;

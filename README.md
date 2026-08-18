@@ -15,7 +15,13 @@ This template gives you a React 19 + Tailwind 4 + Express 4 + tRPC 11 stack with
 
 ## Build Loop (Four Touch Points)
 
-1. Update schema in `drizzle/schema.ts`, then run `pnpm db:push`.
+> **Note:** this app runs on Supabase PostgreSQL, not the Drizzle/MySQL setup this
+> template originally scaffolded with. Steps below reflect the actual schema
+> workflow — see `drizzle/LEGACY.md` for why `drizzle/` still exists.
+
+1. Update the schema by applying SQL in the Supabase SQL Editor, then update
+   `references/local-setup-schema.sql` (source of truth) and the matching
+   TypeScript shapes in `drizzle/schema.ts` and `server/supabase.types.ts` to match.
 2. Add database helpers in `server/db.ts` (return raw results).
 3. Add or extend procedures in `server/routers.ts`, then wire the UI with `trpc.*.useQuery/useMutation`.
 4. Build frontend experience according to `Frontend Workflow`
@@ -92,7 +98,8 @@ Files in `client/public` are available at the root of your site—reference them
 ## Environment Variables
 
 Available pre-defined system envs:
-- `DATABASE_URL`: MySQL/TiDB connection string
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`: Supabase PostgreSQL connection (see `server/supabase.ts`)
+- `DATABASE_URL`: unused at runtime — only referenced by the legacy MySQL `drizzle.config.ts`, see `drizzle/LEGACY.md`
 - `JWT_SECRET`: Session cookie signing secret
 - `VITE_APP_ID`: Manus OAuth application ID
 - `OAUTH_SERVER_URL`: Manus OAuth backend base URL
@@ -185,8 +192,9 @@ Bake motion taste in from the first line of code. Snappy, physically intuitive i
 
 ## Feature Checklist
 
-- [ ] Tables updated in `drizzle/schema.ts`, migrations pushed (`pnpm db:push`)
-- [ ] Query helper added in `server/db.ts` (returns raw Drizzle rows)
+- [ ] Schema applied in Supabase SQL Editor and mirrored in
+      `references/local-setup-schema.sql`, `drizzle/schema.ts`, `server/supabase.types.ts`
+- [ ] Query helper added in `server/db.ts` (returns raw Supabase rows)
 - [ ] Procedure created in `server/routers.ts` (choose `public` vs `protected`)
 - [ ] UI calls the procedure via `trpc.*.useQuery/useMutation`
 - [ ] Success + error paths verified in the browser
@@ -246,7 +254,7 @@ adminOnlyProcedure: protectedProcedure.use(({ ctx, next }) => {
 
 **Managing Admins**
 - To promote a user to admin, update the `role` field directly in the database via the system UI or SQL
-- If you need additional roles beyond `admin`/`user`, extend the enum in `drizzle/schema.ts` and push the migration
+- If you need additional roles beyond `admin`/`user`, extend the `role` CHECK constraint on `public.users` in the Supabase SQL Editor and update `references/local-setup-schema.sql`, `drizzle/schema.ts`, and `server/supabase.types.ts` to match
 
 ---
 
