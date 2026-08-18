@@ -3148,6 +3148,62 @@ var systemRouter = router({
 
 // server/routers.ts
 init_db();
+
+// server/_core/loginRateLimit.ts
+var WINDOW_MS = 15 * 60 * 1e3;
+var MAX_FAILED_ATTEMPTS = 5;
+var attemptsByKey = /* @__PURE__ */ new Map();
+var writesSinceSweep = 0;
+var SWEEP_EVERY_N_WRITES = 200;
+function sweepExpired(now) {
+  attemptsByKey.forEach((entry, key) => {
+    if (now - entry.windowStart > WINDOW_MS) {
+      attemptsByKey.delete(key);
+    }
+  });
+}
+function keyFor(normalizedUsername, ip) {
+  return `${normalizedUsername}|${ip}`;
+}
+function normalizeUsername(username) {
+  return username.trim().toLowerCase();
+}
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.length > 0) {
+    return forwarded.split(",")[0].trim();
+  }
+  if (Array.isArray(forwarded) && forwarded.length > 0) {
+    return forwarded[0].trim();
+  }
+  return req.socket?.remoteAddress ?? "unknown";
+}
+function isRateLimited(normalizedUsername, ip) {
+  const entry = attemptsByKey.get(keyFor(normalizedUsername, ip));
+  if (!entry) return false;
+  if (Date.now() - entry.windowStart > WINDOW_MS) return false;
+  return entry.count >= MAX_FAILED_ATTEMPTS;
+}
+function recordFailedAttempt(normalizedUsername, ip) {
+  const now = Date.now();
+  const key = keyFor(normalizedUsername, ip);
+  const entry = attemptsByKey.get(key);
+  if (!entry || now - entry.windowStart > WINDOW_MS) {
+    attemptsByKey.set(key, { count: 1, windowStart: now });
+  } else {
+    entry.count += 1;
+  }
+  writesSinceSweep += 1;
+  if (writesSinceSweep >= SWEEP_EVERY_N_WRITES) {
+    writesSinceSweep = 0;
+    sweepExpired(now);
+  }
+}
+function clearFailedAttempts(normalizedUsername, ip) {
+  attemptsByKey.delete(keyFor(normalizedUsername, ip));
+}
+
+// server/routers.ts
 var visitRecordInput = z2.object({
   sessionsAuthorized: z2.number().nullable().optional(),
   sessionsRemaining: z2.number().nullable().optional(),
@@ -3187,14 +3243,25 @@ var appRouter = router({
   // ── Clinic username/password login ────────────────────────────────────────────────────
   clinic: router({
     login: publicProcedure.input(z2.object({ username: z2.string().min(1), password: z2.string().min(1) })).mutation(async ({ ctx, input }) => {
+      const ip = getClientIp(ctx.req);
+      const rateLimitKey = normalizeUsername(input.username);
+      if (isRateLimited(rateLimitKey, ip)) {
+        throw new TRPCError3({
+          code: "TOO_MANY_REQUESTS",
+          message: "Too many login attempts. Please try again later."
+        });
+      }
       const clinicUser = await getClinicUserByUsername(input.username);
       if (!clinicUser) {
+        recordFailedAttempt(rateLimitKey, ip);
         throw new TRPCError3({ code: "UNAUTHORIZED", message: "Invalid username or password" });
       }
       const valid = await bcrypt.compare(input.password, clinicUser.passwordHash);
       if (!valid) {
+        recordFailedAttempt(rateLimitKey, ip);
         throw new TRPCError3({ code: "UNAUTHORIZED", message: "Invalid username or password" });
       }
+      clearFailedAttempts(rateLimitKey, ip);
       const syntheticOpenId = `clinic_${clinicUser.username}`;
       const token = await sdk.createSessionToken(syntheticOpenId, {
         name: clinicUser.username,
