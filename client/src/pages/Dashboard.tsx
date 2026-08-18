@@ -1757,6 +1757,18 @@ export default function Dashboard() {
                             </CardDescription>
                           </div>
                           <div className="flex items-center gap-2 flex-wrap justify-end">
+                            {/* Add Claim — opens the existing Add Claim dialog scoped to this period */}
+                            <Button
+                              size="sm"
+                              className="inline-flex items-center gap-2 h-9 px-3 rounded-lg bg-brand-blue hover:bg-brand-blue-dark text-white text-sm font-medium whitespace-nowrap"
+                              onClick={() => {
+                                setAddClaimPeriod(period);
+                                setShowAddClaimDialog(true);
+                              }}
+                            >
+                              <Plus className="h-4 w-4" />
+                              Add Claim
+                            </Button>
                             {/* Column visibility toggle */}
                             <Popover>
                               <PopoverTrigger asChild>
