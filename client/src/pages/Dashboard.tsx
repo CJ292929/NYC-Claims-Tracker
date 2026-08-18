@@ -5,8 +5,9 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Clock, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, LogOut, BellRing, ShieldAlert, ShieldCheck, AlertTriangle, XCircle, UserX, UserCheck, Eye, EyeOff, Columns3 } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, LogOut, BellRing, ShieldAlert, ShieldCheck, AlertTriangle, XCircle, UserX, UserCheck, Eye, EyeOff, Columns3, Search, X, SlidersHorizontal } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetFooter, SheetTrigger } from '@/components/ui/sheet';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -80,6 +81,18 @@ const insuranceList = [
   'Progressive No Fault',
   'United Healthcare',
   'United Healthcare Medicare',
+];
+
+const CLAIM_STATUS_FILTERS = [
+  { value: 'all', label: 'All Claims', color: 'bg-gray-100 text-gray-800' },
+  { value: 'submitted', label: 'Submitted', color: 'bg-blue-100 text-blue-800' },
+  { value: 'approved', label: 'Approved', color: 'bg-green-100 text-green-800' },
+  { value: 'pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800' },
+  { value: 'denied', label: 'Denied', color: 'bg-red-100 text-red-800' },
+  { value: 'pended', label: 'Pended', color: 'bg-orange-100 text-orange-800' },
+  { value: 'rejected', label: 'Rejected', color: 'bg-gray-900 text-white' },
+  { value: 'resubmitted', label: 'Resubmitted', color: 'bg-violet-100 text-violet-800' },
+  { value: 'none', label: 'No Status', color: 'bg-gray-50 text-gray-500' },
 ];
 
 /** Format a Date or date-string for display */
@@ -759,6 +772,8 @@ export default function Dashboard() {
   const [dischargeReason, setDischargeReason] = useState('');
   // Claims status filter for patient list
   const [selectedClaimsFilter, setSelectedClaimsFilter] = useState<string>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showMobileFilters, setShowMobileFilters] = useState(false);
   // Inline cell editing state for Claims Tracker
   const [editingCell, setEditingCell] = useState<{ claimId: string; field: string } | null>(null);
   const [editingValue, setEditingValue] = useState<string>('');
@@ -1171,8 +1186,66 @@ export default function Dashboard() {
       const matchingIds = new Set((patientIdsByStatus as Record<string, string[]>)[selectedClaimsFilter] ?? []);
       result = result.filter(p => matchingIds.has(p.id));
     }
+    const query = searchQuery.trim().toLowerCase();
+    if (query) {
+      result = result.filter(p => p.name.toLowerCase().includes(query));
+    }
     return result;
-  }, [activePatients, selectedInsurance, selectedClaimsFilter, patientIdsByStatus]);
+  }, [activePatients, selectedInsurance, selectedClaimsFilter, patientIdsByStatus, searchQuery]);
+
+  const activeFilterCount = (selectedInsurance ? 1 : 0) + (selectedClaimsFilter && selectedClaimsFilter !== 'all' ? 1 : 0);
+
+  const handleClearFilters = () => {
+    setSelectedInsurance('');
+    setSelectedClaimsFilter('all');
+  };
+
+  // Shared between the desktop sidebar and the mobile Filters sheet so the two never drift.
+  const renderInsuranceFilterButtons = () => insuranceList.map(insurance => {
+    const count = activePatients.filter(p => p.insurance === insurance).length;
+    const isSelected = selectedInsurance === insurance;
+    return (
+      <button
+        key={insurance}
+        onClick={() => {
+          setSelectedInsurance(insurance);
+          // Switching insurance while viewing a patient on a
+          // different one would leave the detail view showing
+          // someone outside the new filter — back out to the list.
+          if (selectedPatient && selectedPatient.insurance !== insurance) {
+            setShowDetailView(false);
+          }
+        }}
+        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md cursor-pointer transition font-semibold text-sm ${
+          isSelected ? 'bg-brand-gold text-white' : 'text-brand-blue hover:bg-brand-cream'
+        }`}
+      >
+        <span className="truncate">{insurance}</span>
+        <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
+          isSelected ? 'bg-white/25 text-white' : 'bg-gray-100 text-gray-700'
+        }`}>{count}</span>
+      </button>
+    );
+  });
+
+  const renderClaimsStatusFilterButtons = () => CLAIM_STATUS_FILTERS.map(({ value, label, color }) => {
+    const count = claimStatusCounts[value as keyof typeof claimStatusCounts] ?? 0;
+    const isSelected = selectedClaimsFilter === value;
+    return (
+      <button
+        key={value}
+        onClick={() => setSelectedClaimsFilter(value)}
+        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md cursor-pointer transition text-sm ${
+          isSelected ? 'bg-brand-gold text-white font-semibold' : 'text-brand-blue hover:bg-brand-cream'
+        }`}
+      >
+        <span className="truncate">{label}</span>
+        <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
+          isSelected ? 'bg-white/25 text-white' : color
+        }`}>{count}</span>
+      </button>
+    );
+  });
 
   const completedPatients = activePatients.filter(p => completedSet.has(p.id));
 
@@ -1892,7 +1965,7 @@ export default function Dashboard() {
           )}
 
           {/* Summary cards */}
-          <div className="grid grid-cols-3 gap-4 mb-8">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
             {[
               { label: 'Authorized', value: activeMetrics.totalAuthorized, color: 'text-[#1E3A5F]' },
               { label: 'Completed', value: activeMetrics.completed, color: 'text-[#E8A93C]' },
@@ -3117,92 +3190,62 @@ export default function Dashboard() {
           onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }}
         />
 
-        {/* ─── Active insurance filter chip ──────────────────────────────────── */}
-        {selectedInsurance && (
-          <div className="mb-4 flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-brand-gold/15 text-brand-blue border border-brand-gold/30">
-              Filtered by: {selectedInsurance}
+        {/* ─── Active filter chips ───────────────────────────────────────────── */}
+        {activeFilterCount > 0 && (
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            {selectedInsurance && (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-brand-gold/15 text-brand-blue border border-brand-gold/30">
+                Filtered by: {selectedInsurance}
+                <button
+                  onClick={() => setSelectedInsurance('')}
+                  aria-label="Clear insurance filter"
+                  className="ml-1 text-brand-blue/60 hover:text-brand-blue"
+                >
+                  ×
+                </button>
+              </span>
+            )}
+            {selectedClaimsFilter && selectedClaimsFilter !== 'all' && (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-brand-gold/15 text-brand-blue border border-brand-gold/30">
+                Status: {CLAIM_STATUS_FILTERS.find(f => f.value === selectedClaimsFilter)?.label ?? selectedClaimsFilter}
+                <button
+                  onClick={() => setSelectedClaimsFilter('all')}
+                  aria-label="Clear claims status filter"
+                  className="ml-1 text-brand-blue/60 hover:text-brand-blue"
+                >
+                  ×
+                </button>
+              </span>
+            )}
+            {activeFilterCount > 1 && (
               <button
-                onClick={() => setSelectedInsurance('')}
-                aria-label="Clear insurance filter"
-                className="ml-1 text-brand-blue/60 hover:text-brand-blue"
+                onClick={handleClearFilters}
+                className="text-xs font-semibold text-brand-blue/70 hover:text-brand-blue underline"
               >
-                ×
+                Clear Filters
               </button>
-            </span>
+            )}
           </div>
         )}
 
         {/* Main Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-6 gap-6">
-          {/* Insurance Filter Sidebar */}
-          <div className="lg:col-span-1">
+          {/* Insurance Filter Sidebar — desktop only; mobile uses the compact Filters sheet below */}
+          <div className="hidden lg:block lg:col-span-1">
             <div className="bg-white rounded-xl shadow-sm p-4 max-h-[600px] overflow-y-auto">
               <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-[#F0E9DC]">Insurance</h3>
               <div className="space-y-1">
-                {insuranceList.map(insurance => {
-                  const count = activePatients.filter(p => p.insurance === insurance).length;
-                  const isSelected = selectedInsurance === insurance;
-                  return (
-                    <button
-                      key={insurance}
-                      onClick={() => {
-                        setSelectedInsurance(insurance);
-                        // Switching insurance while viewing a patient on a
-                        // different one would leave the detail view showing
-                        // someone outside the new filter — back out to the list.
-                        if (selectedPatient && selectedPatient.insurance !== insurance) {
-                          setShowDetailView(false);
-                        }
-                      }}
-                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md cursor-pointer transition font-semibold text-sm ${
-                        isSelected ? 'bg-brand-gold text-white' : 'text-brand-blue hover:bg-brand-cream'
-                      }`}
-                    >
-                      <span className="truncate">{insurance}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
-                        isSelected ? 'bg-white/25 text-white' : 'bg-gray-100 text-gray-700'
-                      }`}>{count}</span>
-                    </button>
-                  );
-                })}
+                {renderInsuranceFilterButtons()}
               </div>
             </div>
           </div>
 
-          {/* Claims Status Filter */}
-          <div className="lg:col-span-1">
+          {/* Claims Status Filter — desktop only; mobile uses the compact Filters sheet below */}
+          <div className="hidden lg:block lg:col-span-1">
             <div className="bg-white rounded-xl shadow-sm p-4 max-h-[600px] overflow-y-auto">
               <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-[#F0E9DC]">Claims Status</h3>
               <div className="space-y-1">
-                {[
-                  { value: 'all', label: 'All Claims', color: 'bg-gray-100 text-gray-800' },
-                  { value: 'submitted', label: 'Submitted', color: 'bg-blue-100 text-blue-800' },
-                  { value: 'approved', label: 'Approved', color: 'bg-green-100 text-green-800' },
-                  { value: 'pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800' },
-                  { value: 'denied', label: 'Denied', color: 'bg-red-100 text-red-800' },
-                  { value: 'pended', label: 'Pended', color: 'bg-orange-100 text-orange-800' },
-                  { value: 'rejected', label: 'Rejected', color: 'bg-gray-900 text-white' },
-                  { value: 'resubmitted', label: 'Resubmitted', color: 'bg-violet-100 text-violet-800' },
-                  { value: 'none', label: 'No Status', color: 'bg-gray-50 text-gray-500' },
-                ].map(({ value, label, color }) => {
-                  const count = claimStatusCounts[value as keyof typeof claimStatusCounts] ?? 0;
-                  const isSelected = selectedClaimsFilter === value;
-                  return (
-                    <button
-                      key={value}
-                      onClick={() => setSelectedClaimsFilter(value)}
-                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md cursor-pointer transition text-sm ${
-                        isSelected ? 'bg-brand-gold text-white font-semibold' : 'text-brand-blue hover:bg-brand-cream'
-                      }`}
-                    >
-                      <span className="truncate">{label}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
-                        isSelected ? 'bg-white/25 text-white' : color
-                      }`}>{count}</span>
-                    </button>
-                  );
-                })}
+                {renderClaimsStatusFilterButtons()}
               </div>
             </div>
           </div>
@@ -3212,6 +3255,63 @@ export default function Dashboard() {
             <div className="bg-white rounded-xl shadow-sm p-4">
               <h3 className="text-lg font-serif font-bold text-brand-blue mb-1">Patients</h3>
               <p className="text-xs text-[#6B7280] mb-4">{filteredPatients.length} in {selectedInsurance || 'all insurances'}</p>
+
+              {/* Search + mobile filters control */}
+              <div className="mb-4 space-y-2">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" aria-hidden="true" />
+                  <Input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search patients..."
+                    aria-label="Search patients by name"
+                    className="pl-9 pr-9"
+                  />
+                  {searchQuery !== '' && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery('')}
+                      aria-label="Clear search"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="lg:hidden">
+                  <Sheet open={showMobileFilters} onOpenChange={setShowMobileFilters}>
+                    <SheetTrigger asChild>
+                      <Button variant="outline" size="sm" className="gap-1.5">
+                        <SlidersHorizontal className="w-3.5 h-3.5" />
+                        Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+                      </Button>
+                    </SheetTrigger>
+                    <SheetContent side="bottom" className="max-h-[80vh] overflow-y-auto">
+                      <SheetHeader>
+                        <SheetTitle>Filters</SheetTitle>
+                      </SheetHeader>
+                      <div className="px-4 pb-4 space-y-6">
+                        <div>
+                          <h4 className="text-sm font-semibold text-brand-blue mb-2">Insurance</h4>
+                          <div className="space-y-1">{renderInsuranceFilterButtons()}</div>
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-semibold text-brand-blue mb-2">Claims Status</h4>
+                          <div className="space-y-1">{renderClaimsStatusFilterButtons()}</div>
+                        </div>
+                      </div>
+                      <SheetFooter>
+                        <Button variant="outline" onClick={handleClearFilters} disabled={activeFilterCount === 0}>
+                          Clear Filters
+                        </Button>
+                      </SheetFooter>
+                    </SheetContent>
+                  </Sheet>
+                </div>
+              </div>
+
               <div className="space-y-1 max-h-96 overflow-y-auto">
                 {filteredPatients.length > 0 ? filteredPatients.map(patient => {
                     const isActive = activePatient?.id === patient.id;
@@ -3265,7 +3365,9 @@ export default function Dashboard() {
                       </div>
                     );
                   }) : (
-                    <div className="p-4 text-center text-[#6B7280] text-sm">No patients for this insurance</div>
+                    <div className="p-4 text-center text-[#6B7280] text-sm">
+                      {searchQuery.trim() ? 'No patients match your search.' : 'No patients for this insurance'}
+                    </div>
                   )}
               </div>
             </div>
@@ -3393,7 +3495,7 @@ export default function Dashboard() {
                     </div>
                   </CardHeader>
                   <CardContent>
-                    <div className="grid grid-cols-3 gap-4 mt-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-2">
                       <div className="p-4 bg-brand-cream/40 rounded-lg text-center">
                         <p className="text-xs text-gray-600 uppercase tracking-wide mb-1">Authorized Sessions</p>
                         <p className="text-3xl font-bold text-brand-gold">{activeMetrics.totalAuthorized}</p>
