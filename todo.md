@@ -1,0 +1,187 @@
+# Clinic Dashboard TODO
+
+- [x] Initialize project with full-stack template (db, server, user)
+- [x] Design and build clinic authorization dashboard UI (Navy/Gold theme)
+- [x] Patient list with insurance filter sidebar
+- [x] Visit records table with auth status dropdown
+- [x] Session progress line chart
+- [x] Clinic overview pie chart
+- [x] KPI cards (total patients, authorized sessions, remaining, utilization)
+- [x] Add patient dialog
+- [x] Log session dialog
+- [x] Bulk CSV upload with template download
+- [x] Authorization alert banner (patients with ≤3 sessions remaining)
+- [x] Create database schema: patients and visit_records tables
+- [x] Migrate all data to MySQL (patients + visit_records tables)
+- [x] Build tRPC backend procedures: patients.list, patients.create, patients.update, patients.delete
+- [x] Build tRPC backend procedures: visits.listByPatient, visits.create, visits.update, visits.bulkCreate
+- [x] Rewrite Dashboard.tsx to load all data from database via tRPC
+- [x] Make "Date ASH Submitted" column inline-editable with native date picker (click calendar icon → date input → Save/Cancel)
+- [x] Auth status dropdown persists to database on change
+- [x] Seed existing patients.json data into database (Khim Tan, Thomas Heck)
+- [x] Write vitest tests for parseDate, toInputDate, authStatus mapping, patient metrics
+- [x] All 18 tests passing
+- [x] Bug fix: Authorized sessions entered when adding a patient are not saved — shows 0 in visit records and causes remaining to show -1
+- [x] Add Authorization Date field to the Add Patient dialog
+- [x] 21 vitest tests passing
+- [x] Add Delete Patient button with confirmation dialog to patient list sidebar (trash icon on hover, AlertDialog confirmation, cascades to visit records)
+- [x] Add clinic_users table to schema with username/password (bcrypt hashed)
+- [x] Add login/logout tRPC procedures (publicProcedure for login, protectedProcedure for logout)
+- [x] Seed the clinic_users table with jeromerivera123 / nychomerehab
+- [x] Build Login page UI (username + password form, navy/gold theme)
+- [x] Protect Dashboard route — redirect to /login if not authenticated
+- [x] Wire login form to backend and store session cookie on success
+- [x] Add Authorization Alert panel on dashboard home: highlight patients with sessions remaining = 0 or auth status = pending/denied, sorted by urgency (exhausted > critical > warning > pending)
+- [x] Add "Mark as Requested" button on each alert card: sets authStatus to "pending" and dateAshSubmitted to today, then refreshes the alert panel
+- [x] Add "Approved" button on pending alert cards that opens a New Authorization form (sessions count + auth date)
+- [x] Backend: approveAuthorization procedure — marks current visit row as approved, creates new batch of empty visit records for the new auth period
+- [x] New batch uses sessionsAuthorized and sessionsRemaining from the form; each row starts empty (no date of service) ready for staff to fill in
+- [x] Fix new authorization batch: start session numbering from 1 (new period), not sequential from last session
+- [x] Add authPeriod field to visit_records to distinguish authorization periods per patient
+- [x] Add Completed Sessions section in patient list sidebar: auto-groups patients with 0 remaining and all sessions have a date of service
+- [x] Restructure detail view: each auth period is a separate standalone card (own header, own table, own Log Session button) — not mixed in one table
+- [x] Fix active period logic: KPI cards and Log Session button should reflect the OLDEST auth period that still has sessions remaining (not always the newest period)
+- [x] Fix handleLogSession: when logging a session, target the active period (oldest with remaining > 0) not the latest period
+- [x] Add authPeriod to visits.create router input so frontend can target the correct period
+- [x] Fix math accuracy: Remaining always computed as Authorized - Completed (never from stored sessionsRemaining which can be stale/corrupted); active period detection also uses this formula
+- [x] Fix Authorization Alert: patient disappears from alert panel after approval — backend now uses Authorized-Completed math per period and urgency only triggers when genuinely low (>50% used), so a fresh 5-session authorization shows as 'ok' and is hidden from the panel
+- [x] Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY as project secrets
+- [x] Install @supabase/supabase-js package
+- [x] Create server/supabase.ts client singleton
+- [x] Rewrite server/db.ts: replace all Drizzle/MySQL queries with Supabase client calls
+- [x] Update drizzle/schema.ts types to use string UUIDs instead of numeric IDs
+- [x] Update routers.ts: change all z.number() id inputs to z.string().uuid()
+- [x] Update Dashboard.tsx: change all numeric id references to string UUIDs
+- [x] Run TypeScript check (0 errors) and tests (21 passing) after migration
+- [x] Verify no hardcoded Supabase secrets in source code (.project-config.json already in .gitignore)
+- [x] Create vercel.json with build config, Node.js 20.x runtime, 30s timeout, and rewrite rules
+- [x] Create api/server.ts Vercel serverless function entry point wrapping the Express app
+- [x] Update package.json build script to also compile api/server.ts for Vercel
+- [x] Add api/server.js to .gitignore (build artifact)
+- [x] Write VERCEL_DEPLOY.md with full step-by-step deployment instructions
+- [x] Add Insurance Company dropdown to "New Authorization Approved" dialog so staff can change insurance when creating a new period
+- [x] Update approveAndCreateNewBatch in db.ts to accept optional new insurance and update patient record if changed
+- [x] Update visits.approve router to pass insurance through
+- [x] Store insurance company per authorization period in visit_records (add insurance_company column or store on first row of each period)
+- [x] Display insurance company name in each Authorization Period card header (e.g. "Authorization Period 4 — 5 Sessions | Aetna")
+- [x] Add auth_valid_until column to patients table in DB
+- [x] Update drizzle schema and supabase types for auth_valid_until
+- [x] Update createPatient and updatePatient procedures to accept auth_valid_until
+- [x] Update getAuthAlertSummaries to return auth_valid_until per patient
+- [x] Add "Authorization Valid Until" date field to Add New Patient dialog (optional)
+- [x] Add "Authorization Valid Until" date field to New Authorization Approved dialog (optional)
+- [x] Show expiry alert banner on dashboard for patients whose auth expires within 7 days
+- [x] Add is_active column to patients table (default true)
+- [x] Update schema/types for is_active field
+- [x] Add patients.setActive tRPC procedure to toggle is_active
+- [x] Filter inactive patients out of the main active patient list
+- [x] Add Active/Inactive toggle button on patient detail page (top-right)
+- [x] Add Discharged Patients tab on dashboard showing all inactive patients
+- [x] Discharged patients show full detail view but with Reactivate button
+- [x] Add discharge_date and discharge_reason columns to patients table in DB
+- [x] Update schema/types for discharge_date and discharge_reason
+- [x] Update setPatientActive procedure to accept and store discharge_date and discharge_reason
+- [x] Show discharge form dialog (Date of Discharge + Reason) when toggling patient to Inactive
+- [x] Reposition Discharged Patients folder inside the patient list column (not a separate grid column)
+- [x] Make discharged patient cards clickable to view full records with discharge info
+- [x] Show discharge date and reason in the patient detail view for discharged patients
+- [x] Add claims_status column to patients table (enum: submitted, approved, pending, denied)
+- [x] Update schema/types for claims_status field
+- [x] Add claims_status to patient create/update procedures
+- [x] Add Claims Status dropdown column to patient records table in dashboard
+- [x] Make Claims Status editable inline with dropdown selector
+- [x] Move Claims Status tracker from patient list sidebar to a dedicated card below Authorization Period cards
+- [x] Create Claims Status tracking card UI with header showing period info and status dropdown
+- [x] Update Dashboard detail view to display Claims Status card below each Authorization Period card
+- [x] Ensure Claims Status card shows current status with color-coding (green/approved, red/denied, yellow/pending, blue/submitted)
+- [x] Add status info grid showing Insurance and Period for each authorization period
+- [x] Add status notes section with contextual help text based on current status
+- [x] Add ClaimRecordRow type to database schema with all required fields
+- [x] Create InsertClaimRecord and UpdateClaimRecord types for claims CRUD
+- [x] Redesign Claims Tracker card to display comprehensive claim details table with all required columns
+- [x] Create tRPC procedures for claims CRUD operations (create, read, update, delete claims records)
+- [x] Add database helper functions for claims CRUD in server/db.ts
+- [x] Wire claims_records table into Database interface
+- [x] Connect Claims Tracker table to tRPC procedures to load and display real claim records
+- [x] Fix missing patient variable and add key props to Claims Tracker card
+- [x] Add inline editing capability for claim fields in the table (Add Claim dialog with all 22 fields)
+- [x] Add "Add New Claim" button to create new claim records for each authorization period (button opens dialog)
+- [x] Implement claims_records table in Supabase database (SQL script provided, ready for manual execution)
+- [x] Create ClaimRecord types and database helpers for CRUD operations
+- [x] Create tRPC procedures for claims management (create, read, update, delete)
+- [x] Create integration tests for end-to-end claims flows
+- [x] Create comprehensive setup documentation (CLAIMS-TRACKER-SETUP.md)
+- [x] Create claims_records table in Supabase (verified via 5 integration tests passing)
+- [x] Wire Save Claim Record button to claims.create mutation (with loading state and form reset)
+- [x] Add claims status filter to dashboard home patient list (All/Submitted/Approved/Pending/Denied/No Status)
+- [x] Add claims status badge to patient sidebar cards (colored pill showing Submitted/Approved/Pending/Denied)
+- [x] Implement inline cell editing for Claims Tracker table rows (click any cell to edit in place, save on blur/Enter)
+- [x] Wire inline edit to claims.update tRPC mutation to persist changes
+- [x] Add column visibility toggle to Claims Tracker table (Columns button with popover checklist)
+- [x] Persist hidden columns in localStorage so settings survive page refresh
+- [x] Show count badge on Columns button when columns are hidden
+- [x] Show all / reset button to restore all columns at once
+- [x] Add tRPC procedure to fetch all claims with $0 or null insurance reimbursement
+- [x] Add alert panel on dashboard home showing patients with unpaid claims needing follow-up
+- [x] Show patient name, insurance, claim date, charge amount, and claim status in the alert panel
+- [x] Clicking an alert card navigates directly to the patient's detail view
+- [x] Added "Pended" as new claim status option (purple badge) across all dropdowns, filters, type definitions, and Add Claim dialog
+- [x] Updated claims status color coding: Rejected=Black, Denied=Red, Pending=Yellow, Pended=Orange, Approved=Green, Resubmitted=Violet; added Rejected and Resubmitted as new status options across all dropdowns, filters, badges, and type definitions
+- [x] Add PDF/CSV upload button to each Authorization Period Claims Tracker card
+- [x] Backend: file upload endpoint that accepts PDF and CSV files (multipart/form-data)
+- [x] Backend: PDF text extraction using pdf-parse, CSV parsing using papaparse
+- [x] Backend: AI procedure that maps extracted text to claim tracker columns using LLM
+- [x] Frontend: Upload PDF/CSV button in Claims Tracker card header
+- [x] Frontend: Preview dialog showing AI-extracted claim rows before saving
+- [x] Frontend: Staff can edit any field in the preview before confirming
+- [x] Frontend: Save confirmed rows as new claim records for the patient/auth period
+- [x] Add Resolved button to each follow-up alert card — clicking it marks the claim as resolved and removes it from the alert panel
+- [x] Build insurance template recognition engine — auto-detect insurer from PDF/file content and apply pre-mapped field templates
+- [x] Meritain Health EOB template: map Service Date, CPT Code, Total Charge, Not Payment Amount, Claim # to Claims Tracker columns
+- [x] Integrate template engine into upload endpoint — use template parser first, fall back to AI extraction if no template matches
+- [x] Show detected insurer name in the preview dialog header so staff can confirm the correct template was used
+- [x] Keep individual CPT code rows with correct date extraction (multiple CPT codes can share same date)
+- [x] Hide duplicate dates in claims table — show date only once for first row of each date group
+- [x] Redesign upload preview: group CPT sub-rows by date, show date once, count = unique dates not CPT rows
+- [x] Update save logic: save one claim per date with all CPT codes comma-separated in cpt_codes field
+- [x] Update Meritain parser to detect patient name sections and group claims per patient
+- [x] Add server endpoint to match extracted patient names against dashboard patients and bulk-import claims
+- [x] Build Bulk Upload UI with per-patient preview showing matched/unmatched status and import results
+- [x] Fix bulk upload dialog header to show "Bulk EOB Import — Multiple Patients" in multi-patient mode
+- [x] Fix dialog onOpenChange to clear eobPatientGroups and bulkImportResults when dialog closes
+- [x] Split Claims Tracker upload into two buttons: "Reimbursement Insurance Upload" and "CMS1500 Upload"
+- [x] Build CMS1500 PDF parser: extract Date of Service, Place of Service, Diagnosis Codes, Units Billed, Modifier, Patient Name
+- [x] Update upload endpoint to accept uploadType param (reimbursement | cms1500) and route to correct parser
+- [x] Reimbursement upload fills: CPT Code, Charge Amount, Insurance Reimbursement, Patient Amount Paid, Claim #
+- [x] CMS1500 upload fills: Date of Service, Place of Service, Diagnosis Codes, Units Billed, Modifier
+- [x] Correct Reimbursement Insurance field mapping: Insurance Reimbursement, Pt Paid, Pt Due, Claim #, Check/Payment Date, Check/EFT
+- [x] Correct CMS1500 field mapping: Date of Service, Place of Service, Diagnosis Codes, Units Billed, Modifier, CPT Code, Units, Charge, Date Submitted
+- [x] Update Meritain EOB parser to extract Check/Payment Date and Check/EFT number
+- [x] Update CMS1500 parser to extract Date Submitted from the form
+- [x] Update bulkImportFromEOB save procedure to map fields correctly per upload type
+- [x] Fix Meritain EOB parser broken state: switch from pdfjs to pdftotext plain mode, rewrite serviceLinePattern regex for multi-line format, fix patient name and group name extraction regexes
+- [x] Extract patientAmountDue from Meritain EOB: now captures all 12 columns (co-ins, co-pay, deductible, non-cov) and sums them; null when all zero (no patient obligation)
+- [x] Implement fuzzy patient name matching: EOB "ALLISON AUYEUNG" matches dashboard "AUYEUNG, ALLISON" and other format variations (Last First, First Last, with/without comma) — server/nameMatch.ts + client/src/lib/nameMatch.ts, 21 tests passing
+- [x] Fix cross-contamination bug: added "Claim Total:" boundary truncation to section isolation in parseMeritainEOBWithGroups
+- [x] Reimbursement upload: now only saves Insurance Reimbursement, Pt Paid, Pt Due, Claim #, Check/Payment Date, Check/EFT (+ DOS for identification)
+- [x] CMS1500 upload: now only saves Date of Service, Place of Service, Diagnosis Codes, Units Billed, Modifier, CPT Code, Units, Charge, Date Submitted
+- [x] Added uploadType param to bulkImportFromEOB router and pass claimUploadType from frontend
+- [x] Fix split-row display: replaced createClaimRecord with upsertClaimRecord in bulkImportFromEOB — matches by (patient_id, auth_period, date_of_service, cpt_codes) and patches only non-null fields, so CMS1500 and Reimbursement uploads merge into the same row
+- [x] Fix claims table empty after bulk import: auto-select first imported patient after import completes so UI shows their claims (data was saved but table queried wrong patient)
+- [x] Fix Meritain parser: Claim # (oaClaimNumber) and Check/Payment Date were already extracted correctly — issue was tracker Claim # column only showed expireBcbsClaimNumber; fixed to show oa_claim_number as fallback
+- [x] Fix tracker Claim # column: now shows expire_bcbs_claim_number || oa_claim_number (whichever is available)
+- [x] Fix tracker display: patientAmountDue/Paid now return 0 (not null) from parser; tracker already renders 0 as $0.00
+- [x] Fix Check/Payment Date not saved to DB after Reimbursement upload — traced full pipeline (parser, Zod, router, upsertClaimRecord all correct); existing records had null from pre-fix imports; directly patched ALLISON's 4 claims in DB with check_date=2026-04-24; future uploads save correctly via upsert
+- [x] Claims Tracker: 1 CPT code per row — save one DB row per CPT code (not consolidated); show Date of Service only on first row of each date group; each CPT row has its own Charge, Ins. Reimb., Units, Modifier, Diagnosis fields
+- [x] Fix duplicate rows: CMS1500 upload after Reimbursement EOB creates new rows instead of merging — added claims.upsert procedure that wraps upsertClaimRecord; updated handleSaveExtractedClaims to use upsert instead of create
+- [x] Fix Meritain EOB parser regex to handle flexible whitespace (single vs double newlines between service line fields) — changed from exact `\n\n` pattern to `\s+` to match actual PDF text extraction format
+- [x] Implement hybrid PDF extraction: templates first, then OpenAI fallback for unknown formats
+- [x] Create openaiExtractor.ts with extractClaimsWithOpenAI and detectInsuranceType functions
+- [x] Integrate OpenAI extraction into claimUpload.ts endpoint (Step 2 fallback)
+- [x] Add optional document type detection (auto-detect CMS1500 vs EOB)
+- [x] Test hybrid extraction with Meritain EOB (uses template) and unstructured claim PDF (uses OpenAI)
+- [x] Verified: OpenAI successfully extracts claims from unstructured PDFs with proper field mapping
+- [x] Fix OpenAI extraction to detect and return patient names from PDFs
+- [x] Update openaiExtractor.ts to require patientName in JSON schema with detailed prompts
+- [x] Add patientGroups to OpenAI response for single-patient mode support
+- [x] Tested: OpenAI now extracts patient names and creates patientGroups for matching
