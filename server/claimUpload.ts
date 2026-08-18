@@ -7,7 +7,7 @@
  *
  * Returns an array of partial ClaimRecord objects for staff to review before saving.
  */
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import multer from 'multer';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
@@ -17,8 +17,25 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { invokeLLM } from './_core/llm';
 import { ENV } from './_core/env';
+import { sdk } from './_core/sdk';
 import { tryTemplateExtraction, parseCMS1500, type ExtractedClaim, type PatientClaimGroup } from './insuranceTemplates';
 import { extractClaimsWithAI, detectInsuranceType, type ExtractionSource } from './aiClaimExtractor';
+
+// Reuses the same session-cookie verification tRPC's createContext relies on
+// (server/_core/context.ts -> sdk.authenticateRequest), so this raw Express
+// route enforces the identical session/auth rules as the rest of the app
+// instead of a parallel implementation. Runs before multer so an
+// unauthenticated request never reaches file parsing, template extraction,
+// or any AI/LLM call.
+async function requireAuthenticatedUser(req: Request, res: Response, next: NextFunction) {
+  try {
+    await sdk.authenticateRequest(req);
+    next();
+  } catch {
+    // Never forward the underlying error (JWT/cookie details) to the client.
+    res.status(401).json({ error: 'Authentication required' });
+  }
+}
 
 // Fields the regex/template parsers are known to leave null for some document
 // layouts (Meritain EOBs never print these at all; CMS1500's layout-dependent
@@ -427,6 +444,7 @@ export function registerClaimUploadRoute(app: Express) {
 
   router.post(
     '/api/claims/upload-extract',
+    requireAuthenticatedUser,
     (req, res, next) => {
       upload.single('file')(req, res, (err) => {
         if (err instanceof multer.MulterError) {
