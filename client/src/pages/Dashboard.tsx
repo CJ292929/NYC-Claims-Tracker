@@ -2112,8 +2112,88 @@ export default function Dashboard() {
                         )}
                       </CardHeader>
                       <CardContent className="p-0">
-                        {/* Desktop table */}
-                        <div className="overflow-x-auto hidden md:block">
+                        {/* Mobile Visit Cards — below md */}
+                        <div className="md:hidden divide-y divide-gray-100 bg-white">
+                          {periodVisits.map((visit) => (
+                            <div key={visit.id} className="p-4 space-y-3">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-baseline gap-1.5">
+                                  <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Session</span>
+                                  <span className="font-semibold text-gray-700 text-base">
+                                    {visit.sessionNumber != null ? visit.sessionNumber : <span className="text-gray-300">—</span>}
+                                  </span>
+                                </div>
+                                <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
+                                <div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Date of Service</p>
+                                  <p className="text-brand-blue">{visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300">—</span>}</p>
+                                </div>
+                                <div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Auth Date</p>
+                                  <p className="text-brand-blue">{visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300">—</span>}</p>
+                                </div>
+                                <div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide"># Authorized</p>
+                                  <p className="font-semibold text-brand-blue text-base">{visit.sessionsAuthorized != null ? visit.sessionsAuthorized : <span className="text-gray-300">—</span>}</p>
+                                </div>
+                                <div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide"># Remaining</p>
+                                  <p className="font-bold text-brand-gold text-base">{visit.sessionsRemaining != null ? visit.sessionsRemaining : <span className="text-gray-300">—</span>}</p>
+                                </div>
+                              </div>
+
+                              <div>
+                                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">
+                                  Date ASH Submitted
+                                </p>
+                                {editingAshId === visit.id ? (
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <input
+                                      type="date"
+                                      value={editingAshValue}
+                                      onChange={e => setEditingAshValue(e.target.value)}
+                                      className="border border-brand-gold rounded-md px-2 py-2 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30 min-h-[40px]"
+                                      autoFocus
+                                    />
+                                    <Button
+                                      size="sm"
+                                      onClick={() => handleSaveAsh(visit.id)}
+                                      disabled={updateVisit.isPending}
+                                      className="h-auto min-h-[36px] text-green-600 hover:text-green-800 font-bold text-xs px-3 py-2 bg-green-50 hover:bg-green-100"
+                                    >
+                                      {updateVisit.isPending ? '…' : 'Save'}
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="secondary"
+                                      onClick={handleCancelAsh}
+                                      className="h-auto min-h-[36px] text-gray-500 hover:text-gray-700 font-bold text-xs px-3 py-2"
+                                    >
+                                      Cancel
+                                    </Button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => handleStartEditAsh(visit)}
+                                    className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue cursor-pointer transition-colors min-h-[40px]"
+                                    title="Click to edit Date ASH Submitted"
+                                    aria-label={visit.dateAshSubmitted ? `Edit Date ASH Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date ASH Submitted'}
+                                  >
+                                    <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
+                                    <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>
+                                      {visit.dateAshSubmitted ? formatDate(visit.dateAshSubmitted) : 'Click to set date'}
+                                    </span>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        {/* Desktop Visit Table — md and up */}
+                        <div className="hidden md:block overflow-x-auto">
                           <table className="w-full text-sm min-w-full">
                             <thead className="bg-brand-blue/95">
                               <tr>
@@ -2208,69 +2288,6 @@ export default function Dashboard() {
                       ))}
                             </tbody>
                           </table>
-                        </div>
-
-                        {/* Mobile stacked cards */}
-                        <div className="md:hidden divide-y divide-gray-100">
-                          {periodVisits.map((visit) => (
-                            <div key={visit.id} className="p-4 space-y-2.5">
-                              <div className="flex items-center justify-between">
-                                <span className="text-sm font-semibold text-brand-blue">
-                                  {visit.sessionNumber != null ? `Session #${visit.sessionNumber}` : 'Session'}
-                                </span>
-                                <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
-                              </div>
-                              <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
-                                <div>
-                                  <p className="text-xs text-muted-foreground">Auth Date</p>
-                                  <p className="text-brand-blue">{visit.dateOfService ? formatDate(visit.dateOfService) : '—'}</p>
-                                </div>
-                                <div>
-                                  <p className="text-xs text-muted-foreground"># Authorized / Remaining</p>
-                                  <p>
-                                    <span className="font-semibold text-brand-blue">{visit.sessionsAuthorized ?? '—'}</span>
-                                    {' / '}
-                                    <span className="font-bold text-brand-gold">{visit.sessionsRemaining ?? '—'}</span>
-                                  </p>
-                                </div>
-                                <div>
-                                  <p className="text-xs text-muted-foreground">Date of Service</p>
-                                  <p className="text-muted-foreground">{visit.dateOfService ? formatDate(visit.dateOfService) : '—'}</p>
-                                </div>
-                                <div>
-                                  <p className="text-xs text-muted-foreground">Date ASH Submitted</p>
-                                  {editingAshId === visit.id ? (
-                                    <div className="flex items-center gap-1.5 mt-0.5">
-                                      <input
-                                        type="date"
-                                        value={editingAshValue}
-                                        onChange={e => setEditingAshValue(e.target.value)}
-                                        className="border border-brand-gold rounded-md px-1.5 py-1 text-xs text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
-                                        autoFocus
-                                      />
-                                      <Button size="sm" onClick={() => handleSaveAsh(visit.id)} disabled={updateVisit.isPending} className="h-auto text-xs px-2 py-1 bg-green-50 text-green-700 hover:bg-green-100">
-                                        {updateVisit.isPending ? '…' : 'Save'}
-                                      </Button>
-                                      <Button size="sm" variant="secondary" onClick={handleCancelAsh} className="h-auto text-xs px-2 py-1">
-                                        Cancel
-                                      </Button>
-                                    </div>
-                                  ) : (
-                                    <button
-                                      onClick={() => handleStartEditAsh(visit)}
-                                      className="flex items-center gap-1.5 text-gray-400 hover:text-brand-blue"
-                                      aria-label={visit.dateAshSubmitted ? `Edit Date ASH Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date ASH Submitted'}
-                                    >
-                                      <Calendar className="w-3.5 h-3.5 text-brand-gold shrink-0" />
-                                      <span className={visit.dateAshSubmitted ? 'text-brand-blue' : 'italic'}>
-                                        {visit.dateAshSubmitted ? formatDate(visit.dateAshSubmitted) : 'Set date'}
-                                      </span>
-                                    </button>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-                          ))}
                         </div>
                       </CardContent>
                     </Card>
@@ -2428,7 +2445,7 @@ export default function Dashboard() {
                       <CardContent className="p-0">
                         {(() => {
                           const claims = claimsDataMap[period] ?? [];
-                          
+
                           if (!claims || claims.length === 0) {
                             return (
                               <div className="p-6 text-center text-sm text-muted-foreground bg-brand-cream/40">
@@ -2436,9 +2453,213 @@ export default function Dashboard() {
                               </div>
                             );
                           }
-                          
+
+                          // Shared edit-state helpers — used by both the desktop table cells
+                          // and the mobile cards below, so edit/mutation behavior stays identical.
+                          const isEditingField = (claimId: string, field: string) =>
+                            editingCell?.claimId === claimId && editingCell?.field === field;
+
+                          const startEditField = (claimId: string, field: string, rawValue: string) => {
+                            setEditingCell({ claimId, field });
+                            setEditingValue(rawValue);
+                          };
+
+                          const commitEditField = (claimId: string, field: string, isNumeric = false, isDate = false) => {
+                            if (!editingCell) return;
+                            const payload: Record<string, any> = { id: claimId };
+                            payload[field] = isNumeric
+                              ? (editingValue.trim() ? parseFloat(editingValue) : null)
+                              : (editingValue.trim() || null);
+                            updateClaim.mutate(payload as any);
+                          };
+
+                          const statusColors: Record<string, string> = {
+                            approved: 'bg-green-100 text-green-800',
+                            denied: 'bg-red-100 text-red-800',
+                            pending: 'bg-yellow-100 text-yellow-800',
+                            submitted: 'bg-blue-100 text-blue-800',
+                            pended: 'bg-orange-100 text-orange-800',
+                            rejected: 'bg-gray-900 text-white',
+                            resubmitted: 'bg-violet-100 text-violet-800',
+                          };
+
+                          const hide = (key: string) => hiddenClaimsColumns.has(key);
+
+                          const claimStatusOptions = [
+                            { value: 'submitted', label: 'Submitted' },
+                            { value: 'approved', label: 'Approved' },
+                            { value: 'pending', label: 'Pending' },
+                            { value: 'denied', label: 'Denied' },
+                            { value: 'pended', label: 'Pended' },
+                            { value: 'rejected', label: 'Rejected' },
+                            { value: 'resubmitted', label: 'Resubmitted' },
+                          ];
+
+                          const MobileEditableRow = ({ claimId, label, field, value, type = 'text', prefix = '', decimals = 2 }: {
+                            claimId: string; label: string; field: string; value: string | number | null; type?: 'text' | 'number' | 'date'; prefix?: string; decimals?: number;
+                          }) => {
+                            const editing = isEditingField(claimId, field);
+                            const numVal = type === 'number' && value != null ? parseFloat(value as string) : null;
+                            const rawDate = type === 'date' && value ? new Date(value as string).toISOString().split('T')[0] : '';
+                            const displayDate = type === 'date' && value ? new Date(value as string).toLocaleDateString() : null;
+                            const startVal = type === 'number'
+                              ? (numVal != null && !isNaN(numVal) ? numVal.toString() : '')
+                              : type === 'date' ? rawDate : ((value as string) ?? '');
+                            return (
+                              <div
+                                className="flex items-center justify-between gap-3 py-2.5 border-b border-black/5 last:border-0 min-h-[40px]"
+                                onClick={() => !editing && startEditField(claimId, field, startVal)}
+                              >
+                                <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide shrink-0">{label}</span>
+                                {editing ? (
+                                  <input
+                                    autoFocus
+                                    type={type}
+                                    step={type === 'number' ? (decimals === 0 ? '1' : '0.01') : undefined}
+                                    className="flex-1 min-w-0 text-sm border border-blue-400 rounded px-2 py-1.5 outline-none bg-white text-right"
+                                    value={editingValue}
+                                    onChange={e => setEditingValue(e.target.value)}
+                                    onBlur={() => commitEditField(claimId, field, type === 'number', type === 'date')}
+                                    onKeyDown={e => {
+                                      if (e.key === 'Enter') commitEditField(claimId, field, type === 'number', type === 'date');
+                                      if (e.key === 'Escape') setEditingCell(null);
+                                    }}
+                                    onClick={e => e.stopPropagation()}
+                                  />
+                                ) : (
+                                  <span className="text-sm text-right text-brand-blue truncate max-w-[60%]">
+                                    {type === 'number'
+                                      ? (numVal != null && !isNaN(numVal) ? `${prefix}${numVal.toFixed(decimals)}` : <span className="text-gray-300">—</span>)
+                                      : type === 'date'
+                                        ? (displayDate || <span className="text-gray-300">—</span>)
+                                        : (value || <span className="text-gray-300">—</span>)}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          };
+
                           return (
-                            <div className="overflow-x-auto">
+                            <>
+                            {/* Mobile Claim Cards — below md */}
+                            <div className="md:hidden divide-y divide-gray-200 bg-white">
+                              {claims.map((claim: any) => (
+                                <div key={claim.id} className="p-4 space-y-4">
+                                  {/* Header: Date of Service / claim identifier / status */}
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <p className="text-sm font-semibold text-brand-blue">
+                                        {claim.date_of_service ? new Date(claim.date_of_service).toLocaleDateString() : <span className="text-gray-300">No date</span>}
+                                      </p>
+                                      <p className="text-xs text-gray-500 mt-0.5 truncate">
+                                        {(claim.expire_bcbs_claim_number || claim.oa_claim_number)
+                                          ? `Claim #${claim.expire_bcbs_claim_number || claim.oa_claim_number}`
+                                          : claim.visit_number != null ? `Visit #${claim.visit_number}` : 'No claim ID'}
+                                      </p>
+                                    </div>
+                                    {!hide('claimStatus') && (
+                                      isEditingField(claim.id, 'claimStatus') ? (
+                                        <select
+                                          autoFocus
+                                          aria-label="Claim status"
+                                          className="text-xs border border-blue-400 rounded px-2 py-1.5 bg-white min-h-[36px] shrink-0"
+                                          value={editingValue}
+                                          onChange={e => {
+                                            setEditingValue(e.target.value);
+                                            updateClaim.mutate({ id: claim.id, claimStatus: e.target.value as any });
+                                          }}
+                                          onBlur={() => setEditingCell(null)}
+                                          onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') setEditingCell(null); }}
+                                        >
+                                          {claimStatusOptions.map(opt => (
+                                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                          ))}
+                                        </select>
+                                      ) : (
+                                        <button
+                                          onClick={() => startEditField(claim.id, 'claimStatus', claim.claim_status ?? 'submitted')}
+                                          aria-label="Edit claim status"
+                                          className="shrink-0 min-h-[36px] flex items-center"
+                                        >
+                                          <Badge className={statusColors[claim.claim_status] ?? 'bg-blue-100 text-blue-800'}>
+                                            {claim.claim_status ?? 'submitted'}
+                                          </Badge>
+                                        </button>
+                                      )
+                                    )}
+                                  </div>
+
+                                  {/* Billing */}
+                                  {(!hide('chargeAmount') || !hide('insuranceReimbursement') || !hide('patientAmountPaid') || !hide('patientAmountDue') || !hide('insuranceBilled')) && (
+                                    <div>
+                                      <p className="text-[10px] font-bold text-brand-gold uppercase tracking-wider mb-1">Billing</p>
+                                      <div className="rounded-lg bg-brand-cream/40 px-3">
+                                        {!hide('chargeAmount') && <MobileEditableRow claimId={claim.id} label="Charge" field="chargeAmount" value={claim.charge_amount} type="number" prefix="$" />}
+                                        {!hide('insuranceReimbursement') && <MobileEditableRow claimId={claim.id} label="Ins. Reimb." field="insuranceReimbursement" value={claim.insurance_reimbursement} type="number" prefix="$" />}
+                                        {!hide('patientAmountPaid') && <MobileEditableRow claimId={claim.id} label="Pt. Paid" field="patientAmountPaid" value={claim.patient_amount_paid} type="number" prefix="$" />}
+                                        {!hide('patientAmountDue') && <MobileEditableRow claimId={claim.id} label="Pt. Due" field="patientAmountDue" value={claim.patient_amount_due} type="number" prefix="$" />}
+                                        {!hide('insuranceBilled') && <MobileEditableRow claimId={claim.id} label="Ins. Billed" field="insuranceBilled" value={claim.insurance_billed} type="text" />}
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* Codes */}
+                                  {(!hide('placeOfService') || !hide('visitNumber') || !hide('cptCodes') || !hide('unitsBilled') || !hide('diagnosisCodes') || !hide('modifier')) && (
+                                    <div>
+                                      <p className="text-[10px] font-bold text-brand-gold uppercase tracking-wider mb-1">Codes</p>
+                                      <div className="rounded-lg bg-brand-cream/40 px-3">
+                                        {!hide('placeOfService') && <MobileEditableRow claimId={claim.id} label="Place of Service" field="placeOfService" value={claim.place_of_service} type="text" />}
+                                        {!hide('visitNumber') && <MobileEditableRow claimId={claim.id} label="Visit #" field="visitNumber" value={claim.visit_number} type="number" decimals={0} />}
+                                        {!hide('cptCodes') && <MobileEditableRow claimId={claim.id} label="CPT Codes" field="cptCodes" value={claim.cpt_codes} type="text" />}
+                                        {!hide('unitsBilled') && <MobileEditableRow claimId={claim.id} label="Units" field="unitsBilled" value={claim.units_billed} type="number" />}
+                                        {!hide('diagnosisCodes') && <MobileEditableRow claimId={claim.id} label="Diagnosis" field="diagnosisCodes" value={claim.diagnosis_codes} type="text" />}
+                                        {!hide('modifier') && <MobileEditableRow claimId={claim.id} label="Modifier" field="modifier" value={claim.modifier} type="text" />}
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* Follow-up */}
+                                  {(!hide('claimSubmittedDate') || !hide('expireBcbsClaimNumber') || !hide('lmn') || !hide('checkDate') || !hide('checkNumberVirtualCard') || !hide('dateOfAppeal') || !hide('referenceNo')) && (
+                                    <div>
+                                      <p className="text-[10px] font-bold text-brand-gold uppercase tracking-wider mb-1">Follow-Up</p>
+                                      <div className="rounded-lg bg-brand-cream/40 px-3">
+                                        {!hide('claimSubmittedDate') && <MobileEditableRow claimId={claim.id} label="Date Submitted" field="claimSubmittedDate" value={claim.claim_submitted_date} type="date" />}
+                                        {!hide('expireBcbsClaimNumber') && (
+                                          <div
+                                            className="flex items-center justify-between gap-3 py-2.5 border-b border-black/5 last:border-0 min-h-[40px]"
+                                            onClick={() => !isEditingField(claim.id, 'expireBcbsClaimNumber') && startEditField(claim.id, 'expireBcbsClaimNumber', claim.expire_bcbs_claim_number ?? '')}
+                                          >
+                                            <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide shrink-0">Claim #</span>
+                                            {isEditingField(claim.id, 'expireBcbsClaimNumber') ? (
+                                              <input
+                                                autoFocus
+                                                className="flex-1 min-w-0 text-sm border border-blue-400 rounded px-2 py-1.5 outline-none bg-white text-right"
+                                                value={editingValue}
+                                                onChange={e => setEditingValue(e.target.value)}
+                                                onBlur={() => commitEditField(claim.id, 'expireBcbsClaimNumber')}
+                                                onKeyDown={e => { if (e.key === 'Enter') commitEditField(claim.id, 'expireBcbsClaimNumber'); if (e.key === 'Escape') setEditingCell(null); }}
+                                                onClick={e => e.stopPropagation()}
+                                              />
+                                            ) : (
+                                              <span className="text-sm text-right text-brand-blue truncate max-w-[60%]">
+                                                {claim.expire_bcbs_claim_number || claim.oa_claim_number || <span className="text-gray-300">—</span>}
+                                              </span>
+                                            )}
+                                          </div>
+                                        )}
+                                        {!hide('lmn') && <MobileEditableRow claimId={claim.id} label="LMN Sent" field="lmn" value={claim.lmn} type="text" />}
+                                        {!hide('checkDate') && <MobileEditableRow claimId={claim.id} label="Check/Payment Date" field="checkDate" value={claim.check_date} type="date" />}
+                                        {!hide('checkNumberVirtualCard') && <MobileEditableRow claimId={claim.id} label="Check/EFT #" field="checkNumberVirtualCard" value={claim.check_number_virtual_card} type="text" />}
+                                        {!hide('dateOfAppeal') && <MobileEditableRow claimId={claim.id} label="Appeal Date" field="dateOfAppeal" value={claim.date_of_appeal} type="date" />}
+                                        {!hide('referenceNo') && <MobileEditableRow claimId={claim.id} label="Appeal Ref #" field="referenceNo" value={claim.reference_no} type="text" />}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                            {/* Desktop Claims Table — md and up */}
+                            <div className="hidden md:block overflow-x-auto">
                               <table className="w-full text-xs border-collapse">
                                 <thead>
                                   <tr className="bg-brand-cream border-b border-brand-cream-dark">
@@ -2453,26 +2674,10 @@ export default function Dashboard() {
                                     // instead of repeating it on every CPT line for the same visit.
                                     const prevClaim = claimIdx > 0 ? claims[claimIdx - 1] : null;
                                     const isSameDateAsPrev = prevClaim && prevClaim.date_of_service === claim.date_of_service;
-                                    const isEditing = (field: string) =>
-                                      editingCell?.claimId === claim.id && editingCell?.field === field;
-
-                                    const startEdit = (field: string, rawValue: string) => {
-                                      setEditingCell({ claimId: claim.id, field });
-                                      setEditingValue(rawValue);
-                                    };
-
-                                    const commitEdit = (field: string, isNumeric = false, isDate = false) => {
-                                      if (!editingCell) return;
-                                      const payload: Record<string, any> = { id: claim.id };
-                                      if (isNumeric) {
-                                        payload[field] = editingValue.trim() ? parseFloat(editingValue) : null;
-                                      } else if (isDate) {
-                                        payload[field] = editingValue.trim() || null;
-                                      } else {
-                                        payload[field] = editingValue.trim() || null;
-                                      }
-                                      updateClaim.mutate(payload as any);
-                                    };
+                                    const isEditing = (field: string) => isEditingField(claim.id, field);
+                                    const startEdit = (field: string, rawValue: string) => startEditField(claim.id, field, rawValue);
+                                    const commitEdit = (field: string, isNumeric = false, isDate = false) =>
+                                      commitEditField(claim.id, field, isNumeric, isDate);
 
                                     const cellClass = "border border-gray-200 px-1 py-1 cursor-pointer hover:bg-yellow-50 group/cell relative";
                                     const inputClass = "w-full min-w-[80px] text-xs border border-blue-400 rounded px-1 py-0.5 outline-none bg-white";
@@ -2538,17 +2743,6 @@ export default function Dashboard() {
                                       );
                                     };
 
-                                    const statusColors: Record<string, string> = {
-                                      approved: 'bg-green-100 text-green-800',
-                                      denied: 'bg-red-100 text-red-800',
-                                      pending: 'bg-yellow-100 text-yellow-800',
-                                      submitted: 'bg-blue-100 text-blue-800',
-                                      pended: 'bg-orange-100 text-orange-800',
-                                      rejected: 'bg-gray-900 text-white',
-                                      resubmitted: 'bg-violet-100 text-violet-800',
-                                    };
-
-                                    const hide = (key: string) => hiddenClaimsColumns.has(key);
                                     return (
                                       <tr key={claim.id} className="hover:bg-brand-cream/50 border-b border-gray-200 text-xs">
                                         {!hide('placeOfService') && <EditableText field="placeOfService" value={claim.place_of_service} />}
@@ -2632,6 +2826,7 @@ export default function Dashboard() {
                                 </tbody>
                               </table>
                             </div>
+                            </>
                           );
                         })()}
                       </CardContent>
