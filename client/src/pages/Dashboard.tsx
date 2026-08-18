@@ -1,11 +1,11 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Clock, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, LogOut, BellRing, ShieldAlert, ShieldCheck, AlertTriangle, XCircle, UserX, UserCheck, Eye, EyeOff, Columns3, Search, X, SlidersHorizontal } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, Search, X, SlidersHorizontal, AlertTriangle } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetFooter, SheetTrigger } from '@/components/ui/sheet';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -13,23 +13,25 @@ import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Separator } from '@/components/ui/separator';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch } from '@/lib/nameMatch';
-import logoIcon from '@/assets/logos/logo-icon.png';
 import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { MetricCard } from '@/components/dashboard/MetricCard';
 import { PatientListItem } from '@/components/dashboard/PatientListItem';
 import { FilterChips } from '@/components/dashboard/FilterChips';
+import { AuthAlertPanel } from '@/components/dashboard/AuthAlertPanel';
+import { ClaimsFollowUpPanel } from '@/components/dashboard/ClaimsFollowUpPanel';
+import { PatientFilters } from '@/components/dashboard/PatientFilters';
+import { PatientAnalytics } from '@/components/dashboard/PatientAnalytics';
+import { DashboardShell } from '@/components/dashboard/DashboardShell';
+import type { NavSection } from '@/components/dashboard/DashboardSidebar';
 
 /**
  * Dashboard Component — Database-backed
  * All data persists in MySQL via tRPC procedures.
  * "Date ASH Submitted" column is editable inline with a native date picker.
  */
-
-const LOGO_URL = logoIcon;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -152,553 +154,6 @@ function VisitAuthStatusSelect({ visit, onChange }: { visit: DbVisit; onChange: 
   );
 }
 
-// ─── Authorization Alert Panel ──────────────────────────────────────────────────────
-
-const URGENCY_CONFIG = {
-  exhausted: {
-    label: 'Sessions Exhausted',
-    sublabel: 'Request authorization ASAP',
-    icon: <XCircle className="w-5 h-5" />,
-    cardClass: 'border-l-4 border-red-500 bg-red-50',
-    badgeClass: 'bg-red-100 text-red-800',
-    iconClass: 'text-red-600',
-  },
-  critical: {
-    label: 'Critical — 1-2 Sessions Left',
-    sublabel: 'Request new authorization immediately',
-    icon: <ShieldAlert className="w-5 h-5" />,
-    cardClass: 'border-l-4 border-orange-500 bg-orange-50',
-    badgeClass: 'bg-orange-100 text-orange-800',
-    iconClass: 'text-orange-600',
-  },
-  warning: {
-    label: 'Warning — 3 Sessions Left',
-    sublabel: 'Request new authorization soon',
-    icon: <AlertTriangle className="w-5 h-5" />,
-    cardClass: 'border-l-4 border-yellow-400 bg-yellow-50',
-    badgeClass: 'bg-yellow-100 text-yellow-800',
-    iconClass: 'text-yellow-600',
-  },
-  pending: {
-    label: 'Authorization Pending',
-    sublabel: 'Follow up with insurance',
-    icon: <Clock className="w-5 h-5" />,
-    cardClass: 'border-l-4 border-blue-400 bg-blue-50',
-    badgeClass: 'bg-blue-100 text-blue-800',
-    iconClass: 'text-blue-600',
-  },
-  ok: {
-    label: 'On Track',
-    sublabel: '',
-    icon: <ShieldCheck className="w-5 h-5" />,
-    cardClass: 'border-l-4 border-green-400 bg-green-50',
-    badgeClass: 'bg-green-100 text-green-800',
-    iconClass: 'text-green-600',
-  },
-};
-
-function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => void }) {
-  const utils = trpc.useUtils();
-  const { data: alerts = [], isLoading, error } = trpc.visits.authAlerts.useQuery();
-  const [requestingId, setRequestingId] = useState<string | null>(null);
-
-  // New Authorization dialog state
-  const [approveDialogPatient, setApproveDialogPatient] = useState<{ id: string; name: string; insurance: string } | null>(null);
-  const [newSessions, setNewSessions] = useState('');
-  const [newAuthDate, setNewAuthDate] = useState(() => new Date().toISOString().split('T')[0]);
-  const [newInsurance, setNewInsurance] = useState('');
-  const [newAuthValidUntil, setNewAuthValidUntil] = useState('');
-
-  const approveAuthorization = trpc.visits.approveAuthorization.useMutation({
-    onSuccess: (data, { patientId }) => {
-      toast.success(`Authorization approved — ${data.newVisitCount} new session records created`);
-      setApproveDialogPatient(null);
-      setNewSessions('');
-      setNewInsurance('');
-      setNewAuthValidUntil('');
-      utils.visits.authAlerts.invalidate();
-      utils.visits.listByPatient.invalidate({ patientId });
-      utils.patients.list.invalidate();
-    },
-    onError: (err) => {
-      toast.error(err.message || 'Failed to approve authorization');
-    },
-  });
-
-  const handleApproveSubmit = () => {
-    if (!approveDialogPatient) return;
-    const count = parseInt(newSessions, 10);
-    if (!count || count < 1) { toast.error('Please enter a valid session count'); return; }
-    const authValidUntilMs = newAuthValidUntil
-      ? new Date(newAuthValidUntil + 'T00:00:00Z').getTime()
-      : null;
-    approveAuthorization.mutate({
-      patientId: approveDialogPatient.id,
-      sessionsAuthorized: count,
-      authDate: newAuthDate || null,
-      newInsurance: newInsurance || undefined,
-      authValidUntil: authValidUntilMs,
-    });
-  };
-
-  const markAsRequested = trpc.visits.markAsRequested.useMutation({
-    onMutate: ({ patientId }) => setRequestingId(patientId as string),
-    onSuccess: (_data, { patientId }) => {
-      toast.success('Authorization request marked — ASH date set to today');
-      // Optimistically remove the card if it was 'pending' urgency; otherwise refresh
-      utils.visits.authAlerts.invalidate();
-      // Also refresh the patient's visit list in case it's open
-      utils.visits.listByPatient.invalidate({ patientId });
-    },
-    onError: (err) => {
-      toast.error(err.message || 'Failed to mark as requested');
-    },
-    onSettled: () => setRequestingId(null),
-  });
-
-  // Only show patients that need attention (not 'ok')
-  const urgent = alerts
-    .filter(a => a.urgency !== 'ok')
-    .sort((a, b) => {
-      const order = { exhausted: 0, critical: 1, warning: 2, pending: 3, ok: 4 };
-      return order[a.urgency] - order[b.urgency];
-    });
-
-  if (error) {
-    return (
-      <div className="mb-6 flex items-center gap-3 bg-red-50 border-l-4 border-red-500 rounded-lg p-4">
-        <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
-        <div>
-          <p className="font-semibold text-red-800">Could not load authorization alerts</p>
-          <p className="text-sm text-red-700">Please refresh the page to try again.</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (isLoading) {
-    return (
-      <div className="mb-6">
-        <div className="flex items-center gap-2 mb-3">
-          <BellRing className="w-5 h-5 text-brand-gold" />
-          <h2 className="text-lg font-bold text-brand-blue">Authorization Alerts</h2>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {[1, 2].map(i => (
-            <div key={i} className="h-20 rounded-lg bg-gray-100 animate-pulse" />
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  if (urgent.length === 0) {
-    return (
-      <div className="mb-6 flex items-center gap-3 bg-green-50 border-l-4 border-green-500 rounded-lg p-4">
-        <ShieldCheck className="w-5 h-5 text-green-600 shrink-0" />
-        <div>
-          <p className="font-semibold text-green-800">All patients are on track</p>
-          <p className="text-sm text-green-700">No authorization requests needed at this time.</p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <>
-    <div className="mb-6">
-      <div className="flex items-center gap-2 mb-3">
-        <BellRing className="w-5 h-5 text-brand-gold animate-bounce" />
-        <h2 className="text-lg font-bold text-brand-blue">Authorization Alerts</h2>
-        <Badge variant="destructive" className="ml-1 rounded-full w-6 h-6 p-0 justify-center">
-          {urgent.length}
-        </Badge>
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[28rem] overflow-y-auto pr-1">
-        {urgent.map(alert => {
-          const cfg = URGENCY_CONFIG[alert.urgency];
-          const isRequesting = requestingId === alert.patientId;
-          // Show Approved/Re-request buttons whenever the auth status is pending,
-          // regardless of sessions remaining (exhausted + pending is the most urgent case)
-          const alreadyPending = alert.authStatus === 'pending';
-          return (
-            <div
-              key={alert.patientId}
-              className={`rounded-xl shadow-sm hover:shadow-md transition-all ${cfg.cardClass}`}
-            >
-              {/* Top clickable area — opens patient detail */}
-              <button
-                onClick={() => onSelectPatient(alert.patientId)}
-                className="w-full text-left p-4 pb-2"
-              >
-                <div className="flex items-start gap-3">
-                  <span className={`mt-0.5 shrink-0 ${cfg.iconClass}`}>{cfg.icon}</span>
-                  <div className="min-w-0">
-                    <p className="font-bold text-brand-blue truncate">{alert.patientName}</p>
-                    <p className="text-xs text-muted-foreground truncate">{alert.insurance}</p>
-                    <div className="flex flex-wrap gap-1 mt-2">
-                      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${cfg.badgeClass}`}>
-                        {alert.authExpiryWarning ? 'Auth Expiring Soon' : cfg.label}
-                      </span>
-                      {alert.sessionsRemaining !== null && (
-                        <span className="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-700">
-                          {alert.sessionsRemaining} remaining
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {alert.authExpiryWarning ? 'Request new authorization before expiry date' : cfg.sublabel}
-                    </p>
-                    {alert.dateAshSubmitted && (
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        Last submitted: {new Date(alert.dateAshSubmitted).toLocaleDateString()}
-                      </p>
-                    )}
-                    {alert.authValidUntil && (() => {
-                      const now = Date.now();
-                      const daysLeft = Math.ceil((alert.authValidUntil - now) / (1000 * 60 * 60 * 24));
-                      const expired = daysLeft < 0;
-                      const expiresSoon = !expired && daysLeft <= 7;
-                      return (
-                        <p className={`text-xs mt-0.5 font-semibold ${
-                          expired ? 'text-red-600' : expiresSoon ? 'text-orange-600' : 'text-gray-500'
-                        }`}>
-                          {expired
-                            ? `Auth expired ${Math.abs(daysLeft)}d ago (${new Date(alert.authValidUntil).toLocaleDateString()})`
-                            : expiresSoon
-                            ? `Auth expires in ${daysLeft}d — ${new Date(alert.authValidUntil).toLocaleDateString()}`
-                            : `Auth valid until ${new Date(alert.authValidUntil).toLocaleDateString()}`
-                          }
-                        </p>
-                      );
-                    })()}
-                  </div>
-                </div>
-              </button>
-
-              {/* Action buttons */}
-              <div className="px-4 pb-3 flex gap-2">
-                {/* Mark as Requested — only for non-pending cards */}
-                {!alreadyPending && (
-                  <Button
-                    size="sm"
-                    disabled={isRequesting}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      markAsRequested.mutate({ patientId: alert.patientId });
-                    }}
-                    className="flex-1 mt-1 bg-brand-blue text-white hover:bg-brand-blue-dark active:scale-[0.97]"
-                  >
-                    {isRequesting ? (
-                      <><Loader2 className="w-3 h-3 animate-spin" /> Saving…</>
-                    ) : (
-                      <><CheckCircle2 className="w-3 h-3" /> Mark as Requested</>
-                    )}
-                  </Button>
-                )}
-
-                {/* Approved — only for pending cards */}
-                {alreadyPending && (
-                  <>
-                    <Button
-                      size="sm"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setApproveDialogPatient({ id: alert.patientId, name: alert.patientName, insurance: alert.insurance ?? '' });
-                        setNewSessions('');
-                        setNewAuthDate(new Date().toISOString().split('T')[0]);
-                        setNewInsurance(alert.insurance ?? '');
-                        setNewAuthValidUntil('');
-                      }}
-                      className="flex-1 mt-1 bg-green-600 text-white hover:bg-green-700 active:scale-[0.97]"
-                    >
-                      <ShieldCheck className="w-3 h-3" /> Approved
-                    </Button>
-                    <Button
-                      size="sm"
-                      disabled={isRequesting}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        markAsRequested.mutate({ patientId: alert.patientId });
-                      }}
-                      className="flex-1 mt-1 bg-blue-100 text-blue-700 hover:bg-blue-200 active:scale-[0.97]"
-                    >
-                      <CheckCircle2 className="w-3 h-3" /> Re-request
-                    </Button>
-                  </>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-
-    {/* New Authorization Dialog */}
-    <Dialog open={!!approveDialogPatient} onOpenChange={(open) => { if (!open) { setApproveDialogPatient(null); setNewAuthValidUntil(''); } }}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle className="text-brand-blue flex items-center gap-2">
-            <ShieldCheck className="w-5 h-5 text-green-600" />
-            New Authorization Approved
-          </DialogTitle>
-          <DialogDescription>
-            Enter the new authorization details for <strong>{approveDialogPatient?.name}</strong>.
-            A fresh batch of session records will be created automatically.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4 py-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="new-sessions" className="text-brand-blue font-semibold">
-              Sessions Authorized <span className="text-red-500">*</span>
-            </Label>
-            <Input
-              id="new-sessions"
-              type="number"
-              min={1}
-              max={200}
-              placeholder="e.g. 20"
-              value={newSessions}
-              onChange={(e) => setNewSessions(e.target.value)}
-              className="border-brand-blue/30 focus:border-brand-blue"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="new-auth-date" className="text-brand-blue font-semibold">
-              Authorization Date
-            </Label>
-            <Input
-              id="new-auth-date"
-              type="date"
-              value={newAuthDate}
-              onChange={(e) => setNewAuthDate(e.target.value)}
-              className="border-brand-blue/30 focus:border-brand-blue"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="new-insurance" className="text-brand-blue font-semibold">
-              Insurance Company
-            </Label>
-            <Select
-              value={newInsurance}
-              onValueChange={setNewInsurance}
-            >
-              <SelectTrigger id="new-insurance" className="border-brand-blue/30 focus:border-brand-blue">
-                <SelectValue placeholder="Select insurance company" />
-              </SelectTrigger>
-              <SelectContent>
-                {/* Show current insurance at top if it's not in the standard list */}
-                {approveDialogPatient?.insurance &&
-                  !insuranceList.includes(approveDialogPatient.insurance) && (
-                  <SelectItem value={approveDialogPatient.insurance}>{approveDialogPatient.insurance} (current)</SelectItem>
-                )}
-                {insuranceList.map(ins => (
-                  <SelectItem key={ins} value={ins}>{ins}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="new-auth-valid-until" className="text-brand-blue font-semibold">
-              Authorization Valid Until <span className="text-gray-400 font-normal">(optional)</span>
-            </Label>
-            <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
-            <Input
-              id="new-auth-valid-until"
-              type="date"
-              value={newAuthValidUntil}
-              onChange={(e) => setNewAuthValidUntil(e.target.value)}
-              className="border-brand-blue/30 focus:border-brand-blue"
-            />
-          </div>
-          <div className="rounded-lg bg-blue-50 border border-blue-200 p-3 text-sm text-blue-800">
-            <strong>{newSessions ? parseInt(newSessions, 10) || 0 : 0}</strong> new session rows will be created,
-            numbered sequentially from the last existing session.
-            Sessions remaining will count down from the authorized total.
-          </div>
-        </div>
-        <div className="flex gap-3 pt-2">
-          <Button
-            variant="outline"
-            className="flex-1"
-            onClick={() => setApproveDialogPatient(null)}
-            disabled={approveAuthorization.isPending}
-          >
-            Cancel
-          </Button>
-          <Button
-            className="flex-1 bg-green-600 hover:bg-green-700 text-white"
-            onClick={handleApproveSubmit}
-            disabled={approveAuthorization.isPending || !newSessions}
-          >
-            {approveAuthorization.isPending ? (
-              <><Loader2 className="w-4 h-4 animate-spin mr-1" /> Creating Records…</>
-            ) : (
-              <><ShieldCheck className="w-4 h-4 mr-1" /> Confirm &amp; Create Records</>
-            )}
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-    </>
-  );
-}
-
-// ─── Claims Follow-Up Alert Panel ───────────────────────────────────────────
-// Card color per claim_status, per product spec:
-// Rejected=Black, Denied=Red, Pending=Yellow, Pended=Orange, Approved=Green,
-// Resubmitted=Violet, Submitted=Blue.
-const FOLLOW_UP_CARD_STYLES: Record<string, { card: string; hover: string; border: string; patientText: string; metaText: string; chargedLabel: string; chargedVal: string; badge: string; badgeText: string; reasonText: string }> = {
-  rejected:    { card: 'bg-gray-900',   hover: 'hover:bg-gray-800',   border: 'border-gray-700',   patientText: 'text-white', metaText: 'text-gray-300',   chargedLabel: 'text-gray-400',   chargedVal: 'text-red-300', badge: 'bg-white/20',  badgeText: 'text-white', reasonText: 'text-red-300' },
-  denied:      { card: 'bg-red-600',    hover: 'hover:bg-red-700',    border: 'border-red-500',    patientText: 'text-white', metaText: 'text-red-100',    chargedLabel: 'text-red-200',    chargedVal: 'text-white',   badge: 'bg-white/25',  badgeText: 'text-white', reasonText: 'text-red-100' },
-  pended:      { card: 'bg-orange-500', hover: 'hover:bg-orange-600', border: 'border-orange-400', patientText: 'text-white', metaText: 'text-orange-100', chargedLabel: 'text-orange-200', chargedVal: 'text-white',   badge: 'bg-white/25',  badgeText: 'text-white', reasonText: 'text-orange-100' },
-  pending:     { card: 'bg-yellow-400', hover: 'hover:bg-yellow-500', border: 'border-yellow-300', patientText: 'text-gray-900', metaText: 'text-gray-700', chargedLabel: 'text-gray-600', chargedVal: 'text-gray-900', badge: 'bg-black/10',  badgeText: 'text-gray-900', reasonText: 'text-gray-800' },
-  submitted:   { card: 'bg-blue-600',   hover: 'hover:bg-blue-700',   border: 'border-blue-500',   patientText: 'text-white', metaText: 'text-blue-100',   chargedLabel: 'text-blue-200',   chargedVal: 'text-white',   badge: 'bg-white/25',  badgeText: 'text-white', reasonText: 'text-blue-100' },
-  approved:    { card: 'bg-green-600',  hover: 'hover:bg-green-700',  border: 'border-green-500',  patientText: 'text-white', metaText: 'text-green-100',  chargedLabel: 'text-green-200',  chargedVal: 'text-white',   badge: 'bg-white/25',  badgeText: 'text-white', reasonText: 'text-green-100' },
-  resubmitted: { card: 'bg-violet-500', hover: 'hover:bg-violet-600', border: 'border-violet-400', patientText: 'text-white', metaText: 'text-violet-100', chargedLabel: 'text-violet-200', chargedVal: 'text-white',   badge: 'bg-white/25',  badgeText: 'text-white', reasonText: 'text-violet-100' },
-};
-
-function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?: string; onSelectPatient: (id: string) => void }) {
-  const utils = trpc.useUtils();
-  // Scoped by the same insurance filter as the Claims Status counts and the
-  // Patients list, so this panel can never disagree with them on screen.
-  const queryInput = { insurance: insurance || undefined };
-  const { data: followUpClaims = [], isLoading } = trpc.claims.getFollowUpClaims.useQuery(queryInput);
-  const markResolved = trpc.claims.markResolved.useMutation({
-    onMutate: async ({ id }) => {
-      // Optimistically remove the card immediately
-      await utils.claims.getFollowUpClaims.cancel(queryInput);
-      const prev = utils.claims.getFollowUpClaims.getData(queryInput);
-      utils.claims.getFollowUpClaims.setData(queryInput, (old) =>
-        (old ?? []).filter((c) => c.id !== id)
-      );
-      return { prev };
-    },
-    onError: (_err, _vars, ctx) => {
-      // Rollback on error
-      if (ctx?.prev) utils.claims.getFollowUpClaims.setData(queryInput, ctx.prev);
-    },
-    onSettled: () => {
-      utils.claims.getFollowUpClaims.invalidate();
-      utils.claims.getStatusCounts.invalidate();
-      // Also invalidate the claims tracker queries so the table rows
-      // immediately reflect the updated 'pending' status
-      utils.claims.getByPatientAndPeriod.invalidate();
-    },
-  });
-
-  if (isLoading) {
-    return (
-      <div className="mb-6 bg-orange-50 border-l-4 border-orange-400 rounded-lg p-4">
-        <div className="flex items-center gap-2 mb-3">
-          <AlertCircle className="w-5 h-5 text-orange-500" />
-          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up Needed</h2>
-        </div>
-        <div className="text-sm text-gray-500">Loading claims…</div>
-      </div>
-    );
-  }
-
-  if (followUpClaims.length === 0) {
-    return (
-      <div className="mb-6 bg-green-50 border-l-4 border-green-500 rounded-lg p-4">
-        <div className="flex items-center gap-2 mb-2">
-          <CheckCircle2 className="w-5 h-5 text-green-500" />
-          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up</h2>
-        </div>
-        <p className="text-sm text-green-700">All billed claims have received insurance reimbursement. No follow-up needed.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="mb-6 bg-amber-50 border-l-4 border-amber-500 rounded-lg p-4">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <AlertCircle className="w-5 h-5 text-amber-500 animate-pulse" />
-          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up Needed</h2>
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800">
-            {followUpClaims.length} claim{followUpClaims.length !== 1 ? 's' : ''}
-          </span>
-        </div>
-        <p className="text-xs text-gray-500">Rejected, denied, pended, or stale claims — review below</p>
-      </div>
-      <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-        {followUpClaims.map((claim) => {
-          const status = claim.claimStatus ?? 'submitted';
-          const s = FOLLOW_UP_CARD_STYLES[status] ?? FOLLOW_UP_CARD_STYLES.rejected;
-          return (
-            <div
-              key={claim.id}
-              onClick={() => onSelectPatient(claim.patientId)}
-              className={`flex items-center justify-between p-3 rounded-lg border ${s.card} ${s.hover} ${s.border} cursor-pointer transition-colors group`}
-            >
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className={`font-semibold text-sm truncate ${s.patientText}`}>{claim.patientName}</span>
-                  <span className={`text-xs shrink-0 ${s.metaText}`}>Period {claim.authPeriod}</span>
-                  {claim.dateOfService && (
-                    <span className={`text-xs shrink-0 ${s.metaText}`}>
-                      DOS: {new Date(claim.dateOfService).toLocaleDateString()}
-                    </span>
-                  )}
-                  {claim.cptCodes && (
-                    <span className={`text-xs shrink-0 ${s.metaText}`}>CPT: {claim.cptCodes}</span>
-                  )}
-                </div>
-                <div className="flex items-center gap-3 mt-0.5 flex-wrap">
-                  {claim.followUpReason && (
-                    <span className={`text-xs font-bold uppercase tracking-wide ${s.reasonText}`}>⚠ {claim.followUpReason}</span>
-                  )}
-                </div>
-                <div className="flex items-center gap-3 mt-0.5">
-                  <span className={`text-xs truncate ${s.metaText}`}>{claim.insurance}</span>
-                  {claim.claimSubmittedDate && (
-                    <span className={`text-xs shrink-0 ${s.metaText}`}>
-                      Submitted: {new Date(claim.claimSubmittedDate).toLocaleDateString()}
-                    </span>
-                  )}
-                  {claim.claimNumber && (
-                    <span className={`text-xs shrink-0 ${s.metaText}`}>Claim #: {claim.claimNumber}</span>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-center gap-3 ml-3 shrink-0">
-                {claim.chargeAmount != null && (
-                  <div className="text-right">
-                    <div className={`text-xs ${s.chargedLabel}`}>Charged</div>
-                    <div className={`text-sm font-bold ${s.chargedVal}`}>${parseFloat(String(claim.chargeAmount)).toFixed(2)}</div>
-                  </div>
-                )}
-                <div className="text-right">
-                  <div className={`text-xs ${s.chargedLabel}`}>Reimbursed</div>
-                  <div className={`text-sm font-bold ${s.chargedVal}`}>
-                    ${(claim.insuranceReimbursement != null ? parseFloat(String(claim.insuranceReimbursement)) : 0).toFixed(2)}
-                  </div>
-                </div>
-                <span className={`text-xs px-2 py-1 rounded-full font-bold capitalize ${s.badge} ${s.badgeText}`}>{status}</span>
-                <Button
-                  size="sm"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    markResolved.mutate({ id: claim.id });
-                  }}
-                  disabled={markResolved.isPending}
-                  aria-label={`Mark claim for ${claim.patientName} as resolved`}
-                  title="Mark as resolved and remove from follow-up list"
-                  className="ml-1 h-auto rounded-full bg-white/90 text-gray-800 hover:bg-white hover:scale-105 active:scale-95 px-3 py-1 shadow-sm whitespace-nowrap"
-                >
-                  ✓ Resolved
-                </Button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 // ─── CSV Export ─────────────────────────────────────────────────────────────
 // The 18 canonical columns, in dashboard order. Reads the same raw (snake_case)
 // claim shape returned by claims.getByPatientAndPeriod that the table itself renders.
@@ -781,6 +236,10 @@ function todayForFilename(): string {
 
 export default function Dashboard() {
   const utils = trpc.useUtils();
+
+  // ── Nav scroll targets ────────────────────────────────────────────────────
+  const attentionSectionRef = useRef<HTMLDivElement>(null);
+  const patientWorkspaceRef = useRef<HTMLDivElement>(null);
 
   // ── State ──────────────────────────────────────────────────────────────────
   const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null);
@@ -1126,6 +585,47 @@ export default function Dashboard() {
 
   const logoutMutation = trpc.auth.logout.useMutation();
 
+  const handleSignOut = () => {
+    logoutMutation.mutate(undefined, {
+      onSuccess: () => { window.location.href = '/login'; },
+      onError: () => { window.location.href = '/login'; },
+    });
+  };
+
+  /** Sidebar nav — only routes to functionality that actually exists on this
+   *  single-page dashboard (no client-side router), by scrolling to the
+   *  relevant section or, for per-patient data, opening the Detail View. */
+  const handleNavigate = (section: NavSection) => {
+    switch (section) {
+      case 'dashboard':
+        setShowDetailView(false);
+        requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
+        break;
+      case 'patients':
+        setShowDetailView(false);
+        requestAnimationFrame(() => patientWorkspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+        break;
+      case 'authorizations':
+      case 'claims-followup':
+        setShowDetailView(false);
+        requestAnimationFrame(() => attentionSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+        break;
+      case 'visits':
+      case 'claims':
+        if (activePatient) {
+          setShowDetailView(true);
+        } else {
+          setShowDetailView(false);
+          requestAnimationFrame(() => patientWorkspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+        }
+        break;
+      case 'bulk-upload':
+        setShowDetailView(false);
+        setShowUploadDialog(true);
+        break;
+    }
+  };
+
   // ── Computed metrics ───────────────────────────────────────────────────────
 
   const getPatientMetrics = (patientVisits: DbVisit[]) => {
@@ -1238,56 +738,22 @@ export default function Dashboard() {
     setSelectedClaimsFilter('all');
   };
 
-  // Shared between the desktop sidebar and the mobile Filters sheet so the two never drift.
-  const renderInsuranceFilterButtons = () => insuranceList.map(insurance => {
-    const count = activePatients.filter(p => p.insurance === insurance).length;
-    const isSelected = selectedInsurance === insurance;
-    return (
-      <Button
-        key={insurance}
-        variant="ghost"
-        onClick={() => {
-          setSelectedInsurance(insurance);
-          // Switching insurance while viewing a patient on a
-          // different one would leave the detail view showing
-          // someone outside the new filter — back out to the list.
-          if (selectedPatient && selectedPatient.insurance !== insurance) {
-            setShowDetailView(false);
-          }
-        }}
-        aria-pressed={isSelected}
-        className={`w-full h-auto justify-between px-3 py-2.5 font-semibold text-sm ${
-          isSelected ? 'bg-brand-gold text-white hover:bg-brand-gold hover:text-white' : 'text-brand-blue hover:bg-brand-cream'
-        }`}
-      >
-        <span className="truncate">{insurance}</span>
-        <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
-          isSelected ? 'bg-white/25 text-white' : 'bg-gray-100 text-gray-700'
-        }`}>{count}</span>
-      </Button>
-    );
-  });
+  // Shared between the desktop Patient Workspace filters panel and the mobile
+  // Filters sheet so the two never drift.
+  const insuranceCounts = useMemo(
+    () => Object.fromEntries(insuranceList.map(ins => [ins, activePatients.filter(p => p.insurance === ins).length])),
+    [activePatients]
+  );
 
-  const renderClaimsStatusFilterButtons = () => CLAIM_STATUS_FILTERS.map(({ value, label, color }) => {
-    const count = claimStatusCounts[value as keyof typeof claimStatusCounts] ?? 0;
-    const isSelected = selectedClaimsFilter === value;
-    return (
-      <Button
-        key={value}
-        variant="ghost"
-        onClick={() => setSelectedClaimsFilter(value)}
-        aria-pressed={isSelected}
-        className={`w-full h-auto justify-between px-3 py-2.5 text-sm ${
-          isSelected ? 'bg-brand-gold text-white font-semibold hover:bg-brand-gold hover:text-white' : 'text-brand-blue hover:bg-brand-cream'
-        }`}
-      >
-        <span className="truncate">{label}</span>
-        <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
-          isSelected ? 'bg-white/25 text-white' : color
-        }`}>{count}</span>
-      </Button>
-    );
-  });
+  const handleSelectInsurance = (insurance: string) => {
+    setSelectedInsurance(insurance);
+    // Switching insurance while viewing a patient on a different one would
+    // leave the detail view showing someone outside the new filter — back
+    // out to the list.
+    if (selectedPatient && selectedPatient.insurance !== insurance) {
+      setShowDetailView(false);
+    }
+  };
 
   const completedPatients = activePatients.filter(p => completedSet.has(p.id));
 
@@ -1918,61 +1384,47 @@ export default function Dashboard() {
 
   if (showDetailView && activePatient) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-brand-cream to-white">
-        {/* Header */}
-        <div className="bg-brand-blue text-white py-4">
-          <div className="container px-4 sm:px-6 lg:px-8">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowDetailView(false)}
-              className="mb-3 -ml-2 gap-1.5 text-brand-gold hover:text-white hover:bg-white/10"
-            >
-              <ChevronLeft className="w-4 h-4" />
-              Back to Dashboard
-            </Button>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h1 className="text-2xl sm:text-3xl font-bold">{activePatient.name}</h1>
-                <p className="text-brand-gold text-sm mt-1">Detailed Visit Records — {activePatient.insurance}</p>
-              </div>
-              <div className="flex items-center gap-3">
-                {/* Active / Inactive toggle */}
-                <div className="flex items-center gap-2 bg-white/10 rounded-lg px-3 py-2">
-                  {activePatient.isActive !== false ? (
-                    <UserCheck className="w-4 h-4 text-green-300" />
-                  ) : (
-                    <UserX className="w-4 h-4 text-gray-300" />
-                  )}
-                  <span className={`text-sm font-semibold ${
-                    activePatient.isActive !== false ? 'text-green-300' : 'text-gray-300'
-                  }`}>
-                    {activePatient.isActive !== false ? 'Active' : 'Discharged'}
-                  </span>
-                  <Switch
-                    checked={activePatient.isActive !== false}
-                    onCheckedChange={(checked) => handleToggleActive(activePatient.id, checked)}
-                    disabled={setPatientActive.isPending}
-                    aria-label="Toggle patient active status"
-                    className="data-[state=checked]:bg-green-500"
-                  />
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => refetchVisits()}
-                  aria-label="Refresh visit data"
-                  className="gap-1.5 text-brand-gold hover:text-white hover:bg-white/10"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                  <span className="hidden sm:inline">Refresh</span>
-                </Button>
-              </div>
+      <DashboardShell
+        onNavigate={handleNavigate}
+        onSignOut={handleSignOut}
+        signingOut={logoutMutation.isPending}
+        topbarTitle={activePatient.name}
+        topbarSubtitle={`Insurance: ${activePatient.insurance}`}
+        topbarActions={
+          <>
+            <div className="hidden sm:flex items-center gap-2 rounded-lg border border-border px-3 py-1.5">
+              {activePatient.isActive !== false ? (
+                <UserCheck className="w-4 h-4 text-green-600" />
+              ) : (
+                <UserX className="w-4 h-4 text-gray-400" />
+              )}
+              <span className={`text-xs font-semibold ${activePatient.isActive !== false ? 'text-green-700' : 'text-gray-500'}`}>
+                {activePatient.isActive !== false ? 'Active' : 'Discharged'}
+              </span>
+              <Switch
+                checked={activePatient.isActive !== false}
+                onCheckedChange={(checked) => handleToggleActive(activePatient.id, checked)}
+                disabled={setPatientActive.isPending}
+                aria-label="Toggle patient active status"
+              />
             </div>
-          </div>
-        </div>
-
-        <div className="container py-8">
+            <Button variant="outline" size="sm" onClick={() => refetchVisits()} aria-label="Refresh visit data" className="gap-1.5">
+              <RefreshCw className="w-4 h-4" />
+              <span className="hidden sm:inline">Refresh</span>
+            </Button>
+          </>
+        }
+      >
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowDetailView(false)}
+            className="mb-4 -ml-2 gap-1.5 text-brand-blue hover:text-brand-blue hover:bg-brand-cream"
+          >
+            <ChevronLeft className="w-4 h-4" />
+            Back to Dashboard
+          </Button>
           {/* Discharge Info Banner */}
           {activePatient.isActive === false && (
             <div className="mb-6 rounded-xl border-2 border-gray-400 bg-gray-50 p-4 shadow-md flex items-start gap-3">
@@ -2053,7 +1505,7 @@ export default function Dashboard() {
                         isActive ? 'bg-brand-blue text-white' : 'bg-gray-100 text-gray-600'
                       }`}>
                         <div className="flex-1">
-                          <CardTitle className={`text-xl font-serif font-bold ${ isActive ? 'text-white' : 'text-gray-700'}`}>
+                          <CardTitle className={`text-xl font-semibold ${ isActive ? 'text-white' : 'text-gray-700'}`}>
                             Authorization Period {period} — {periodAuth} Sessions
                           </CardTitle>
                           <CardDescription className={`text-sm mt-1 opacity-90 ${isActive ? 'text-brand-gold' : 'text-gray-500'}`}>
@@ -2297,7 +1749,7 @@ export default function Dashboard() {
                       <CardHeader className="bg-white rounded-t-xl">
                         <div className="flex items-start justify-between gap-4 mb-4">
                           <div className="space-y-1">
-                            <CardTitle className="text-xl font-serif font-semibold tracking-tight text-brand-blue">
+                            <CardTitle className="text-xl font-semibold tracking-tight text-brand-blue">
                               Claims Tracker — Period {period}
                             </CardTitle>
                             <CardDescription className="text-sm text-muted-foreground">
@@ -3028,7 +2480,7 @@ export default function Dashboard() {
       >
         <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto rounded-2xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 font-serif text-brand-blue">
+            <DialogTitle className="flex items-center gap-2 text-brand-blue">
               <Upload className="w-5 h-5 text-brand-gold" />
               {eobPatientGroups
                 ? 'Bulk EOB Import — Multiple Patients'
@@ -3341,157 +2793,123 @@ export default function Dashboard() {
         </DialogContent>
       </Dialog>
 
-      </div>
+      </DashboardShell>
     );
   }
 
   // ── Main Dashboard View ────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-brand-cream/30">
-      {/* Header */}
-      <div className="relative overflow-hidden">
-        <div
-          className="absolute inset-0 bg-cover bg-center opacity-15"
-          style={{ backgroundImage: 'url(https://d2xsxph8kpxj0f.cloudfront.net/310519663716642646/GCFkA8sgJY8LWBm3u5Mirt/healthcare-header-7MYjnBJpyfHpSEz86Wupgd.webp)' }}
-        />
-        <div className="absolute inset-0 bg-gradient-to-r from-brand-blue to-brand-blue/90" />
-        <div className="relative py-4 px-4 sm:px-6 lg:px-8">
-          <div className="container flex flex-wrap items-center justify-between gap-3 w-full">
-            <div className="flex items-center gap-3">
-              <img
-                src={LOGO_URL}
-                alt="NYC Home Rehab Logo"
-                className="w-11 h-11 object-contain drop-shadow-md hidden sm:block"
-              />
-              <div>
-                <h1 className="text-white text-lg sm:text-xl font-serif font-bold leading-tight">NYC HOME REHAB AUTHORIZATION AND CLAIMS TRACKER</h1>
-              </div>
-            </div>
-            <div className="flex gap-2 items-center flex-wrap">
-              {/* Sign Out */}
-              <Button
-                variant="outline"
-                size="sm"
-                className="bg-transparent border-white/50 text-white hover:bg-white/10 hover:text-white font-semibold"
-                onClick={() => {
-                  logoutMutation.mutate(undefined, {
-                    onSuccess: () => { window.location.href = '/login'; },
-                    onError: () => { window.location.href = '/login'; },
-                  });
-                }}
-                disabled={logoutMutation.isPending}
-              >
-                {logoutMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <LogOut className="w-4 h-4" />
-                )}
-                <span className="hidden sm:inline">Sign Out</span>
+    <DashboardShell
+      activeSection="dashboard"
+      onNavigate={handleNavigate}
+      onSignOut={handleSignOut}
+      signingOut={logoutMutation.isPending}
+      topbarTitle="Dashboard"
+      topbarSubtitle="Authorization & Claims Overview"
+      topbarActions={
+        <>
+          {/* Bulk Upload */}
+          <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
+            <DialogTrigger asChild>
+              <Button size="sm" variant="outline" className="gap-1.5">
+                <Upload className="w-4 h-4" />
+                <span className="hidden sm:inline">Bulk Upload</span>
               </Button>
-              {/* Bulk Upload */}
-              <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
-                <DialogTrigger asChild>
-                  <Button size="sm" className="bg-green-600 hover:bg-green-700 text-white font-semibold">
-                    <Upload className="w-4 h-4" />
-                    Bulk Upload
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="bg-white max-w-md">
-                  <DialogHeader>
-                    <DialogTitle className="text-brand-blue">Bulk Upload Patient Data</DialogTitle>
-                    <DialogDescription>Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions</DialogDescription>
-                  </DialogHeader>
-                  <div className="space-y-4">
-                    <div className="border-2 border-dashed border-brand-cream-dark rounded-lg p-6 text-center hover:border-brand-gold transition-colors">
-                      <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" id="file-upload" />
-                      <label htmlFor="file-upload" className="cursor-pointer block">
-                        <Upload className="w-8 h-8 text-brand-gold mx-auto mb-2" />
-                        <p className="text-brand-blue font-semibold">Click to upload CSV</p>
-                      </label>
-                    </div>
-                    {uploadProgress > 0 && uploadProgress < 100 && (
-                      <div className="w-full bg-brand-cream-dark rounded-full h-2">
-                        <div className="bg-brand-gold h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
-                      </div>
-                    )}
-                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
-                      <div className="flex items-center justify-between mb-2">
-                        <p className="font-semibold">CSV Format:</p>
-                        <Button
-                          size="sm"
-                          onClick={handleDownloadTemplate}
-                          className="h-auto gap-1.5 bg-brand-blue hover:bg-brand-blue-dark text-white text-xs font-semibold px-3 py-1.5"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          Download Template
-                        </Button>
-                      </div>
-                      <p className="font-mono">Patient Name, Insurance, Authorized Sessions, …</p>
-                    </div>
+            </DialogTrigger>
+            <DialogContent className="bg-white max-w-md max-h-[90vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle className="text-brand-blue">Bulk Upload Patient Data</DialogTitle>
+                <DialogDescription>Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="border-2 border-dashed border-brand-cream-dark rounded-lg p-6 text-center hover:border-brand-gold transition-colors">
+                  <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" id="file-upload" />
+                  <label htmlFor="file-upload" className="cursor-pointer block">
+                    <Upload className="w-8 h-8 text-brand-gold mx-auto mb-2" />
+                    <p className="text-brand-blue font-semibold">Click to upload CSV</p>
+                  </label>
+                </div>
+                {uploadProgress > 0 && uploadProgress < 100 && (
+                  <div className="w-full bg-brand-cream-dark rounded-full h-2">
+                    <div className="bg-brand-gold h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
                   </div>
-                </DialogContent>
-              </Dialog>
-
-              {/* Add Patient */}
-              <Dialog open={showAddPatient} onOpenChange={setShowAddPatient}>
-                <DialogTrigger asChild>
-                  <Button size="sm" className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold">
-                    <Plus className="w-4 h-4" />
-                    Add Patient
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="bg-white">
-                  <DialogHeader>
-                    <DialogTitle className="text-brand-blue">Add New Patient</DialogTitle>
-                    <DialogDescription>Enter patient details to add them to the clinic dashboard</DialogDescription>
-                  </DialogHeader>
-                  <div className="space-y-4">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="patient-name" className="text-brand-blue font-semibold">Patient Name</Label>
-                      <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-brand-cream-dark" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="insurance" className="text-brand-blue font-semibold">Insurance Company</Label>
-                      <Select value={newPatientInsurance} onValueChange={setNewPatientInsurance}>
-                        <SelectTrigger id="insurance" className="border-brand-cream-dark w-full">
-                          <SelectValue placeholder="Select insurance company" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {insuranceList.map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="authorized-sessions" className="text-brand-blue font-semibold">Authorized Sessions (optional)</Label>
-                      <Input id="authorized-sessions" placeholder="e.g. 12" type="number" value={newPatientAuthorized} onChange={e => setNewPatientAuthorized(e.target.value)} className="border-brand-cream-dark" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="auth-date" className="text-brand-blue font-semibold">Authorization Date (optional)</Label>
-                      <Input id="auth-date" type="date" value={newPatientAuthDate} onChange={e => setNewPatientAuthDate(e.target.value)} className="border-brand-cream-dark" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="auth-valid-until" className="text-brand-blue font-semibold">Authorization Valid Until (optional)</Label>
-                      <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
-                      <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-brand-cream-dark" />
-                    </div>
-                    <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
-                      {(createPatient.isPending || bulkCreateVisits.isPending) ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-                      Add Patient
+                )}
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="font-semibold">CSV Format:</p>
+                    <Button
+                      size="sm"
+                      onClick={handleDownloadTemplate}
+                      className="h-auto gap-1.5 bg-brand-blue hover:bg-brand-blue-dark text-white text-xs font-semibold px-3 py-1.5"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Download Template
                     </Button>
                   </div>
-                </DialogContent>
-              </Dialog>
-            </div>
-          </div>
-        </div>
-      </div>
+                  <p className="font-mono">Patient Name, Insurance, Authorized Sessions, …</p>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
 
+          {/* Add Patient */}
+          <Dialog open={showAddPatient} onOpenChange={setShowAddPatient}>
+            <DialogTrigger asChild>
+              <Button size="sm" className="gap-1.5 bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold">
+                <Plus className="w-4 h-4" />
+                <span className="hidden sm:inline">Add Patient</span>
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="bg-white max-h-[90vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle className="text-brand-blue">Add New Patient</DialogTitle>
+                <DialogDescription>Enter patient details to add them to the clinic dashboard</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="patient-name" className="text-brand-blue font-semibold">Patient Name</Label>
+                  <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-brand-cream-dark" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="insurance" className="text-brand-blue font-semibold">Insurance Company</Label>
+                  <Select value={newPatientInsurance} onValueChange={setNewPatientInsurance}>
+                    <SelectTrigger id="insurance" className="border-brand-cream-dark w-full">
+                      <SelectValue placeholder="Select insurance company" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {insuranceList.map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="authorized-sessions" className="text-brand-blue font-semibold">Authorized Sessions (optional)</Label>
+                  <Input id="authorized-sessions" placeholder="e.g. 12" type="number" value={newPatientAuthorized} onChange={e => setNewPatientAuthorized(e.target.value)} className="border-brand-cream-dark" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="auth-date" className="text-brand-blue font-semibold">Authorization Date (optional)</Label>
+                  <Input id="auth-date" type="date" value={newPatientAuthDate} onChange={e => setNewPatientAuthDate(e.target.value)} className="border-brand-cream-dark" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="auth-valid-until" className="text-brand-blue font-semibold">Authorization Valid Until (optional)</Label>
+                  <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
+                  <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-brand-cream-dark" />
+                </div>
+                <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
+                  {(createPatient.isPending || bulkCreateVisits.isPending) ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+                  Add Patient
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
+        </>
+      }
+    >
       {/* Main Content */}
-      <div className="max-w-[1600px] mx-auto px-6 lg:px-8 py-6">
+      <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6 xl:space-y-8">
 
         {/* KPI Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           {[
             { icon: <Users className="w-4 h-4 text-brand-blue" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', tone: 'navy' as const },
             { icon: <CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', tone: 'gold' as const },
@@ -3502,14 +2920,21 @@ export default function Dashboard() {
           ))}
         </div>
 
-        {/* ─── Authorization Alert Panel ─────────────────────────────────────── */}
-        <AuthAlertPanel onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }} />
-
-        {/* ─── Claims Follow-Up Alert Panel ─────────────────────────────────── */}
-        <ClaimsFollowUpPanel
-          insurance={selectedInsurance}
-          onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }}
-        />
+        {/* ─── Needs Attention ────────────────────────────────────────────── */}
+        <section ref={attentionSectionRef} className="scroll-mt-20">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-3">Needs Attention</h2>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 xl:gap-6">
+            <div className="lg:col-span-4">
+              <AuthAlertPanel onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }} />
+            </div>
+            <div className="lg:col-span-8">
+              <ClaimsFollowUpPanel
+                insurance={selectedInsurance}
+                onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }}
+              />
+            </div>
+          </div>
+        </section>
 
         {/* ─── Active filter chips ───────────────────────────────────────────── */}
         <FilterChips
@@ -3528,286 +2953,249 @@ export default function Dashboard() {
           onClearAll={handleClearFilters}
         />
 
-        {/* Main Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-6 gap-6">
-          {/* Insurance Filter Sidebar — desktop only; mobile uses the compact Filters sheet below */}
-          <div className="hidden lg:block lg:col-span-1">
-            <div className="bg-white rounded-xl shadow-sm p-4 max-h-[600px] overflow-y-auto">
-              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-brand-cream-dark">Insurance</h3>
-              <div className="space-y-1">
-                {renderInsuranceFilterButtons()}
-              </div>
-            </div>
-          </div>
-
-          {/* Claims Status Filter — desktop only; mobile uses the compact Filters sheet below */}
-          <div className="hidden lg:block lg:col-span-1">
-            <div className="bg-white rounded-xl shadow-sm p-4 max-h-[600px] overflow-y-auto">
-              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-brand-cream-dark">Claims Status</h3>
-              <div className="space-y-1">
-                {renderClaimsStatusFilterButtons()}
-              </div>
-            </div>
-          </div>
-
-          {/* Patient List */}
-          <div className="lg:col-span-1 space-y-4">
-            <div className="bg-white rounded-xl shadow-sm p-4">
-              <h3 className="text-lg font-serif font-bold text-brand-blue mb-1">Patients</h3>
-              <p className="text-xs text-muted-foreground mb-4">{filteredPatients.length} in {selectedInsurance || 'all insurances'}</p>
-
-              {/* Search + mobile filters control */}
-              <div className="mb-4 space-y-2">
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" aria-hidden="true" />
-                  <Input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search patients..."
-                    aria-label="Search patients by name"
-                    className="pl-9 pr-9"
+        {/* ─── Patient Workspace ──────────────────────────────────────────── */}
+        <section ref={patientWorkspaceRef} className="scroll-mt-20">
+          <Card className="border-border shadow-sm rounded-xl overflow-hidden py-0 gap-0">
+            <CardHeader className="border-b border-border px-5 py-4 [.border-b]:pb-4">
+              <CardTitle className="text-base font-semibold text-brand-blue">Patient Workspace</CardTitle>
+              <CardDescription className="text-xs">Filter, search, and review patients in one place</CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="lg:grid lg:grid-cols-[260px_320px_minmax(0,1fr)]">
+                {/* Filters — desktop only; mobile uses the Filters sheet below */}
+                <div className="hidden lg:block border-r border-border p-4 max-h-[720px] overflow-y-auto">
+                  <PatientFilters
+                    insuranceList={insuranceList}
+                    insuranceCounts={insuranceCounts}
+                    selectedInsurance={selectedInsurance}
+                    onSelectInsurance={handleSelectInsurance}
+                    claimStatusFilters={CLAIM_STATUS_FILTERS}
+                    claimStatusCounts={claimStatusCounts}
+                    selectedClaimsFilter={selectedClaimsFilter}
+                    onSelectClaimsFilter={setSelectedClaimsFilter}
                   />
-                  {searchQuery !== '' && (
-                    <button
-                      type="button"
-                      onClick={() => setSearchQuery('')}
-                      aria-label="Clear search"
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  )}
                 </div>
 
-                <div className="lg:hidden">
-                  <Sheet open={showMobileFilters} onOpenChange={setShowMobileFilters}>
-                    <SheetTrigger asChild>
-                      <Button variant="outline" size="sm" className="gap-1.5">
-                        <SlidersHorizontal className="w-3.5 h-3.5" />
-                        Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
-                      </Button>
-                    </SheetTrigger>
-                    <SheetContent side="bottom" className="max-h-[80vh] overflow-y-auto">
-                      <SheetHeader>
-                        <SheetTitle>Filters</SheetTitle>
-                      </SheetHeader>
-                      <div className="px-4 pb-4 space-y-6">
-                        <div>
-                          <h4 className="text-sm font-semibold text-brand-blue mb-2">Insurance</h4>
-                          <div className="space-y-1">{renderInsuranceFilterButtons()}</div>
-                        </div>
-                        <div>
-                          <h4 className="text-sm font-semibold text-brand-blue mb-2">Claims Status</h4>
-                          <div className="space-y-1">{renderClaimsStatusFilterButtons()}</div>
-                        </div>
+                {/* Patient List */}
+                <div className="border-r border-border p-4 space-y-4 max-h-[720px] overflow-y-auto">
+                  <div>
+                    <h3 className="text-sm font-semibold text-brand-blue mb-0.5">Patients</h3>
+                    <p className="text-xs text-muted-foreground mb-3">{filteredPatients.length} in {selectedInsurance || 'all insurances'}</p>
+
+                    {/* Search + mobile filters control */}
+                    <div className="mb-3 space-y-2">
+                      <div className="relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" aria-hidden="true" />
+                        <Input
+                          type="text"
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          placeholder="Search patients..."
+                          aria-label="Search patients by name"
+                          className="pl-9 pr-9"
+                        />
+                        {searchQuery !== '' && (
+                          <button
+                            type="button"
+                            onClick={() => setSearchQuery('')}
+                            aria-label="Clear search"
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
-                      <SheetFooter>
-                        <Button variant="outline" onClick={handleClearFilters} disabled={activeFilterCount === 0}>
-                          Clear Filters
-                        </Button>
-                      </SheetFooter>
-                    </SheetContent>
-                  </Sheet>
-                </div>
-              </div>
 
-              <div className="space-y-1 max-h-96 overflow-y-auto">
-                {filteredPatients.length > 0 ? filteredPatients.map(patient => (
-                    <PatientListItem
-                      key={patient.id}
-                      name={patient.name}
-                      insurance={patient.insurance}
-                      isActive={activePatient?.id === patient.id}
-                      claimsStatus={patient.claimsStatus}
-                      onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
-                      onDelete={() => { setDeletePatientId(patient.id); setDeletePatientName(patient.name); }}
-                    />
-                  )) : (
-                    <div className="p-4 text-center text-muted-foreground text-sm">
-                      {searchQuery.trim() ? 'No patients match your search.' : 'No patients for this insurance'}
+                      <div className="lg:hidden">
+                        <Sheet open={showMobileFilters} onOpenChange={setShowMobileFilters}>
+                          <SheetTrigger asChild>
+                            <Button variant="outline" size="sm" className="gap-1.5">
+                              <SlidersHorizontal className="w-3.5 h-3.5" />
+                              Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+                            </Button>
+                          </SheetTrigger>
+                          <SheetContent side="bottom" className="max-h-[80vh] overflow-y-auto">
+                            <SheetHeader>
+                              <SheetTitle>Filters</SheetTitle>
+                            </SheetHeader>
+                            <div className="px-4 pb-4">
+                              <PatientFilters
+                                insuranceList={insuranceList}
+                                insuranceCounts={insuranceCounts}
+                                selectedInsurance={selectedInsurance}
+                                onSelectInsurance={handleSelectInsurance}
+                                claimStatusFilters={CLAIM_STATUS_FILTERS}
+                                claimStatusCounts={claimStatusCounts}
+                                selectedClaimsFilter={selectedClaimsFilter}
+                                onSelectClaimsFilter={setSelectedClaimsFilter}
+                              />
+                            </div>
+                            <SheetFooter>
+                              <Button variant="outline" onClick={handleClearFilters} disabled={activeFilterCount === 0}>
+                                Clear Filters
+                              </Button>
+                            </SheetFooter>
+                          </SheetContent>
+                        </Sheet>
+                      </div>
                     </div>
-                  )}
-              </div>
-            </div>
 
-            {/* ─── Completed Sessions Folder ─────────────────────────────────── */}
-            {completedPatients.length > 0 && (
-              <Card className="border-green-200 shadow-md">
-                <CardHeader className="bg-green-700 text-white rounded-t-lg py-3">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4" />
-                    Completed Sessions
-                    <Badge className="bg-white text-green-700 text-xs ml-auto">{completedPatients.length}</Badge>
-                  </CardTitle>
-                  <CardDescription className="text-green-100 text-xs">All sessions fully completed</CardDescription>
-                </CardHeader>
-                <CardContent className="p-0">
-                  <div className="space-y-1 max-h-60 overflow-y-auto">
-                    {completedPatients.map(patient => (
-                      <PatientListItem
-                        key={patient.id}
-                        name={patient.name}
-                        insurance={patient.insurance}
-                        isActive={activePatient?.id === patient.id}
-                        tone="success"
-                        trailing={<CheckCircle2 className="w-4 h-4 text-green-500" />}
-                        onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
-                      />
-                    ))}
+                    <div className="space-y-1 max-h-96 overflow-y-auto">
+                      {filteredPatients.length > 0 ? filteredPatients.map(patient => (
+                          <PatientListItem
+                            key={patient.id}
+                            name={patient.name}
+                            insurance={patient.insurance}
+                            isActive={activePatient?.id === patient.id}
+                            claimsStatus={patient.claimsStatus}
+                            onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
+                            onDelete={() => { setDeletePatientId(patient.id); setDeletePatientName(patient.name); }}
+                          />
+                        )) : (
+                          <div className="p-4 text-center text-muted-foreground text-sm">
+                            {searchQuery.trim() ? 'No patients match your search.' : 'No patients for this insurance'}
+                          </div>
+                        )}
+                    </div>
                   </div>
-                </CardContent>
-              </Card>
-            )}
 
-            {/* Discharged Patients Folder — inside the patients column */}
-            {dischargedPatients.length > 0 && (
-            <Card className="border-gray-300 shadow-md">
-              <CardHeader className="bg-gray-600 text-white rounded-t-lg py-3">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <UserX className="w-4 h-4" />
-                  Discharged Patients
-                  <Badge className="bg-white text-gray-700 text-xs ml-auto">{dischargedPatients.length}</Badge>
-                </CardTitle>
-                <CardDescription className="text-gray-200 text-xs">Click a patient to view their records &amp; discharge details</CardDescription>
-              </CardHeader>
-              <CardContent className="p-0">
-                <div className="space-y-1 max-h-60 overflow-y-auto">
-                  {dischargedPatients.map(patient => (
-                    <PatientListItem
-                      key={patient.id}
-                      name={patient.name}
-                      insurance={patient.insurance}
-                      isActive={activePatient?.id === patient.id}
-                      tone="muted"
-                      trailing={<UserX className="w-4 h-4 text-gray-400" />}
-                      onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(true); }}
-                      meta={
-                        <>
-                          {patient.dischargeDate && (
-                            <p className="text-xs text-gray-400 mt-0.5">
-                              Discharged: {new Date(patient.dischargeDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                            </p>
-                          )}
-                          {patient.dischargeReason && (
-                            <p className="text-xs text-gray-400 truncate">Reason: {patient.dischargeReason}</p>
-                          )}
-                        </>
-                      }
-                    />
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-            )}
-          </div>
-
-          {/* Right Content */}
-          <div className="lg:col-span-3 space-y-6">
-            {activePatient && (
-              <>
-                <Card className="border-brand-cream-dark shadow-sm rounded-xl">
-                  <CardHeader className="pb-3">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <button onClick={() => setShowDetailView(true)} className="group">
-                          <CardTitle className="text-2xl font-serif font-bold text-brand-blue group-hover:text-brand-gold transition-colors cursor-pointer">
-                            {activePatient.name}
-                          </CardTitle>
-                        </button>
-                        <CardDescription className="mt-2 flex items-center gap-3 flex-wrap">
-                          <span>Insurance: {activePatient.insurance}</span>
-                          <span className="flex items-center gap-2">
-                            <span className={activePatient.isActive !== false ? 'text-green-700 font-semibold' : 'text-gray-500 font-semibold'}>
-                              {activePatient.isActive !== false ? 'Active' : 'Discharged'}
-                            </span>
-                            <Switch
-                              checked={activePatient.isActive !== false}
-                              onCheckedChange={(checked) => handleToggleActive(activePatient.id, checked)}
-                              disabled={setPatientActive.isPending}
-                              aria-label="Toggle patient active status"
+                  {/* ─── Completed Sessions Folder ─────────────────────────────────── */}
+                  {completedPatients.length > 0 && (
+                    <Card className="border-green-200 shadow-sm py-0 gap-0 overflow-hidden">
+                      <CardHeader className="bg-green-700 text-white py-2.5 px-3 [.border-b]:pb-2.5">
+                        <CardTitle className="text-xs flex items-center gap-2 font-semibold">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Completed Sessions
+                          <Badge className="bg-white text-green-700 text-[10px] ml-auto">{completedPatients.length}</Badge>
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="p-0">
+                        <div className="space-y-1 max-h-48 overflow-y-auto">
+                          {completedPatients.map(patient => (
+                            <PatientListItem
+                              key={patient.id}
+                              name={patient.name}
+                              insurance={patient.insurance}
+                              isActive={activePatient?.id === patient.id}
+                              tone="success"
+                              trailing={<CheckCircle2 className="w-4 h-4 text-green-500" />}
+                              onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
                             />
-                          </span>
-                        </CardDescription>
-                      </div>
-                      {alertStatus && (
-                        <Badge className={`text-sm px-3 py-1 rounded-full font-medium ${alertStatus.color}`}>{alertStatus.label}</Badge>
-                      )}
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-2">
-                      <div className="p-4 bg-brand-cream/40 rounded-lg text-center">
-                        <p className="text-xs text-gray-600 uppercase tracking-wide mb-1">Authorized Sessions</p>
-                        <p className="text-3xl font-bold text-brand-gold">{activeMetrics.totalAuthorized}</p>
-                      </div>
-                      <div className="p-4 bg-brand-cream/40 rounded-lg text-center">
-                        <p className="text-xs text-gray-600 uppercase tracking-wide mb-1">Completed</p>
-                        <p className="text-3xl font-bold text-green-600">{activeMetrics.completed}</p>
-                      </div>
-                      <div className="p-4 bg-brand-cream/40 rounded-lg text-center">
-                        <p className="text-xs text-gray-600 uppercase tracking-wide mb-1">Remaining</p>
-                        <p className="text-3xl font-bold text-brand-blue">{activeMetrics.remaining}</p>
-                      </div>
-                    </div>
-                  </CardContent>
-                  <CardFooter className="border-t pt-6">
-                    <Button
-                      onClick={() => setShowDetailView(true)}
-                      className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
-                    >
-                      View Full Records &amp; Edit Date ASH Submitted
-                    </Button>
-                  </CardFooter>
-                </Card>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
 
-                {/* Progress Chart */}
-                {patientProgressData.length > 0 && (
-                  <Card className="border-brand-cream-dark shadow-sm rounded-xl">
-                    <CardHeader>
-                      <CardTitle className="text-lg font-serif font-bold text-brand-blue">Session Progress</CardTitle>
-                      <CardDescription className="text-sm text-gray-600 mt-1">Sessions remaining over time</CardDescription>
+                  {/* Discharged Patients Folder — inside the patients column */}
+                  {dischargedPatients.length > 0 && (
+                  <Card className="border-gray-300 shadow-sm py-0 gap-0 overflow-hidden">
+                    <CardHeader className="bg-gray-600 text-white py-2.5 px-3 [.border-b]:pb-2.5">
+                      <CardTitle className="text-xs flex items-center gap-2 font-semibold">
+                        <UserX className="w-3.5 h-3.5" />
+                        Discharged Patients
+                        <Badge className="bg-white text-gray-700 text-[10px] ml-auto">{dischargedPatients.length}</Badge>
+                      </CardTitle>
                     </CardHeader>
-                    <CardContent>
-                      <div className="h-64">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <LineChart data={patientProgressData}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#F0E9DC" />
-                            <XAxis dataKey="session" stroke="#6B7280" />
-                            <YAxis stroke="#6B7280" />
-                            <Tooltip contentStyle={{ backgroundColor: '#FAF5EE', border: '1px solid #F0E9DC', borderRadius: '8px' }} />
-                            <Line type="monotone" dataKey="remaining" stroke="#1E3A5F" strokeWidth={2} dot={{ fill: '#E8A93C', r: 4 }} activeDot={{ r: 6 }} />
-                          </LineChart>
-                        </ResponsiveContainer>
+                    <CardContent className="p-0">
+                      <div className="space-y-1 max-h-48 overflow-y-auto">
+                        {dischargedPatients.map(patient => (
+                          <PatientListItem
+                            key={patient.id}
+                            name={patient.name}
+                            insurance={patient.insurance}
+                            isActive={activePatient?.id === patient.id}
+                            tone="muted"
+                            trailing={<UserX className="w-4 h-4 text-gray-400" />}
+                            onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(true); }}
+                            meta={
+                              <>
+                                {patient.dischargeDate && (
+                                  <p className="text-xs text-gray-400 mt-0.5">
+                                    Discharged: {new Date(patient.dischargeDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                                  </p>
+                                )}
+                                {patient.dischargeReason && (
+                                  <p className="text-xs text-gray-400 truncate">Reason: {patient.dischargeReason}</p>
+                                )}
+                              </>
+                            }
+                          />
+                        ))}
                       </div>
                     </CardContent>
                   </Card>
-                )}
-              </>
-            )}
-
-            {/* Clinic Overview */}
-            <Card className="border-brand-cream-dark shadow-sm rounded-xl">
-              <CardHeader>
-                <CardTitle className="text-lg font-serif font-bold text-brand-blue">Clinic Overview</CardTitle>
-                <CardDescription className="text-sm text-gray-600 mt-1">Sessions for active patient</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center justify-center gap-6">
-                  <div className="max-w-[240px] w-full mx-auto">
-                    <ResponsiveContainer width="100%" height={220}>
-                      <PieChart>
-                        <Pie data={clinicStatusData} cx="50%" cy="50%" labelLine={false} label={({ name, value }) => `${name}: ${value}`} outerRadius={70} dataKey="value">
-                          {clinicStatusData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
-                        </Pie>
-                        <Tooltip contentStyle={{ backgroundColor: '#FAF5EE', border: '1px solid #F0E9DC', borderRadius: '8px' }} />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </div>
+                  )}
                 </div>
-              </CardContent>
-            </Card>
-          </div>
+
+                {/* Patient Detail — the dominant workspace area */}
+                <div className="p-5">
+                  {activePatient ? (
+                    <div className="space-y-4">
+                      <div className="flex items-start justify-between gap-3 flex-wrap">
+                        <div>
+                          <button onClick={() => setShowDetailView(true)} className="group text-left">
+                            <h3 className="text-xl font-semibold text-brand-blue group-hover:text-brand-gold transition-colors cursor-pointer">
+                              {activePatient.name}
+                            </h3>
+                          </button>
+                          <div className="mt-1.5 flex items-center gap-3 flex-wrap text-sm text-muted-foreground">
+                            <span>Insurance: {activePatient.insurance}</span>
+                            <span className="flex items-center gap-2">
+                              <span className={activePatient.isActive !== false ? 'text-green-700 font-semibold' : 'text-gray-500 font-semibold'}>
+                                {activePatient.isActive !== false ? 'Active' : 'Discharged'}
+                              </span>
+                              <Switch
+                                checked={activePatient.isActive !== false}
+                                onCheckedChange={(checked) => handleToggleActive(activePatient.id, checked)}
+                                disabled={setPatientActive.isPending}
+                                aria-label="Toggle patient active status"
+                              />
+                            </span>
+                          </div>
+                        </div>
+                        {alertStatus && (
+                          <Badge className={`text-xs px-2.5 py-1 rounded-full font-medium ${alertStatus.color}`}>{alertStatus.label}</Badge>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-3">
+                        <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
+                          <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Authorized</p>
+                          <p className="text-2xl font-bold text-brand-gold">{activeMetrics.totalAuthorized}</p>
+                        </div>
+                        <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
+                          <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Completed</p>
+                          <p className="text-2xl font-bold text-green-600">{activeMetrics.completed}</p>
+                        </div>
+                        <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
+                          <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Remaining</p>
+                          <p className="text-2xl font-bold text-brand-blue">{activeMetrics.remaining}</p>
+                        </div>
+                      </div>
+
+                      <Button
+                        onClick={() => setShowDetailView(true)}
+                        className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
+                      >
+                        View Full Records &amp; Edit Date ASH Submitted
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="h-full min-h-[200px] flex items-center justify-center text-sm text-muted-foreground">
+                      Select a patient to see their summary.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </section>
+
+        {/* ─── Patient Analytics ──────────────────────────────────────────── */}
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-3">Patient Analytics</h2>
+          <PatientAnalytics patientProgressData={patientProgressData} clinicStatusData={clinicStatusData} />
         </div>
       </div>
 
@@ -3894,6 +3282,6 @@ export default function Dashboard() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </DashboardShell>
   );
 }
