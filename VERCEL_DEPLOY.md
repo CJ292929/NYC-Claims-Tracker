@@ -40,6 +40,13 @@ In the Vercel project settings under **Settings → Environment Variables**, add
 
 ### Required — Supabase
 
+> **⚠️ Verify before using:** the project ref below (`czjckcplzuigjbhegbon`) has not
+> been reconciled with the ref documented in `references/local-setup-schema.sql`
+> (`whezsmwxbozzfddhpebq`), which is the ref this repo's schema audit traced as the
+> project that was reconstructed from scratch. Confirm the actual value from
+> Supabase → Settings → API → Project URL for the project linked to this Vercel
+> deployment before relying on the example below.
+
 | Variable | Value | Where to find it |
 |---|---|---|
 | `SUPABASE_URL` | `https://czjckcplzuigjbhegbon.supabase.co` | Supabase → Settings → API → Project URL |

@@ -1,9 +1,23 @@
 -- ============================================================================
 -- NYC Home Rehab Clinic Dashboard — full schema setup
 --
+-- THIS FILE IS THE AUTHORITATIVE SCHEMA SOURCE OF TRUTH for this repo. It is
+-- a hand-maintained snapshot, not generated — when the schema changes, apply
+-- the change in the Supabase SQL Editor first, then update this file (and the
+-- mirrored TypeScript types in drizzle/schema.ts and server/supabase.types.ts)
+-- to match. The drizzle/ directory is unrelated legacy MySQL tooling — see
+-- drizzle/LEGACY.md — and must not be used to manage this schema.
+--
 -- This Supabase project (whezsmwxbozzfddhpebq) had NO tables in it, which is
 -- why login and every dashboard query failed. Run this ENTIRE script once in
 -- Supabase → SQL Editor → New Query → Run.
+--
+-- NOTE: the project ref above (whezsmwxbozzfddhpebq) has not been independently
+-- verified against the live Vercel production SUPABASE_URL as of this audit —
+-- VERCEL_DEPLOY.md documents a different ref (czjckcplzuigjbhegbon) that was
+-- never reconciled with this one. Confirm the actual ref from the Supabase
+-- dashboard linked to the production Vercel project before assuming either
+-- value is current. See drizzle/LEGACY.md and the schema audit report for detail.
 --
 -- Reconstructed from server/supabase.types.ts, server/db.ts, and
 -- server/routers.ts (the previous references/create-claims-table.sql was

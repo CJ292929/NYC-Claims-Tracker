@@ -1,3 +1,9 @@
+-- SUPERSEDED — do not run this file.
+-- It predates the `lmn` and `is_resolved` columns the app now reads/writes
+-- (see server/routers.ts) and its claim_status CHECK is missing 'pended',
+-- 'rejected', and 'resubmitted'. The authoritative claims_records definition
+-- is in references/local-setup-schema.sql. Kept here only for history.
+--
 -- Create claims_records table in Supabase PostgreSQL
 -- Run this SQL in Supabase SQL Editor to create the table
 
