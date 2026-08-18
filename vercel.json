@@ -1,5 +1,8 @@
 {
   "version": 2,
+  "git": {
+    "deploymentEnabled": false
+  },
   "buildCommand": "pnpm install --frozen-lockfile && pnpm build",
   "installCommand": "pnpm install --frozen-lockfile",
   "outputDirectory": "dist/public",
