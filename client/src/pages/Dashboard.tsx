@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
@@ -12,11 +12,16 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { Separator } from '@/components/ui/separator';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch } from '@/lib/nameMatch';
 import logoIcon from '@/assets/logos/logo-icon.png';
+import { StatusBadge } from '@/components/dashboard/StatusBadge';
+import { MetricCard } from '@/components/dashboard/MetricCard';
+import { PatientListItem } from '@/components/dashboard/PatientListItem';
+import { FilterChips } from '@/components/dashboard/FilterChips';
 
 /**
  * Dashboard Component — Database-backed
@@ -118,6 +123,34 @@ const toInputDate = (d: Date | null | undefined): string => {
     return '';
   }
 };
+
+/** Compact colored dropdown for a visit's auth status. `onChange` receives the
+ *  same '' | 'Pending' | 'Approved' | 'Denied' shape handleUpdateAuthStatus expects. */
+function VisitAuthStatusSelect({ visit, onChange }: { visit: DbVisit; onChange: (visitId: string, status: string) => void }) {
+  const value = visit.authStatus === 'none' ? 'none' : visit.authStatus.charAt(0).toUpperCase() + visit.authStatus.slice(1);
+  const colorClass =
+    visit.authStatus === 'approved' ? 'bg-green-100 text-green-700' :
+    visit.authStatus === 'denied' ? 'bg-red-100 text-red-700' :
+    visit.authStatus === 'pending' ? 'bg-yellow-100 text-yellow-700' :
+    'bg-gray-100 text-gray-600';
+  return (
+    <Select value={value} onValueChange={(v) => onChange(visit.id, v === 'none' ? '' : v)}>
+      <SelectTrigger
+        size="sm"
+        aria-label="Auth status"
+        className={`h-auto w-auto border-0 rounded-full px-3 py-1 text-xs font-medium shadow-none ${colorClass}`}
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="none">— None —</SelectItem>
+        <SelectItem value="Pending">Pending</SelectItem>
+        <SelectItem value="Approved">Approved</SelectItem>
+        <SelectItem value="Denied">Denied</SelectItem>
+      </SelectContent>
+    </Select>
+  );
+}
 
 // ─── Authorization Alert Panel ──────────────────────────────────────────────────────
 
@@ -247,8 +280,8 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     return (
       <div className="mb-6">
         <div className="flex items-center gap-2 mb-3">
-          <BellRing className="w-5 h-5 text-[#E8A93C]" />
-          <h2 className="text-lg font-bold text-[#1E3A5F]">Authorization Alerts</h2>
+          <BellRing className="w-5 h-5 text-brand-gold" />
+          <h2 className="text-lg font-bold text-brand-blue">Authorization Alerts</h2>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {[1, 2].map(i => (
@@ -275,13 +308,13 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     <>
     <div className="mb-6">
       <div className="flex items-center gap-2 mb-3">
-        <BellRing className="w-5 h-5 text-[#E8A93C] animate-bounce" />
-        <h2 className="text-lg font-bold text-[#1E3A5F]">Authorization Alerts</h2>
-        <span className="ml-1 inline-flex items-center justify-center w-6 h-6 rounded-full bg-red-600 text-white text-xs font-bold">
+        <BellRing className="w-5 h-5 text-brand-gold animate-bounce" />
+        <h2 className="text-lg font-bold text-brand-blue">Authorization Alerts</h2>
+        <Badge variant="destructive" className="ml-1 rounded-full w-6 h-6 p-0 justify-center">
           {urgent.length}
-        </span>
+        </Badge>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[28rem] overflow-y-auto pr-1">
         {urgent.map(alert => {
           const cfg = URGENCY_CONFIG[alert.urgency];
           const isRequesting = requestingId === alert.patientId;
@@ -301,8 +334,8 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
                 <div className="flex items-start gap-3">
                   <span className={`mt-0.5 shrink-0 ${cfg.iconClass}`}>{cfg.icon}</span>
                   <div className="min-w-0">
-                    <p className="font-bold text-[#1E3A5F] truncate">{alert.patientName}</p>
-                    <p className="text-xs text-[#6B7280] truncate">{alert.insurance}</p>
+                    <p className="font-bold text-brand-blue truncate">{alert.patientName}</p>
+                    <p className="text-xs text-muted-foreground truncate">{alert.insurance}</p>
                     <div className="flex flex-wrap gap-1 mt-2">
                       <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${cfg.badgeClass}`}>
                         {alert.authExpiryWarning ? 'Auth Expiring Soon' : cfg.label}
@@ -313,11 +346,11 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-[#6B7280] mt-1">
+                    <p className="text-xs text-muted-foreground mt-1">
                       {alert.authExpiryWarning ? 'Request new authorization before expiry date' : cfg.sublabel}
                     </p>
                     {alert.dateAshSubmitted && (
-                      <p className="text-xs text-[#6B7280] mt-0.5">
+                      <p className="text-xs text-muted-foreground mt-0.5">
                         Last submitted: {new Date(alert.dateAshSubmitted).toLocaleDateString()}
                       </p>
                     )}
@@ -347,26 +380,28 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               <div className="px-4 pb-3 flex gap-2">
                 {/* Mark as Requested — only for non-pending cards */}
                 {!alreadyPending && (
-                  <button
+                  <Button
+                    size="sm"
                     disabled={isRequesting}
                     onClick={(e) => {
                       e.stopPropagation();
                       markAsRequested.mutate({ patientId: alert.patientId });
                     }}
-                    className="flex-1 mt-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#1E3A5F] text-white hover:bg-[#152A47] disabled:opacity-60 disabled:cursor-not-allowed transition-all active:scale-[0.97]"
+                    className="flex-1 mt-1 bg-brand-blue text-white hover:bg-brand-blue-dark active:scale-[0.97]"
                   >
                     {isRequesting ? (
                       <><Loader2 className="w-3 h-3 animate-spin" /> Saving…</>
                     ) : (
                       <><CheckCircle2 className="w-3 h-3" /> Mark as Requested</>
                     )}
-                  </button>
+                  </Button>
                 )}
 
                 {/* Approved — only for pending cards */}
                 {alreadyPending && (
                   <>
-                    <button
+                    <Button
+                      size="sm"
                       onClick={(e) => {
                         e.stopPropagation();
                         setApproveDialogPatient({ id: alert.patientId, name: alert.patientName, insurance: alert.insurance ?? '' });
@@ -375,20 +410,21 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
                         setNewInsurance(alert.insurance ?? '');
                         setNewAuthValidUntil('');
                       }}
-                      className="flex-1 mt-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-green-600 text-white hover:bg-green-700 transition-all active:scale-[0.97]"
+                      className="flex-1 mt-1 bg-green-600 text-white hover:bg-green-700 active:scale-[0.97]"
                     >
                       <ShieldCheck className="w-3 h-3" /> Approved
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      size="sm"
                       disabled={isRequesting}
                       onClick={(e) => {
                         e.stopPropagation();
                         markAsRequested.mutate({ patientId: alert.patientId });
                       }}
-                      className="flex-1 mt-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-100 text-blue-700 hover:bg-blue-200 transition-all active:scale-[0.97]"
+                      className="flex-1 mt-1 bg-blue-100 text-blue-700 hover:bg-blue-200 active:scale-[0.97]"
                     >
                       <CheckCircle2 className="w-3 h-3" /> Re-request
-                    </button>
+                    </Button>
                   </>
                 )}
               </div>
@@ -402,7 +438,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
     <Dialog open={!!approveDialogPatient} onOpenChange={(open) => { if (!open) { setApproveDialogPatient(null); setNewAuthValidUntil(''); } }}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="text-[#1E3A5F] flex items-center gap-2">
+          <DialogTitle className="text-brand-blue flex items-center gap-2">
             <ShieldCheck className="w-5 h-5 text-green-600" />
             New Authorization Approved
           </DialogTitle>
@@ -413,7 +449,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
         </DialogHeader>
         <div className="space-y-4 py-2">
           <div className="space-y-1.5">
-            <Label htmlFor="new-sessions" className="text-[#1E3A5F] font-semibold">
+            <Label htmlFor="new-sessions" className="text-brand-blue font-semibold">
               Sessions Authorized <span className="text-red-500">*</span>
             </Label>
             <Input
@@ -424,11 +460,11 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               placeholder="e.g. 20"
               value={newSessions}
               onChange={(e) => setNewSessions(e.target.value)}
-              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
+              className="border-brand-blue/30 focus:border-brand-blue"
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-auth-date" className="text-[#1E3A5F] font-semibold">
+            <Label htmlFor="new-auth-date" className="text-brand-blue font-semibold">
               Authorization Date
             </Label>
             <Input
@@ -436,18 +472,18 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               type="date"
               value={newAuthDate}
               onChange={(e) => setNewAuthDate(e.target.value)}
-              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
+              className="border-brand-blue/30 focus:border-brand-blue"
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-insurance" className="text-[#1E3A5F] font-semibold">
+            <Label htmlFor="new-insurance" className="text-brand-blue font-semibold">
               Insurance Company
             </Label>
             <Select
               value={newInsurance}
               onValueChange={setNewInsurance}
             >
-              <SelectTrigger id="new-insurance" className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]">
+              <SelectTrigger id="new-insurance" className="border-brand-blue/30 focus:border-brand-blue">
                 <SelectValue placeholder="Select insurance company" />
               </SelectTrigger>
               <SelectContent>
@@ -463,7 +499,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="new-auth-valid-until" className="text-[#1E3A5F] font-semibold">
+            <Label htmlFor="new-auth-valid-until" className="text-brand-blue font-semibold">
               Authorization Valid Until <span className="text-gray-400 font-normal">(optional)</span>
             </Label>
             <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
@@ -472,7 +508,7 @@ function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => 
               type="date"
               value={newAuthValidUntil}
               onChange={(e) => setNewAuthValidUntil(e.target.value)}
-              className="border-[#1E3A5F]/30 focus:border-[#1E3A5F]"
+              className="border-brand-blue/30 focus:border-brand-blue"
             />
           </div>
           <div className="rounded-lg bg-blue-50 border border-blue-200 p-3 text-sm text-blue-800">
@@ -556,7 +592,7 @@ function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?: strin
       <div className="mb-6 bg-orange-50 border-l-4 border-orange-400 rounded-lg p-4">
         <div className="flex items-center gap-2 mb-3">
           <AlertCircle className="w-5 h-5 text-orange-500" />
-          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up Needed</h2>
+          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up Needed</h2>
         </div>
         <div className="text-sm text-gray-500">Loading claims…</div>
       </div>
@@ -568,7 +604,7 @@ function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?: strin
       <div className="mb-6 bg-green-50 border-l-4 border-green-500 rounded-lg p-4">
         <div className="flex items-center gap-2 mb-2">
           <CheckCircle2 className="w-5 h-5 text-green-500" />
-          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up</h2>
+          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up</h2>
         </div>
         <p className="text-sm text-green-700">All billed claims have received insurance reimbursement. No follow-up needed.</p>
       </div>
@@ -580,7 +616,7 @@ function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?: strin
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <AlertCircle className="w-5 h-5 text-amber-500 animate-pulse" />
-          <h2 className="text-lg font-bold text-[#1E3A5F]">Claims Follow-Up Needed</h2>
+          <h2 className="text-lg font-bold text-brand-blue">Claims Follow-Up Needed</h2>
           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800">
             {followUpClaims.length} claim{followUpClaims.length !== 1 ? 's' : ''}
           </span>
@@ -641,17 +677,19 @@ function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?: strin
                   </div>
                 </div>
                 <span className={`text-xs px-2 py-1 rounded-full font-bold capitalize ${s.badge} ${s.badgeText}`}>{status}</span>
-                <button
+                <Button
+                  size="sm"
                   onClick={(e) => {
                     e.stopPropagation();
                     markResolved.mutate({ id: claim.id });
                   }}
                   disabled={markResolved.isPending}
-                  className="ml-1 text-xs px-3 py-1 rounded-full font-bold bg-white/90 text-gray-800 hover:bg-white hover:scale-105 active:scale-95 transition-all duration-150 shadow-sm whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
+                  aria-label={`Mark claim for ${claim.patientName} as resolved`}
                   title="Mark as resolved and remove from follow-up list"
+                  className="ml-1 h-auto rounded-full bg-white/90 text-gray-800 hover:bg-white hover:scale-105 active:scale-95 px-3 py-1 shadow-sm whitespace-nowrap"
                 >
                   ✓ Resolved
-                </button>
+                </Button>
               </div>
             </div>
           );
@@ -1205,8 +1243,9 @@ export default function Dashboard() {
     const count = activePatients.filter(p => p.insurance === insurance).length;
     const isSelected = selectedInsurance === insurance;
     return (
-      <button
+      <Button
         key={insurance}
+        variant="ghost"
         onClick={() => {
           setSelectedInsurance(insurance);
           // Switching insurance while viewing a patient on a
@@ -1216,15 +1255,16 @@ export default function Dashboard() {
             setShowDetailView(false);
           }
         }}
-        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md cursor-pointer transition font-semibold text-sm ${
-          isSelected ? 'bg-brand-gold text-white' : 'text-brand-blue hover:bg-brand-cream'
+        aria-pressed={isSelected}
+        className={`w-full h-auto justify-between px-3 py-2.5 font-semibold text-sm ${
+          isSelected ? 'bg-brand-gold text-white hover:bg-brand-gold hover:text-white' : 'text-brand-blue hover:bg-brand-cream'
         }`}
       >
         <span className="truncate">{insurance}</span>
         <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
           isSelected ? 'bg-white/25 text-white' : 'bg-gray-100 text-gray-700'
         }`}>{count}</span>
-      </button>
+      </Button>
     );
   });
 
@@ -1232,18 +1272,20 @@ export default function Dashboard() {
     const count = claimStatusCounts[value as keyof typeof claimStatusCounts] ?? 0;
     const isSelected = selectedClaimsFilter === value;
     return (
-      <button
+      <Button
         key={value}
+        variant="ghost"
         onClick={() => setSelectedClaimsFilter(value)}
-        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-md cursor-pointer transition text-sm ${
-          isSelected ? 'bg-brand-gold text-white font-semibold' : 'text-brand-blue hover:bg-brand-cream'
+        aria-pressed={isSelected}
+        className={`w-full h-auto justify-between px-3 py-2.5 text-sm ${
+          isSelected ? 'bg-brand-gold text-white font-semibold hover:bg-brand-gold hover:text-white' : 'text-brand-blue hover:bg-brand-cream'
         }`}
       >
         <span className="truncate">{label}</span>
         <span className={`text-xs px-2 py-0.5 rounded-full ml-1 shrink-0 ${
           isSelected ? 'bg-white/25 text-white' : color
         }`}>{count}</span>
-      </button>
+      </Button>
     );
   });
 
@@ -1863,9 +1905,9 @@ export default function Dashboard() {
 
   if (patientsLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-[#FAF5EE] to-white flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4 text-[#1E3A5F]">
-          <Loader2 className="w-10 h-10 animate-spin text-[#E8A93C]" />
+      <div className="min-h-screen bg-gradient-to-b from-brand-cream to-white flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4 text-brand-blue">
+          <Loader2 className="w-10 h-10 animate-spin text-brand-gold" />
           <p className="text-lg font-semibold">Loading patient data…</p>
         </div>
       </div>
@@ -1876,23 +1918,25 @@ export default function Dashboard() {
 
   if (showDetailView && activePatient) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-[#FAF5EE] to-white">
+      <div className="min-h-screen bg-gradient-to-b from-brand-cream to-white">
         {/* Header */}
-        <div className="bg-[#1E3A5F] text-white py-6">
-          <div className="container">
-            <button
+        <div className="bg-brand-blue text-white py-4">
+          <div className="container px-4 sm:px-6 lg:px-8">
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setShowDetailView(false)}
-              className="flex items-center gap-2 text-[#E8A93C] hover:text-white mb-4 transition-colors"
+              className="mb-3 -ml-2 gap-1.5 text-brand-gold hover:text-white hover:bg-white/10"
             >
-              <ChevronLeft className="w-5 h-5" />
+              <ChevronLeft className="w-4 h-4" />
               Back to Dashboard
-            </button>
-            <div className="flex items-center justify-between">
+            </Button>
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h1 className="text-4xl font-bold">{activePatient.name}</h1>
-                <p className="text-[#E8A93C] mt-2">Detailed Visit Records — {activePatient.insurance}</p>
+                <h1 className="text-2xl sm:text-3xl font-bold">{activePatient.name}</h1>
+                <p className="text-brand-gold text-sm mt-1">Detailed Visit Records — {activePatient.insurance}</p>
               </div>
-              <div className="flex items-center gap-4">
+              <div className="flex items-center gap-3">
                 {/* Active / Inactive toggle */}
                 <div className="flex items-center gap-2 bg-white/10 rounded-lg px-3 py-2">
                   {activePatient.isActive !== false ? (
@@ -1913,13 +1957,16 @@ export default function Dashboard() {
                     className="data-[state=checked]:bg-green-500"
                   />
                 </div>
-                <button
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => refetchVisits()}
-                  className="flex items-center gap-2 text-[#E8A93C] hover:text-white transition-colors text-sm"
+                  aria-label="Refresh visit data"
+                  className="gap-1.5 text-brand-gold hover:text-white hover:bg-white/10"
                 >
                   <RefreshCw className="w-4 h-4" />
-                  Refresh
-                </button>
+                  <span className="hidden sm:inline">Refresh</span>
+                </Button>
               </div>
             </div>
           </div>
@@ -1967,28 +2014,23 @@ export default function Dashboard() {
           {/* Summary cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
             {[
-              { label: 'Authorized', value: activeMetrics.totalAuthorized, color: 'text-[#1E3A5F]' },
-              { label: 'Completed', value: activeMetrics.completed, color: 'text-[#E8A93C]' },
-              { label: 'Remaining', value: activeMetrics.remaining, color: 'text-[#1E3A5F]' },
-            ].map(({ label, value, color }) => (
-              <Card key={label} className="border-[#F0E9DC] shadow-md">
-                <CardContent className="pt-6">
-                  <p className="text-xs text-[#6B7280] font-medium">{label}</p>
-                  <p className={`text-3xl font-bold mt-1 ${color}`}>{value}</p>
-                </CardContent>
-              </Card>
+              { label: 'Authorized', value: activeMetrics.totalAuthorized, tone: 'navy' as const },
+              { label: 'Completed', value: activeMetrics.completed, tone: 'gold' as const },
+              { label: 'Remaining', value: activeMetrics.remaining, tone: 'navy' as const },
+            ].map(({ label, value, tone }) => (
+              <MetricCard key={label} label={label} value={value} tone={tone} />
             ))}
           </div>
 
           {/* Visit Records — one Card per auth period */}
           {visitsLoading ? (
-            <div className="flex items-center justify-center py-12 text-[#1E3A5F]">
-              <Loader2 className="w-6 h-6 animate-spin mr-2 text-[#E8A93C]" />
+            <div className="flex items-center justify-center py-12 text-brand-blue">
+              <Loader2 className="w-6 h-6 animate-spin mr-2 text-brand-gold" />
               Loading visits…
             </div>
           ) : visits.length === 0 ? (
-            <Card className="border-[#F0E9DC] shadow-md">
-              <CardContent className="py-12 text-center text-[#6B7280]">No visit records yet. Log a session to get started.</CardContent>
+            <Card className="border-brand-cream-dark shadow-md">
+              <CardContent className="py-12 text-center text-muted-foreground">No visit records yet. Log a session to get started.</CardContent>
             </Card>
           ) : (
             <>
@@ -2034,20 +2076,20 @@ export default function Dashboard() {
                             </DialogTrigger>
                             <DialogContent className="bg-white">
                               <DialogHeader>
-                                <DialogTitle className="text-[#1E3A5F]">Log New Session</DialogTitle>
+                                <DialogTitle className="text-brand-blue">Log New Session</DialogTitle>
                                 <DialogDescription>Record a therapy session for {activePatient.name}</DialogDescription>
                               </DialogHeader>
                               <div className="space-y-4">
                                 <div>
-                                  <Label className="text-[#1E3A5F] font-semibold">Date of Service</Label>
+                                  <Label className="text-brand-blue font-semibold">Date of Service</Label>
                                   <Input
                                     type="date"
                                     value={sessionDate}
                                     onChange={e => setSessionDate(e.target.value)}
-                                    className="border-[#F0E9DC] mt-2"
+                                    className="border-brand-cream-dark mt-2"
                                   />
                                 </div>
-                                <div className="bg-[#FAF5EE] rounded-lg p-4 text-sm text-[#1E3A5F]">
+                                <div className="bg-brand-cream rounded-lg p-4 text-sm text-brand-blue">
                                   <p><strong>Sessions remaining:</strong> {activeMetrics.remaining}</p>
                                   <p><strong>After this session:</strong> {Math.max(0, activeMetrics.remaining - 1)}</p>
                                 </div>
@@ -2055,7 +2097,7 @@ export default function Dashboard() {
                                   <Button
                                     onClick={handleLogSession}
                                     disabled={createVisit.isPending}
-                                    className="flex-1 bg-[#1E3A5F] hover:bg-[#152A47] text-white font-semibold"
+                                    className="flex-1 bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
                                   >
                                     {createVisit.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <CheckCircle2 className="w-4 h-4 mr-2" />}
                                     Confirm Session
@@ -2081,32 +2123,17 @@ export default function Dashboard() {
                                     {visit.sessionNumber != null ? visit.sessionNumber : <span className="text-gray-300">—</span>}
                                   </span>
                                 </div>
-                                <select
-                                  value={visit.authStatus === 'none' ? '' : visit.authStatus.charAt(0).toUpperCase() + visit.authStatus.slice(1)}
-                                  onChange={e => handleUpdateAuthStatus(visit.id, e.target.value)}
-                                  aria-label="Auth Status"
-                                  className={`text-xs font-medium px-3 py-1.5 rounded-full border-0 outline-none cursor-pointer transition-colors min-h-[36px] ${
-                                    visit.authStatus === 'approved' ? 'bg-green-100 text-green-700' :
-                                    visit.authStatus === 'denied' ? 'bg-red-100 text-red-700' :
-                                    visit.authStatus === 'pending' ? 'bg-yellow-100 text-yellow-700' :
-                                    'bg-gray-100 text-gray-600'
-                                  }`}
-                                >
-                                  <option value="">— None —</option>
-                                  <option value="Pending">Pending</option>
-                                  <option value="Approved">Approved</option>
-                                  <option value="Denied">Denied</option>
-                                </select>
+                                <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
                               </div>
 
                               <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
                                 <div>
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Date of Service</p>
-                                  <p className="text-[#1E3A5F]">{visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300">—</span>}</p>
+                                  <p className="text-brand-blue">{visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300">—</span>}</p>
                                 </div>
                                 <div>
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Auth Date</p>
-                                  <p className="text-[#1E3A5F]">{visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300">—</span>}</p>
+                                  <p className="text-brand-blue">{visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300">—</span>}</p>
                                 </div>
                                 <div>
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide"># Authorized</p>
@@ -2128,32 +2155,35 @@ export default function Dashboard() {
                                       type="date"
                                       value={editingAshValue}
                                       onChange={e => setEditingAshValue(e.target.value)}
-                                      className="border border-brand-gold rounded-md px-2 py-2 text-sm text-[#1E3A5F] focus:outline-none focus:ring-2 focus:ring-brand-gold/30 min-h-[40px]"
+                                      className="border border-brand-gold rounded-md px-2 py-2 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30 min-h-[40px]"
                                       autoFocus
                                     />
-                                    <button
+                                    <Button
+                                      size="sm"
                                       onClick={() => handleSaveAsh(visit.id)}
                                       disabled={updateVisit.isPending}
-                                      className="text-green-600 hover:text-green-800 font-bold text-xs px-3 py-2 rounded bg-green-50 hover:bg-green-100 transition-colors min-h-[36px]"
+                                      className="h-auto min-h-[36px] text-green-600 hover:text-green-800 font-bold text-xs px-3 py-2 bg-green-50 hover:bg-green-100"
                                     >
                                       {updateVisit.isPending ? '…' : 'Save'}
-                                    </button>
-                                    <button
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="secondary"
                                       onClick={handleCancelAsh}
-                                      className="text-gray-500 hover:text-gray-700 font-bold text-xs px-3 py-2 rounded bg-gray-100 hover:bg-gray-200 transition-colors min-h-[36px]"
+                                      className="h-auto min-h-[36px] text-gray-500 hover:text-gray-700 font-bold text-xs px-3 py-2"
                                     >
                                       Cancel
-                                    </button>
+                                    </Button>
                                   </div>
                                 ) : (
                                   <button
                                     onClick={() => handleStartEditAsh(visit)}
                                     className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue cursor-pointer transition-colors min-h-[40px]"
                                     title="Click to edit Date ASH Submitted"
-                                    aria-label="Edit Date ASH Submitted"
+                                    aria-label={visit.dateAshSubmitted ? `Edit Date ASH Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date ASH Submitted'}
                                   >
                                     <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
-                                    <span className={visit.dateAshSubmitted ? 'text-[#1E3A5F] text-sm' : 'text-sm italic'}>
+                                    <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>
                                       {visit.dateAshSubmitted ? formatDate(visit.dateAshSubmitted) : 'Click to set date'}
                                     </span>
                                   </button>
@@ -2167,102 +2197,92 @@ export default function Dashboard() {
                           <table className="w-full text-sm min-w-full">
                             <thead className="bg-brand-blue/95">
                               <tr>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Date</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider"># Authorized</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider"># Remaining</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Session #</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Date of Service</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Date</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider"># Authorized</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider"># Remaining</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Session #</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Date of Service</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
                                   Date ASH Submitted
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
                                 </th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Status</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Status</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-100">
                       {periodVisits.map((visit) => (
                         <tr key={visit.id} className="hover:bg-brand-cream/30 transition-colors">
                           {/* Auth Date */}
-                          <td className="px-6 py-4 text-sm text-[#1E3A5F] whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm text-brand-blue whitespace-nowrap">
                             {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* # Authorized */}
-                          <td className="px-6 py-4 text-sm whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             {visit.sessionsAuthorized != null ? (
                               <span className="font-semibold text-brand-blue text-base">{visit.sessionsAuthorized}</span>
                             ) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* # Remaining */}
-                          <td className="px-6 py-4 text-sm whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             {visit.sessionsRemaining != null ? (
                               <span className="font-bold text-brand-gold text-base">{visit.sessionsRemaining}</span>
                             ) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* Session # */}
-                          <td className="px-6 py-4 text-sm whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             {visit.sessionNumber != null ? (
                               <span className="font-medium text-gray-700 text-base">{visit.sessionNumber}</span>
                             ) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* Date of Service */}
-                          <td className="px-6 py-4 text-sm text-[#6B7280] whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
                             {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
                           {/* Date ASH Submitted — EDITABLE */}
-                          <td className="px-6 py-4 text-sm whitespace-nowrap">
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             {editingAshId === visit.id ? (
                               <div className="flex items-center gap-2">
                                 <input
                                   type="date"
                                   value={editingAshValue}
                                   onChange={e => setEditingAshValue(e.target.value)}
-                                  className="border border-brand-gold rounded-md px-2 py-1.5 text-sm text-[#1E3A5F] focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
+                                  className="border border-brand-gold rounded-md px-2 py-1.5 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
                                   autoFocus
                                 />
-                                <button
+                                <Button
+                                  size="sm"
                                   onClick={() => handleSaveAsh(visit.id)}
                                   disabled={updateVisit.isPending}
-                                  className="text-green-600 hover:text-green-800 font-bold text-xs px-2 py-1 rounded bg-green-50 hover:bg-green-100 transition-colors"
+                                  className="h-auto text-green-600 hover:text-green-800 font-bold text-xs px-2 py-1 bg-green-50 hover:bg-green-100"
                                 >
                                   {updateVisit.isPending ? '…' : 'Save'}
-                                </button>
-                                <button
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
                                   onClick={handleCancelAsh}
-                                  className="text-gray-500 hover:text-gray-700 font-bold text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200 transition-colors"
+                                  className="h-auto text-gray-500 hover:text-gray-700 font-bold text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200"
                                 >
                                   Cancel
-                                </button>
+                                </Button>
                               </div>
                             ) : (
                               <button
                                 onClick={() => handleStartEditAsh(visit)}
                                 className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue cursor-pointer transition-colors"
                                 title="Click to edit Date ASH Submitted"
+                                aria-label={visit.dateAshSubmitted ? `Edit Date ASH Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date ASH Submitted'}
                               >
                                 <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
-                                <span className={visit.dateAshSubmitted ? 'text-[#1E3A5F] text-sm' : 'text-sm italic'}>
+                                <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>
                                   {visit.dateAshSubmitted ? formatDate(visit.dateAshSubmitted) : 'Click to set date'}
                                 </span>
                               </button>
                             )}
                           </td>
                           {/* Auth Status */}
-                          <td className="px-6 py-4 text-sm whitespace-nowrap">
-                            <select
-                              value={visit.authStatus === 'none' ? '' : visit.authStatus.charAt(0).toUpperCase() + visit.authStatus.slice(1)}
-                              onChange={e => handleUpdateAuthStatus(visit.id, e.target.value)}
-                              className={`text-xs font-medium px-3 py-1 rounded-full border-0 outline-none cursor-pointer transition-colors ${
-                                visit.authStatus === 'approved' ? 'bg-green-100 text-green-700' :
-                                visit.authStatus === 'denied' ? 'bg-red-100 text-red-700' :
-                                visit.authStatus === 'pending' ? 'bg-yellow-100 text-yellow-700' :
-                                'bg-gray-100 text-gray-600'
-                              }`}
-                            >
-                              <option value="">— None —</option>
-                              <option value="Pending">Pending</option>
-                              <option value="Approved">Approved</option>
-                              <option value="Denied">Denied</option>
-                            </select>
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
+                            <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
                           </td>
                         </tr>
                       ))}
@@ -2302,15 +2322,17 @@ export default function Dashboard() {
                                 <div className="mb-2 flex items-center justify-between">
                                   <p className="text-sm font-semibold text-gray-700">Toggle Columns</p>
                                   {hiddenClaimsColumns.size > 0 && (
-                                    <button
+                                    <Button
+                                      variant="link"
+                                      size="sm"
                                       onClick={() => {
                                         setHiddenClaimsColumns(new Set());
                                         localStorage.removeItem('claims-hidden-columns');
                                       }}
-                                      className="text-xs text-brand-blue hover:underline"
+                                      className="h-auto p-0 text-xs text-brand-blue"
                                     >
                                       Show all
-                                    </button>
+                                    </Button>
                                   )}
                                 </div>
                                 <div className="space-y-1.5 max-h-64 overflow-y-auto">
@@ -2505,7 +2527,7 @@ export default function Dashboard() {
                                     onClick={e => e.stopPropagation()}
                                   />
                                 ) : (
-                                  <span className="text-sm text-right text-[#1E3A5F] truncate max-w-[60%]">
+                                  <span className="text-sm text-right text-brand-blue truncate max-w-[60%]">
                                     {type === 'number'
                                       ? (numVal != null && !isNaN(numVal) ? `${prefix}${numVal.toFixed(decimals)}` : <span className="text-gray-300">—</span>)
                                       : type === 'date'
@@ -2526,7 +2548,7 @@ export default function Dashboard() {
                                   {/* Header: Date of Service / claim identifier / status */}
                                   <div className="flex items-start justify-between gap-3">
                                     <div className="min-w-0">
-                                      <p className="text-sm font-semibold text-[#1E3A5F]">
+                                      <p className="text-sm font-semibold text-brand-blue">
                                         {claim.date_of_service ? new Date(claim.date_of_service).toLocaleDateString() : <span className="text-gray-300">No date</span>}
                                       </p>
                                       <p className="text-xs text-gray-500 mt-0.5 truncate">
@@ -2619,7 +2641,7 @@ export default function Dashboard() {
                                                 onClick={e => e.stopPropagation()}
                                               />
                                             ) : (
-                                              <span className="text-sm text-right text-[#1E3A5F] truncate max-w-[60%]">
+                                              <span className="text-sm text-right text-brand-blue truncate max-w-[60%]">
                                                 {claim.expire_bcbs_claim_number || claim.oa_claim_number || <span className="text-gray-300">—</span>}
                                               </span>
                                             )}
@@ -2825,99 +2847,128 @@ export default function Dashboard() {
               Period {addClaimPeriod} for {activePatient?.name}
             </DialogDescription>
           </DialogHeader>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <Label>Place of Service</Label>
-              <Input value={claimFormData.placeOfService} onChange={(e) => setClaimFormData({...claimFormData, placeOfService: e.target.value})} />
+          <div className="space-y-5">
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-brand-blue">Claim Information</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <Label>Place of Service</Label>
+                  <Input value={claimFormData.placeOfService} onChange={(e) => setClaimFormData({...claimFormData, placeOfService: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Date of Service</Label>
+                  <Input type="date" value={claimFormData.dateOfService} onChange={(e) => setClaimFormData({...claimFormData, dateOfService: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Visit #</Label>
+                  <Input value={claimFormData.visitNumber} onChange={(e) => setClaimFormData({...claimFormData, visitNumber: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Insurance Billed</Label>
+                  <Input value={claimFormData.insuranceBilled} onChange={(e) => setClaimFormData({...claimFormData, insuranceBilled: e.target.value})} />
+                </div>
+              </div>
             </div>
-            <div>
-              <Label>Date of Service</Label>
-              <Input type="date" value={claimFormData.dateOfService} onChange={(e) => setClaimFormData({...claimFormData, dateOfService: e.target.value})} />
+
+            <Separator />
+
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-brand-blue">Codes</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <Label>CPT Codes</Label>
+                  <Input value={claimFormData.cptCodes} onChange={(e) => setClaimFormData({...claimFormData, cptCodes: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Units Billed</Label>
+                  <Input type="number" value={claimFormData.unitsBilled} onChange={(e) => setClaimFormData({...claimFormData, unitsBilled: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Diagnosis Codes</Label>
+                  <Input value={claimFormData.diagnosisCodes} onChange={(e) => setClaimFormData({...claimFormData, diagnosisCodes: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Modifier</Label>
+                  <Input value={claimFormData.modifier} onChange={(e) => setClaimFormData({...claimFormData, modifier: e.target.value})} />
+                </div>
+              </div>
             </div>
-            <div>
-              <Label>Visit #</Label>
-              <Input value={claimFormData.visitNumber} onChange={(e) => setClaimFormData({...claimFormData, visitNumber: e.target.value})} />
+
+            <Separator />
+
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-brand-blue">Billing</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <Label>Charge Amount</Label>
+                  <Input type="number" step="0.01" value={claimFormData.chargeAmount} onChange={(e) => setClaimFormData({...claimFormData, chargeAmount: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Insurance Reimbursement</Label>
+                  <Input type="number" step="0.01" value={claimFormData.insuranceReimbursement} onChange={(e) => setClaimFormData({...claimFormData, insuranceReimbursement: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Patient Amount Paid</Label>
+                  <Input type="number" step="0.01" value={claimFormData.patientAmountPaid} onChange={(e) => setClaimFormData({...claimFormData, patientAmountPaid: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Patient Amount Due</Label>
+                  <Input type="number" step="0.01" value={claimFormData.patientAmountDue} onChange={(e) => setClaimFormData({...claimFormData, patientAmountDue: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Check/Payment Date</Label>
+                  <Input type="date" value={claimFormData.checkDate} onChange={(e) => setClaimFormData({...claimFormData, checkDate: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Check/EFT #</Label>
+                  <Input value={claimFormData.checkNumberVirtualCard} onChange={(e) => setClaimFormData({...claimFormData, checkNumberVirtualCard: e.target.value})} />
+                </div>
+              </div>
             </div>
-            <div>
-              <Label>CPT Codes</Label>
-              <Input value={claimFormData.cptCodes} onChange={(e) => setClaimFormData({...claimFormData, cptCodes: e.target.value})} />
-            </div>
-            <div>
-              <Label>Units Billed</Label>
-              <Input type="number" value={claimFormData.unitsBilled} onChange={(e) => setClaimFormData({...claimFormData, unitsBilled: e.target.value})} />
-            </div>
-            <div>
-              <Label>Diagnosis Codes</Label>
-              <Input value={claimFormData.diagnosisCodes} onChange={(e) => setClaimFormData({...claimFormData, diagnosisCodes: e.target.value})} />
-            </div>
-            <div>
-              <Label>Modifier</Label>
-              <Input value={claimFormData.modifier} onChange={(e) => setClaimFormData({...claimFormData, modifier: e.target.value})} />
-            </div>
-            <div>
-              <Label>Charge Amount</Label>
-              <Input type="number" step="0.01" value={claimFormData.chargeAmount} onChange={(e) => setClaimFormData({...claimFormData, chargeAmount: e.target.value})} />
-            </div>
-            <div>
-              <Label>Insurance Reimbursement</Label>
-              <Input type="number" step="0.01" value={claimFormData.insuranceReimbursement} onChange={(e) => setClaimFormData({...claimFormData, insuranceReimbursement: e.target.value})} />
-            </div>
-            <div>
-              <Label>Patient Amount Paid</Label>
-              <Input type="number" step="0.01" value={claimFormData.patientAmountPaid} onChange={(e) => setClaimFormData({...claimFormData, patientAmountPaid: e.target.value})} />
-            </div>
-            <div>
-              <Label>Patient Amount Due</Label>
-              <Input type="number" step="0.01" value={claimFormData.patientAmountDue} onChange={(e) => setClaimFormData({...claimFormData, patientAmountDue: e.target.value})} />
-            </div>
-            <div>
-              <Label>Insurance Billed</Label>
-              <Input value={claimFormData.insuranceBilled} onChange={(e) => setClaimFormData({...claimFormData, insuranceBilled: e.target.value})} />
-            </div>
-            <div>
-              <Label>Date Submitted</Label>
-              <Input type="date" value={claimFormData.claimSubmittedDate} onChange={(e) => setClaimFormData({...claimFormData, claimSubmittedDate: e.target.value})} />
-            </div>
-            <div>
-              <Label>Claim #</Label>
-              <Input value={claimFormData.expireBcbsClaimNumber} onChange={(e) => setClaimFormData({...claimFormData, expireBcbsClaimNumber: e.target.value})} />
-            </div>
-            <div>
-              <Label>Claim Status</Label>
-              <Select value={claimFormData.claimStatus} onValueChange={(val) => setClaimFormData({...claimFormData, claimStatus: val})}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="submitted">Submitted</SelectItem>
-                  <SelectItem value="pending">Pending</SelectItem>
-                  <SelectItem value="approved">Approved</SelectItem>
-                  <SelectItem value="denied">Denied</SelectItem>
-                  <SelectItem value="pended">Pended</SelectItem>
-                  <SelectItem value="rejected">Rejected</SelectItem>
-                  <SelectItem value="resubmitted">Resubmitted</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label>LMN Documents Date Sent</Label>
-              <Input value={claimFormData.lmn ?? ''} onChange={(e) => setClaimFormData({...claimFormData, lmn: e.target.value})} placeholder="LMN documents date sent" />
-            </div>
-            <div>
-              <Label>Check/Payment Date</Label>
-              <Input type="date" value={claimFormData.checkDate} onChange={(e) => setClaimFormData({...claimFormData, checkDate: e.target.value})} />
-            </div>
-            <div>
-              <Label>Check/EFT #</Label>
-              <Input value={claimFormData.checkNumberVirtualCard} onChange={(e) => setClaimFormData({...claimFormData, checkNumberVirtualCard: e.target.value})} />
-            </div>
-            <div>
-              <Label>Appeal Date</Label>
-              <Input type="date" value={claimFormData.dateOfAppeal} onChange={(e) => setClaimFormData({...claimFormData, dateOfAppeal: e.target.value})} />
-            </div>
-            <div>
-              <Label>Appeal Ref #</Label>
-              <Input value={claimFormData.referenceNo} onChange={(e) => setClaimFormData({...claimFormData, referenceNo: e.target.value})} />
+
+            <Separator />
+
+            <div className="space-y-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-brand-blue">Status / Follow-Up</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <Label>Date Submitted</Label>
+                  <Input type="date" value={claimFormData.claimSubmittedDate} onChange={(e) => setClaimFormData({...claimFormData, claimSubmittedDate: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Claim #</Label>
+                  <Input value={claimFormData.expireBcbsClaimNumber} onChange={(e) => setClaimFormData({...claimFormData, expireBcbsClaimNumber: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Claim Status</Label>
+                  <Select value={claimFormData.claimStatus} onValueChange={(val) => setClaimFormData({...claimFormData, claimStatus: val})}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="submitted">Submitted</SelectItem>
+                      <SelectItem value="pending">Pending</SelectItem>
+                      <SelectItem value="approved">Approved</SelectItem>
+                      <SelectItem value="denied">Denied</SelectItem>
+                      <SelectItem value="pended">Pended</SelectItem>
+                      <SelectItem value="rejected">Rejected</SelectItem>
+                      <SelectItem value="resubmitted">Resubmitted</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label>LMN Documents Date Sent</Label>
+                  <Input value={claimFormData.lmn ?? ''} onChange={(e) => setClaimFormData({...claimFormData, lmn: e.target.value})} placeholder="LMN documents date sent" />
+                </div>
+                <div>
+                  <Label>Appeal Date</Label>
+                  <Input type="date" value={claimFormData.dateOfAppeal} onChange={(e) => setClaimFormData({...claimFormData, dateOfAppeal: e.target.value})} />
+                </div>
+                <div>
+                  <Label>Appeal Ref #</Label>
+                  <Input value={claimFormData.referenceNo} onChange={(e) => setClaimFormData({...claimFormData, referenceNo: e.target.value})} />
+                </div>
+              </div>
             </div>
           </div>
           <div className="flex gap-3 justify-end mt-6">
@@ -3305,24 +3356,24 @@ export default function Dashboard() {
           style={{ backgroundImage: 'url(https://d2xsxph8kpxj0f.cloudfront.net/310519663716642646/GCFkA8sgJY8LWBm3u5Mirt/healthcare-header-7MYjnBJpyfHpSEz86Wupgd.webp)' }}
         />
         <div className="absolute inset-0 bg-gradient-to-r from-brand-blue to-brand-blue/90" />
-        <div className="relative py-6 px-8 flex items-center">
-          <div className="container flex items-center justify-between w-full">
-            <div className="flex items-center gap-4">
+        <div className="relative py-4 px-4 sm:px-6 lg:px-8">
+          <div className="container flex flex-wrap items-center justify-between gap-3 w-full">
+            <div className="flex items-center gap-3">
               <img
                 src={LOGO_URL}
                 alt="NYC Home Rehab Logo"
-                className="w-14 h-14 object-contain drop-shadow-md hidden sm:block"
+                className="w-11 h-11 object-contain drop-shadow-md hidden sm:block"
               />
               <div>
-                <h1 className="text-white text-2xl font-serif font-bold">NYC HOME REHAB AUTHORIZATION AND CLAIMS TRACKER</h1>
+                <h1 className="text-white text-lg sm:text-xl font-serif font-bold leading-tight">NYC HOME REHAB AUTHORIZATION AND CLAIMS TRACKER</h1>
               </div>
             </div>
-            <div className="flex gap-3 items-center">
+            <div className="flex gap-2 items-center flex-wrap">
               {/* Sign Out */}
               <Button
                 variant="outline"
                 size="sm"
-                className="bg-transparent border-white/50 text-white hover:bg-white/10 hover:text-white flex items-center gap-2 font-semibold px-5 py-2.5 rounded-lg"
+                className="bg-transparent border-white/50 text-white hover:bg-white/10 hover:text-white font-semibold"
                 onClick={() => {
                   logoutMutation.mutate(undefined, {
                     onSuccess: () => { window.location.href = '/login'; },
@@ -3341,36 +3392,40 @@ export default function Dashboard() {
               {/* Bulk Upload */}
               <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
                 <DialogTrigger asChild>
-                  <Button className="bg-green-600 hover:bg-green-700 text-white font-semibold flex items-center gap-2 px-5 py-2.5 rounded-lg">
-                    <Upload className="w-5 h-5" />
+                  <Button size="sm" className="bg-green-600 hover:bg-green-700 text-white font-semibold">
+                    <Upload className="w-4 h-4" />
                     Bulk Upload
                   </Button>
                 </DialogTrigger>
                 <DialogContent className="bg-white max-w-md">
                   <DialogHeader>
-                    <DialogTitle className="text-[#1E3A5F]">Bulk Upload Patient Data</DialogTitle>
+                    <DialogTitle className="text-brand-blue">Bulk Upload Patient Data</DialogTitle>
                     <DialogDescription>Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions</DialogDescription>
                   </DialogHeader>
                   <div className="space-y-4">
-                    <div className="border-2 border-dashed border-[#F0E9DC] rounded-lg p-6 text-center hover:border-[#E8A93C] transition-colors">
+                    <div className="border-2 border-dashed border-brand-cream-dark rounded-lg p-6 text-center hover:border-brand-gold transition-colors">
                       <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" id="file-upload" />
                       <label htmlFor="file-upload" className="cursor-pointer block">
-                        <Upload className="w-8 h-8 text-[#E8A93C] mx-auto mb-2" />
-                        <p className="text-[#1E3A5F] font-semibold">Click to upload CSV</p>
+                        <Upload className="w-8 h-8 text-brand-gold mx-auto mb-2" />
+                        <p className="text-brand-blue font-semibold">Click to upload CSV</p>
                       </label>
                     </div>
                     {uploadProgress > 0 && uploadProgress < 100 && (
-                      <div className="w-full bg-[#F0E9DC] rounded-full h-2">
-                        <div className="bg-[#E8A93C] h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
+                      <div className="w-full bg-brand-cream-dark rounded-full h-2">
+                        <div className="bg-brand-gold h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
                       </div>
                     )}
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
                       <div className="flex items-center justify-between mb-2">
                         <p className="font-semibold">CSV Format:</p>
-                        <button onClick={handleDownloadTemplate} className="flex items-center gap-1.5 bg-[#1E3A5F] hover:bg-[#152A47] text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors">
+                        <Button
+                          size="sm"
+                          onClick={handleDownloadTemplate}
+                          className="h-auto gap-1.5 bg-brand-blue hover:bg-brand-blue-dark text-white text-xs font-semibold px-3 py-1.5"
+                        >
                           <Download className="w-3.5 h-3.5" />
                           Download Template
-                        </button>
+                        </Button>
                       </div>
                       <p className="font-mono">Patient Name, Insurance, Authorized Sessions, …</p>
                     </div>
@@ -3381,41 +3436,46 @@ export default function Dashboard() {
               {/* Add Patient */}
               <Dialog open={showAddPatient} onOpenChange={setShowAddPatient}>
                 <DialogTrigger asChild>
-                  <Button className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold flex items-center gap-2 px-5 py-2.5 rounded-lg">
-                    <Plus className="w-5 h-5" />
+                  <Button size="sm" className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold">
+                    <Plus className="w-4 h-4" />
                     Add Patient
                   </Button>
                 </DialogTrigger>
                 <DialogContent className="bg-white">
                   <DialogHeader>
-                    <DialogTitle className="text-[#1E3A5F]">Add New Patient</DialogTitle>
+                    <DialogTitle className="text-brand-blue">Add New Patient</DialogTitle>
                     <DialogDescription>Enter patient details to add them to the clinic dashboard</DialogDescription>
                   </DialogHeader>
                   <div className="space-y-4">
-                    <div>
-                      <Label htmlFor="patient-name" className="text-[#1E3A5F] font-semibold">Patient Name</Label>
-                      <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-[#F0E9DC] mt-2" />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="patient-name" className="text-brand-blue font-semibold">Patient Name</Label>
+                      <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-brand-cream-dark" />
                     </div>
-                    <div>
-                      <Label htmlFor="insurance" className="text-[#1E3A5F] font-semibold">Insurance Company</Label>
-                      <select id="insurance" value={newPatientInsurance} onChange={e => setNewPatientInsurance(e.target.value)} className="w-full border border-[#F0E9DC] rounded-md px-3 py-2 mt-2 bg-white text-[#1E3A5F] font-medium">
-                        {insuranceList.map(ins => <option key={ins} value={ins}>{ins}</option>)}
-                      </select>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="insurance" className="text-brand-blue font-semibold">Insurance Company</Label>
+                      <Select value={newPatientInsurance} onValueChange={setNewPatientInsurance}>
+                        <SelectTrigger id="insurance" className="border-brand-cream-dark w-full">
+                          <SelectValue placeholder="Select insurance company" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {insuranceList.map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
                     </div>
-                    <div>
-                      <Label htmlFor="authorized-sessions" className="text-[#1E3A5F] font-semibold">Authorized Sessions (optional)</Label>
-                      <Input id="authorized-sessions" placeholder="e.g. 12" type="number" value={newPatientAuthorized} onChange={e => setNewPatientAuthorized(e.target.value)} className="border-[#F0E9DC] mt-2" />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="authorized-sessions" className="text-brand-blue font-semibold">Authorized Sessions (optional)</Label>
+                      <Input id="authorized-sessions" placeholder="e.g. 12" type="number" value={newPatientAuthorized} onChange={e => setNewPatientAuthorized(e.target.value)} className="border-brand-cream-dark" />
                     </div>
-                    <div>
-                      <Label htmlFor="auth-date" className="text-[#1E3A5F] font-semibold">Authorization Date (optional)</Label>
-                      <Input id="auth-date" type="date" value={newPatientAuthDate} onChange={e => setNewPatientAuthDate(e.target.value)} className="border-[#F0E9DC] mt-2" />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="auth-date" className="text-brand-blue font-semibold">Authorization Date (optional)</Label>
+                      <Input id="auth-date" type="date" value={newPatientAuthDate} onChange={e => setNewPatientAuthDate(e.target.value)} className="border-brand-cream-dark" />
                     </div>
-                    <div>
-                      <Label htmlFor="auth-valid-until" className="text-[#1E3A5F] font-semibold">Authorization Valid Until (optional)</Label>
-                      <p className="text-xs text-gray-500 mt-0.5">Staff will be alerted 1 week before this date to request a new authorization.</p>
-                      <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-[#F0E9DC] mt-2" />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="auth-valid-until" className="text-brand-blue font-semibold">Authorization Valid Until (optional)</Label>
+                      <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
+                      <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-brand-cream-dark" />
                     </div>
-                    <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-[#1E3A5F] hover:bg-[#152A47] text-white font-semibold">
+                    <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
                       {(createPatient.isPending || bulkCreateVisits.isPending) ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
                       Add Patient
                     </Button>
@@ -3431,24 +3491,14 @@ export default function Dashboard() {
       <div className="max-w-[1600px] mx-auto px-6 lg:px-8 py-6">
 
         {/* KPI Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
           {[
-            { icon: <Users className="w-5 h-5 text-[#1E3A5F]" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', color: 'text-[#1E3A5F]' },
-            { icon: <CheckCircle2 className="w-5 h-5 text-[#E8A93C]" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', color: 'text-[#E8A93C]' },
-            { icon: <Clock className="w-5 h-5 text-[#1E3A5F]" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Active patient', color: 'text-[#1E3A5F]' },
-            { icon: <AlertCircle className="w-5 h-5 text-[#DC2626]" />, label: 'Utilization Rate', value: `${clinicMetrics.utilizationRate}%`, sub: 'Sessions completed', color: 'text-[#DC2626]' },
-          ].map(({ icon, label, value, sub, color }) => (
-            <Card key={label} className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition">
-              <CardHeader className="p-0 pb-3">
-                <CardTitle className="text-sm text-gray-600 font-medium flex items-center gap-2">
-                  {icon}{label}
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                <div className={`text-4xl font-bold ${color}`}>{value}</div>
-                <p className="text-xs text-gray-500 mt-1">{sub}</p>
-              </CardContent>
-            </Card>
+            { icon: <Users className="w-4 h-4 text-brand-blue" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', tone: 'navy' as const },
+            { icon: <CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', tone: 'gold' as const },
+            { icon: <Clock className="w-4 h-4 text-brand-blue" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Active patient', tone: 'navy' as const },
+            { icon: <AlertCircle className="w-4 h-4 text-destructive" />, label: 'Utilization Rate', value: `${clinicMetrics.utilizationRate}%`, sub: 'Sessions completed', tone: 'destructive' as const },
+          ].map(({ icon, label, value, sub, tone }) => (
+            <MetricCard key={label} icon={icon} label={label} value={value} sub={sub} tone={tone} />
           ))}
         </div>
 
@@ -3462,49 +3512,28 @@ export default function Dashboard() {
         />
 
         {/* ─── Active filter chips ───────────────────────────────────────────── */}
-        {activeFilterCount > 0 && (
-          <div className="mb-4 flex flex-wrap items-center gap-2">
-            {selectedInsurance && (
-              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-brand-gold/15 text-brand-blue border border-brand-gold/30">
-                Filtered by: {selectedInsurance}
-                <button
-                  onClick={() => setSelectedInsurance('')}
-                  aria-label="Clear insurance filter"
-                  className="ml-1 text-brand-blue/60 hover:text-brand-blue"
-                >
-                  ×
-                </button>
-              </span>
-            )}
-            {selectedClaimsFilter && selectedClaimsFilter !== 'all' && (
-              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-brand-gold/15 text-brand-blue border border-brand-gold/30">
-                Status: {CLAIM_STATUS_FILTERS.find(f => f.value === selectedClaimsFilter)?.label ?? selectedClaimsFilter}
-                <button
-                  onClick={() => setSelectedClaimsFilter('all')}
-                  aria-label="Clear claims status filter"
-                  className="ml-1 text-brand-blue/60 hover:text-brand-blue"
-                >
-                  ×
-                </button>
-              </span>
-            )}
-            {activeFilterCount > 1 && (
-              <button
-                onClick={handleClearFilters}
-                className="text-xs font-semibold text-brand-blue/70 hover:text-brand-blue underline"
-              >
-                Clear Filters
-              </button>
-            )}
-          </div>
-        )}
+        <FilterChips
+          chips={[
+            ...(selectedInsurance
+              ? [{ key: 'insurance', label: `Filtered by: ${selectedInsurance}`, onRemove: () => setSelectedInsurance('') }]
+              : []),
+            ...(selectedClaimsFilter && selectedClaimsFilter !== 'all'
+              ? [{
+                  key: 'claims-status',
+                  label: `Status: ${CLAIM_STATUS_FILTERS.find(f => f.value === selectedClaimsFilter)?.label ?? selectedClaimsFilter}`,
+                  onRemove: () => setSelectedClaimsFilter('all'),
+                }]
+              : []),
+          ]}
+          onClearAll={handleClearFilters}
+        />
 
         {/* Main Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-6 gap-6">
           {/* Insurance Filter Sidebar — desktop only; mobile uses the compact Filters sheet below */}
           <div className="hidden lg:block lg:col-span-1">
             <div className="bg-white rounded-xl shadow-sm p-4 max-h-[600px] overflow-y-auto">
-              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-[#F0E9DC]">Insurance</h3>
+              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-brand-cream-dark">Insurance</h3>
               <div className="space-y-1">
                 {renderInsuranceFilterButtons()}
               </div>
@@ -3514,7 +3543,7 @@ export default function Dashboard() {
           {/* Claims Status Filter — desktop only; mobile uses the compact Filters sheet below */}
           <div className="hidden lg:block lg:col-span-1">
             <div className="bg-white rounded-xl shadow-sm p-4 max-h-[600px] overflow-y-auto">
-              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-[#F0E9DC]">Claims Status</h3>
+              <h3 className="text-lg font-serif font-bold text-brand-blue mb-4 pb-3 border-b border-brand-cream-dark">Claims Status</h3>
               <div className="space-y-1">
                 {renderClaimsStatusFilterButtons()}
               </div>
@@ -3525,7 +3554,7 @@ export default function Dashboard() {
           <div className="lg:col-span-1 space-y-4">
             <div className="bg-white rounded-xl shadow-sm p-4">
               <h3 className="text-lg font-serif font-bold text-brand-blue mb-1">Patients</h3>
-              <p className="text-xs text-[#6B7280] mb-4">{filteredPatients.length} in {selectedInsurance || 'all insurances'}</p>
+              <p className="text-xs text-muted-foreground mb-4">{filteredPatients.length} in {selectedInsurance || 'all insurances'}</p>
 
               {/* Search + mobile filters control */}
               <div className="mb-4 space-y-2">
@@ -3584,59 +3613,18 @@ export default function Dashboard() {
               </div>
 
               <div className="space-y-1 max-h-96 overflow-y-auto">
-                {filteredPatients.length > 0 ? filteredPatients.map(patient => {
-                    const isActive = activePatient?.id === patient.id;
-                    return (
-                      <div
-                        key={patient.id}
-                        className={`group flex items-center rounded-lg mb-2 cursor-pointer transition ${
-                          isActive ? 'bg-brand-blue text-white border-l-4 border-brand-gold' : 'hover:bg-brand-cream'
-                        }`}
-                      >
-                        {/* Patient name — clicking selects the patient */}
-                        <button
-                          onClick={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
-                          className="flex-1 text-left p-3 min-w-0"
-                        >
-                          <p className={`font-semibold whitespace-normal cursor-pointer transition-colors ${
-                            isActive ? 'text-white' : 'text-[#1E3A5F] hover:text-[#E8A93C]'
-                          }`}>
-                            {patient.name}
-                          </p>
-                          <p className={`text-xs opacity-80 mt-1 truncate ${isActive ? 'text-white' : 'text-[#6B7280]'}`}>{patient.insurance}</p>
-                          {patient.claimsStatus && (
-                            <span className={`inline-block px-2 py-0.5 rounded-full text-xs mt-1.5 font-semibold ${
-                              patient.claimsStatus === 'approved'     ? 'bg-green-100 text-green-700' :
-                              patient.claimsStatus === 'denied'       ? 'bg-red-100 text-red-700' :
-                              patient.claimsStatus === 'pending'      ? 'bg-yellow-100 text-yellow-700' :
-                              patient.claimsStatus === 'pended'       ? 'bg-orange-100 text-orange-700' :
-                              patient.claimsStatus === 'rejected'     ? 'bg-gray-900 text-white' :
-                              patient.claimsStatus === 'resubmitted'  ? 'bg-violet-100 text-violet-700' :
-                              'bg-blue-100 text-blue-700'
-                            }`}>
-                              {patient.claimsStatus.charAt(0).toUpperCase() + patient.claimsStatus.slice(1)}
-                            </span>
-                          )}
-                        </button>
-                        {/* Delete button — visible on hover/focus, always visible on touch */}
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDeletePatientId(patient.id);
-                            setDeletePatientName(patient.name);
-                          }}
-                          title={`Delete ${patient.name}`}
-                          aria-label={`Delete patient ${patient.name}`}
-                          className={`opacity-0 group-hover:opacity-100 focus-visible:opacity-100 group-focus-within:opacity-100 sm:opacity-0 max-sm:opacity-100 transition-opacity p-2 mr-2 rounded-md focus-visible:ring-2 focus-visible:ring-red-400 shrink-0 ${
-                            isActive ? 'text-white/70 hover:text-white hover:bg-white/10' : 'text-red-400 hover:text-red-600 hover:bg-red-50'
-                          }`}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    );
-                  }) : (
-                    <div className="p-4 text-center text-[#6B7280] text-sm">
+                {filteredPatients.length > 0 ? filteredPatients.map(patient => (
+                    <PatientListItem
+                      key={patient.id}
+                      name={patient.name}
+                      insurance={patient.insurance}
+                      isActive={activePatient?.id === patient.id}
+                      claimsStatus={patient.claimsStatus}
+                      onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
+                      onDelete={() => { setDeletePatientId(patient.id); setDeletePatientName(patient.name); }}
+                    />
+                  )) : (
+                    <div className="p-4 text-center text-muted-foreground text-sm">
                       {searchQuery.trim() ? 'No patients match your search.' : 'No patients for this insurance'}
                     </div>
                   )}
@@ -3656,28 +3644,17 @@ export default function Dashboard() {
                 </CardHeader>
                 <CardContent className="p-0">
                   <div className="space-y-1 max-h-60 overflow-y-auto">
-                    {completedPatients.map(patient => {
-                      const isActive = activePatient?.id === patient.id;
-                      return (
-                        <div
-                          key={patient.id}
-                          className={`group flex items-center border-b border-green-100 transition-all hover:bg-green-50 ${
-                            isActive ? 'bg-green-50 border-l-4 border-l-green-500' : ''
-                          }`}
-                        >
-                          <button
-                            onClick={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
-                            className="flex-1 text-left p-3 min-w-0"
-                          >
-                            <p className="font-semibold text-green-800 hover:text-green-600 cursor-pointer transition-colors truncate text-sm">
-                              {patient.name}
-                            </p>
-                            <p className="text-xs text-green-600 mt-0.5 truncate">{patient.insurance}</p>
-                          </button>
-                          <CheckCircle2 className="w-4 h-4 text-green-500 mr-3 shrink-0" />
-                        </div>
-                      );
-                    })}
+                    {completedPatients.map(patient => (
+                      <PatientListItem
+                        key={patient.id}
+                        name={patient.name}
+                        insurance={patient.insurance}
+                        isActive={activePatient?.id === patient.id}
+                        tone="success"
+                        trailing={<CheckCircle2 className="w-4 h-4 text-green-500" />}
+                        onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
+                      />
+                    ))}
                   </div>
                 </CardContent>
               </Card>
@@ -3696,23 +3673,17 @@ export default function Dashboard() {
               </CardHeader>
               <CardContent className="p-0">
                 <div className="space-y-1 max-h-60 overflow-y-auto">
-                  {dischargedPatients.map(patient => {
-                    const isSelected = activePatient?.id === patient.id;
-                    return (
-                      <div
-                        key={patient.id}
-                        className={`group flex items-center border-b border-gray-100 transition-all hover:bg-gray-50 ${
-                          isSelected ? 'bg-gray-100 border-l-4 border-l-gray-500' : ''
-                        }`}
-                      >
-                        <button
-                          onClick={() => { setSelectedPatientId(patient.id); setShowDetailView(true); }}
-                          className="flex-1 text-left p-3 min-w-0"
-                        >
-                          <p className="font-semibold text-gray-700 hover:text-gray-500 cursor-pointer transition-colors truncate text-sm">
-                            {patient.name}
-                          </p>
-                          <p className="text-xs text-gray-500 mt-0.5 truncate">{patient.insurance}</p>
+                  {dischargedPatients.map(patient => (
+                    <PatientListItem
+                      key={patient.id}
+                      name={patient.name}
+                      insurance={patient.insurance}
+                      isActive={activePatient?.id === patient.id}
+                      tone="muted"
+                      trailing={<UserX className="w-4 h-4 text-gray-400" />}
+                      onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(true); }}
+                      meta={
+                        <>
                           {patient.dischargeDate && (
                             <p className="text-xs text-gray-400 mt-0.5">
                               Discharged: {new Date(patient.dischargeDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
@@ -3721,11 +3692,10 @@ export default function Dashboard() {
                           {patient.dischargeReason && (
                             <p className="text-xs text-gray-400 truncate">Reason: {patient.dischargeReason}</p>
                           )}
-                        </button>
-                        <UserX className="w-4 h-4 text-gray-400 mr-3 shrink-0" />
-                      </div>
-                    );
-                  })}
+                        </>
+                      }
+                    />
+                  ))}
                 </div>
               </CardContent>
             </Card>
@@ -3736,12 +3706,12 @@ export default function Dashboard() {
           <div className="lg:col-span-3 space-y-6">
             {activePatient && (
               <>
-                <Card className="border-[#F0E9DC] shadow-sm rounded-xl">
+                <Card className="border-brand-cream-dark shadow-sm rounded-xl">
                   <CardHeader className="pb-3">
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <button onClick={() => setShowDetailView(true)} className="group">
-                          <CardTitle className="text-2xl font-serif font-bold text-brand-blue group-hover:text-[#E8A93C] transition-colors cursor-pointer">
+                          <CardTitle className="text-2xl font-serif font-bold text-brand-blue group-hover:text-brand-gold transition-colors cursor-pointer">
                             {activePatient.name}
                           </CardTitle>
                         </button>
@@ -3780,18 +3750,20 @@ export default function Dashboard() {
                         <p className="text-3xl font-bold text-brand-blue">{activeMetrics.remaining}</p>
                       </div>
                     </div>
-                    <button
-                      onClick={() => setShowDetailView(true)}
-                      className="mt-6 w-full py-3 px-4 bg-brand-blue text-white rounded-lg hover:bg-brand-blue-dark transition font-semibold"
-                    >
-                      View Full Records & Edit Date ASH Submitted
-                    </button>
                   </CardContent>
+                  <CardFooter className="border-t pt-6">
+                    <Button
+                      onClick={() => setShowDetailView(true)}
+                      className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
+                    >
+                      View Full Records &amp; Edit Date ASH Submitted
+                    </Button>
+                  </CardFooter>
                 </Card>
 
                 {/* Progress Chart */}
                 {patientProgressData.length > 0 && (
-                  <Card className="border-[#F0E9DC] shadow-sm rounded-xl">
+                  <Card className="border-brand-cream-dark shadow-sm rounded-xl">
                     <CardHeader>
                       <CardTitle className="text-lg font-serif font-bold text-brand-blue">Session Progress</CardTitle>
                       <CardDescription className="text-sm text-gray-600 mt-1">Sessions remaining over time</CardDescription>
@@ -3815,7 +3787,7 @@ export default function Dashboard() {
             )}
 
             {/* Clinic Overview */}
-            <Card className="border-[#F0E9DC] shadow-sm rounded-xl">
+            <Card className="border-brand-cream-dark shadow-sm rounded-xl">
               <CardHeader>
                 <CardTitle className="text-lg font-serif font-bold text-brand-blue">Clinic Overview</CardTitle>
                 <CardDescription className="text-sm text-gray-600 mt-1">Sessions for active patient</CardDescription>
@@ -3843,33 +3815,33 @@ export default function Dashboard() {
       <Dialog open={showDischargeDialog} onOpenChange={(open) => { if (!open) { setShowDischargeDialog(false); setPendingDischargePatientId(null); } }}>
         <DialogContent className="bg-white max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-[#1E3A5F] text-xl flex items-center gap-2">
+            <DialogTitle className="text-brand-blue text-xl flex items-center gap-2">
               <UserX className="w-5 h-5 text-gray-500" />
               Discharge Patient
             </DialogTitle>
-            <DialogDescription className="text-[#6B7280]">
+            <DialogDescription className="text-muted-foreground">
               Please fill in the discharge details. The patient will be moved to the Discharged Patients folder.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div>
-              <Label htmlFor="discharge-date" className="text-[#1E3A5F] font-semibold">Date of Discharge</Label>
+              <Label htmlFor="discharge-date" className="text-brand-blue font-semibold">Date of Discharge</Label>
               <Input
                 id="discharge-date"
                 type="date"
                 value={dischargeDate}
                 onChange={e => setDischargeDate(e.target.value)}
-                className="mt-1 border-[#F0E9DC] focus:border-[#1E3A5F]"
+                className="mt-1 border-brand-cream-dark focus:border-brand-blue"
               />
             </div>
             <div>
-              <Label htmlFor="discharge-reason" className="text-[#1E3A5F] font-semibold">Reason of Discharge</Label>
+              <Label htmlFor="discharge-reason" className="text-brand-blue font-semibold">Reason of Discharge</Label>
               <Input
                 id="discharge-reason"
                 placeholder="e.g. Goals met, Moved, Insurance ended…"
                 value={dischargeReason}
                 onChange={e => setDischargeReason(e.target.value)}
-                className="mt-1 border-[#F0E9DC] focus:border-[#1E3A5F]"
+                className="mt-1 border-brand-cream-dark focus:border-brand-blue"
               />
             </div>
           </div>
@@ -3897,14 +3869,14 @@ export default function Dashboard() {
       <AlertDialog open={deletePatientId !== null} onOpenChange={(open) => { if (!open) { setDeletePatientId(null); setDeletePatientName(''); } }}>
         <AlertDialogContent className="bg-white">
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-[#1E3A5F] text-xl">Delete Patient?</AlertDialogTitle>
-            <AlertDialogDescription className="text-[#6B7280]">
+            <AlertDialogTitle className="text-brand-blue text-xl">Delete Patient?</AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground">
               You are about to permanently delete <strong>{deletePatientName}</strong> and all of their visit records.
               This action <strong>cannot be undone</strong>.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="border-[#F0E9DC] text-[#1E3A5F] hover:bg-[#FAF5EE]">
+            <AlertDialogCancel className="border-brand-cream-dark text-brand-blue hover:bg-brand-cream">
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
