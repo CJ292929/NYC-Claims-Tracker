@@ -2877,10 +2877,11 @@ export default function Dashboard() {
                             <span className="inline-flex items-center gap-1">
                               {line.cptCodes || <span className="text-gray-300">—</span>}
                               {line.notes ? (
-                                <AlertTriangle
-                                  className={`w-3 h-3 flex-shrink-0 ${line.notes.includes('⚠️') ? 'text-amber-500' : 'text-gray-400'}`}
-                                  title={line.notes}
-                                />
+                                <span title={line.notes}>
+                                  <AlertTriangle
+                                    className={`w-3 h-3 flex-shrink-0 ${line.notes.includes('⚠️') ? 'text-amber-500' : 'text-gray-400'}`}
+                                  />
+                                </span>
                               ) : null}
                             </span>
                           </td>
