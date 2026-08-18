@@ -68,7 +68,10 @@ jobs:
       - name: Health check production deployment
         run: |
           set -euo pipefail
-          URL="${{ steps.deploy.outputs.url }}"
+          echo "Deployment URL (behind Vercel SSO protection, not health-checked directly): ${{ steps.deploy.outputs.url }}"
+          # Per-deployment URLs require Vercel SSO auth; the aliased production
+          # domain is the actual public endpoint, so health-check that instead.
+          URL="https://nyc-dashboard-eight.vercel.app"
           INPUT="%7B%22json%22%3A%7B%22timestamp%22%3A$(date +%s000)%7D%7D"
           HEALTH_URL="$URL/api/trpc/system.health?input=$INPUT"
           echo "Checking $HEALTH_URL"
