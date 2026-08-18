@@ -2292,7 +2292,7 @@ export default function Dashboard() {
         </div>
         {/* Add Claim Dialog */}
         <Dialog open={showAddClaimDialog} onOpenChange={setShowAddClaimDialog}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add New Claim Record</DialogTitle>
             <DialogDescription>
@@ -2478,7 +2478,7 @@ export default function Dashboard() {
           }
         }}
       >
-        <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto rounded-2xl">
+        <DialogContent className="sm:max-w-5xl max-h-[90vh] overflow-y-auto rounded-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-brand-blue">
               <Upload className="w-5 h-5 text-brand-gold" />
@@ -2817,7 +2817,7 @@ export default function Dashboard() {
                 <span className="hidden sm:inline">Bulk Upload</span>
               </Button>
             </DialogTrigger>
-            <DialogContent className="bg-white max-w-md max-h-[90vh] overflow-y-auto">
+            <DialogContent className="bg-white sm:max-w-md max-h-[90vh] overflow-y-auto">
               <DialogHeader>
                 <DialogTitle className="text-brand-blue">Bulk Upload Patient Data</DialogTitle>
                 <DialogDescription>Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions</DialogDescription>
