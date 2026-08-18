@@ -40,16 +40,19 @@ In the Vercel project settings under **Settings → Environment Variables**, add
 
 ### Required — Supabase
 
-> **⚠️ Verify before using:** the project ref below (`czjckcplzuigjbhegbon`) has not
-> been reconciled with the ref documented in `references/local-setup-schema.sql`
-> (`whezsmwxbozzfddhpebq`), which is the ref this repo's schema audit traced as the
-> project that was reconstructed from scratch. Confirm the actual value from
-> Supabase → Settings → API → Project URL for the project linked to this Vercel
-> deployment before relying on the example below.
+> **Production ref reconciled:** this project's production Supabase ref is
+> `whezsmwxbozzfddhpebq` ("NYC -Dashboard-main"). It's the only Supabase project
+> in the account matching this app, and it's what this repo's Supabase CLI link
+> resolves to. The ref previously documented here, `czjckcplzuigjbhegbon`, does
+> not exist in that Supabase account — treat it as stale/incorrect and do not use
+> it. (The literal Vercel Production `SUPABASE_URL` value is marked Sensitive and
+> was not read directly to make this determination — if you have dashboard
+> access, double-check Supabase → Settings → API → Project URL before relying on
+> this for anything security-critical.)
 
 | Variable | Value | Where to find it |
 |---|---|---|
-| `SUPABASE_URL` | `https://czjckcplzuigjbhegbon.supabase.co` | Supabase → Settings → API → Project URL |
+| `SUPABASE_URL` | `https://whezsmwxbozzfddhpebq.supabase.co` | Supabase → Settings → API → Project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | `eyJ...` (service_role key) | Supabase → Settings → API → service_role |
 
 ### Required — Authentication & Security

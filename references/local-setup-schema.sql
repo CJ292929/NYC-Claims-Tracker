@@ -12,12 +12,16 @@
 -- why login and every dashboard query failed. Run this ENTIRE script once in
 -- Supabase → SQL Editor → New Query → Run.
 --
--- NOTE: the project ref above (whezsmwxbozzfddhpebq) has not been independently
--- verified against the live Vercel production SUPABASE_URL as of this audit —
--- VERCEL_DEPLOY.md documents a different ref (czjckcplzuigjbhegbon) that was
--- never reconciled with this one. Confirm the actual ref from the Supabase
--- dashboard linked to the production Vercel project before assuming either
--- value is current. See drizzle/LEGACY.md and the schema audit report for detail.
+-- NOTE: this ref has since been reconciled as the production Supabase project,
+-- with high confidence, via `supabase projects list` (only project in the
+-- account matching this app) and this repo's own Supabase CLI link
+-- (supabase/.temp/linked-project.json). The ref previously documented in
+-- VERCEL_DEPLOY.md (czjckcplzuigjbhegbon) does not exist in this Supabase
+-- account and was stale/incorrect; VERCEL_DEPLOY.md has been updated to match.
+-- The literal Vercel Production SUPABASE_URL value itself is marked Sensitive
+-- and was not read directly, so this is a high-confidence correlation, not a
+-- byte-exact confirmation. See drizzle/LEGACY.md and the schema audit report
+-- for detail.
 --
 -- Reconstructed from server/supabase.types.ts, server/db.ts, and
 -- server/routers.ts (the previous references/create-claims-table.sql was
