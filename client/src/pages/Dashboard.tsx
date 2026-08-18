@@ -17,6 +17,10 @@ import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch } from '@/lib/nameMatch';
 import logoIcon from '@/assets/logos/logo-icon.png';
+import { StatusBadge } from '@/components/dashboard/StatusBadge';
+import { MetricCard } from '@/components/dashboard/MetricCard';
+import { PatientListItem } from '@/components/dashboard/PatientListItem';
+import { FilterChips } from '@/components/dashboard/FilterChips';
 
 /**
  * Dashboard Component — Database-backed
@@ -1878,21 +1882,23 @@ export default function Dashboard() {
     return (
       <div className="min-h-screen bg-gradient-to-b from-[#FAF5EE] to-white">
         {/* Header */}
-        <div className="bg-[#1E3A5F] text-white py-6">
-          <div className="container">
-            <button
+        <div className="bg-brand-blue text-white py-4">
+          <div className="container px-4 sm:px-6 lg:px-8">
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setShowDetailView(false)}
-              className="flex items-center gap-2 text-[#E8A93C] hover:text-white mb-4 transition-colors"
+              className="mb-3 -ml-2 gap-1.5 text-brand-gold hover:text-white hover:bg-white/10"
             >
-              <ChevronLeft className="w-5 h-5" />
+              <ChevronLeft className="w-4 h-4" />
               Back to Dashboard
-            </button>
-            <div className="flex items-center justify-between">
+            </Button>
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h1 className="text-4xl font-bold">{activePatient.name}</h1>
-                <p className="text-[#E8A93C] mt-2">Detailed Visit Records — {activePatient.insurance}</p>
+                <h1 className="text-2xl sm:text-3xl font-bold">{activePatient.name}</h1>
+                <p className="text-brand-gold text-sm mt-1">Detailed Visit Records — {activePatient.insurance}</p>
               </div>
-              <div className="flex items-center gap-4">
+              <div className="flex items-center gap-3">
                 {/* Active / Inactive toggle */}
                 <div className="flex items-center gap-2 bg-white/10 rounded-lg px-3 py-2">
                   {activePatient.isActive !== false ? (
@@ -1913,13 +1919,16 @@ export default function Dashboard() {
                     className="data-[state=checked]:bg-green-500"
                   />
                 </div>
-                <button
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => refetchVisits()}
-                  className="flex items-center gap-2 text-[#E8A93C] hover:text-white transition-colors text-sm"
+                  aria-label="Refresh visit data"
+                  className="gap-1.5 text-brand-gold hover:text-white hover:bg-white/10"
                 >
                   <RefreshCw className="w-4 h-4" />
-                  Refresh
-                </button>
+                  <span className="hidden sm:inline">Refresh</span>
+                </Button>
               </div>
             </div>
           </div>
@@ -1967,16 +1976,11 @@ export default function Dashboard() {
           {/* Summary cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
             {[
-              { label: 'Authorized', value: activeMetrics.totalAuthorized, color: 'text-[#1E3A5F]' },
-              { label: 'Completed', value: activeMetrics.completed, color: 'text-[#E8A93C]' },
-              { label: 'Remaining', value: activeMetrics.remaining, color: 'text-[#1E3A5F]' },
-            ].map(({ label, value, color }) => (
-              <Card key={label} className="border-[#F0E9DC] shadow-md">
-                <CardContent className="pt-6">
-                  <p className="text-xs text-[#6B7280] font-medium">{label}</p>
-                  <p className={`text-3xl font-bold mt-1 ${color}`}>{value}</p>
-                </CardContent>
-              </Card>
+              { label: 'Authorized', value: activeMetrics.totalAuthorized, tone: 'navy' as const },
+              { label: 'Completed', value: activeMetrics.completed, tone: 'gold' as const },
+              { label: 'Remaining', value: activeMetrics.remaining, tone: 'navy' as const },
+            ].map(({ label, value, tone }) => (
+              <MetricCard key={label} label={label} value={value} tone={tone} />
             ))}
           </div>
 
@@ -3034,24 +3038,24 @@ export default function Dashboard() {
           style={{ backgroundImage: 'url(https://d2xsxph8kpxj0f.cloudfront.net/310519663716642646/GCFkA8sgJY8LWBm3u5Mirt/healthcare-header-7MYjnBJpyfHpSEz86Wupgd.webp)' }}
         />
         <div className="absolute inset-0 bg-gradient-to-r from-brand-blue to-brand-blue/90" />
-        <div className="relative py-6 px-8 flex items-center">
-          <div className="container flex items-center justify-between w-full">
-            <div className="flex items-center gap-4">
+        <div className="relative py-4 px-4 sm:px-6 lg:px-8">
+          <div className="container flex flex-wrap items-center justify-between gap-3 w-full">
+            <div className="flex items-center gap-3">
               <img
                 src={LOGO_URL}
                 alt="NYC Home Rehab Logo"
-                className="w-14 h-14 object-contain drop-shadow-md hidden sm:block"
+                className="w-11 h-11 object-contain drop-shadow-md hidden sm:block"
               />
               <div>
-                <h1 className="text-white text-2xl font-serif font-bold">NYC HOME REHAB AUTHORIZATION AND CLAIMS TRACKER</h1>
+                <h1 className="text-white text-lg sm:text-xl font-serif font-bold leading-tight">NYC HOME REHAB AUTHORIZATION AND CLAIMS TRACKER</h1>
               </div>
             </div>
-            <div className="flex gap-3 items-center">
+            <div className="flex gap-2 items-center flex-wrap">
               {/* Sign Out */}
               <Button
                 variant="outline"
                 size="sm"
-                className="bg-transparent border-white/50 text-white hover:bg-white/10 hover:text-white flex items-center gap-2 font-semibold px-5 py-2.5 rounded-lg"
+                className="bg-transparent border-white/50 text-white hover:bg-white/10 hover:text-white font-semibold"
                 onClick={() => {
                   logoutMutation.mutate(undefined, {
                     onSuccess: () => { window.location.href = '/login'; },
@@ -3070,36 +3074,40 @@ export default function Dashboard() {
               {/* Bulk Upload */}
               <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
                 <DialogTrigger asChild>
-                  <Button className="bg-green-600 hover:bg-green-700 text-white font-semibold flex items-center gap-2 px-5 py-2.5 rounded-lg">
-                    <Upload className="w-5 h-5" />
+                  <Button size="sm" className="bg-green-600 hover:bg-green-700 text-white font-semibold">
+                    <Upload className="w-4 h-4" />
                     Bulk Upload
                   </Button>
                 </DialogTrigger>
                 <DialogContent className="bg-white max-w-md">
                   <DialogHeader>
-                    <DialogTitle className="text-[#1E3A5F]">Bulk Upload Patient Data</DialogTitle>
+                    <DialogTitle className="text-brand-blue">Bulk Upload Patient Data</DialogTitle>
                     <DialogDescription>Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions</DialogDescription>
                   </DialogHeader>
                   <div className="space-y-4">
-                    <div className="border-2 border-dashed border-[#F0E9DC] rounded-lg p-6 text-center hover:border-[#E8A93C] transition-colors">
+                    <div className="border-2 border-dashed border-brand-cream-dark rounded-lg p-6 text-center hover:border-brand-gold transition-colors">
                       <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" id="file-upload" />
                       <label htmlFor="file-upload" className="cursor-pointer block">
-                        <Upload className="w-8 h-8 text-[#E8A93C] mx-auto mb-2" />
-                        <p className="text-[#1E3A5F] font-semibold">Click to upload CSV</p>
+                        <Upload className="w-8 h-8 text-brand-gold mx-auto mb-2" />
+                        <p className="text-brand-blue font-semibold">Click to upload CSV</p>
                       </label>
                     </div>
                     {uploadProgress > 0 && uploadProgress < 100 && (
-                      <div className="w-full bg-[#F0E9DC] rounded-full h-2">
-                        <div className="bg-[#E8A93C] h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
+                      <div className="w-full bg-brand-cream-dark rounded-full h-2">
+                        <div className="bg-brand-gold h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
                       </div>
                     )}
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
                       <div className="flex items-center justify-between mb-2">
                         <p className="font-semibold">CSV Format:</p>
-                        <button onClick={handleDownloadTemplate} className="flex items-center gap-1.5 bg-[#1E3A5F] hover:bg-[#152A47] text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors">
+                        <Button
+                          size="sm"
+                          onClick={handleDownloadTemplate}
+                          className="h-auto gap-1.5 bg-brand-blue hover:bg-brand-blue-dark text-white text-xs font-semibold px-3 py-1.5"
+                        >
                           <Download className="w-3.5 h-3.5" />
                           Download Template
-                        </button>
+                        </Button>
                       </div>
                       <p className="font-mono">Patient Name, Insurance, Authorized Sessions, …</p>
                     </div>
@@ -3110,41 +3118,46 @@ export default function Dashboard() {
               {/* Add Patient */}
               <Dialog open={showAddPatient} onOpenChange={setShowAddPatient}>
                 <DialogTrigger asChild>
-                  <Button className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold flex items-center gap-2 px-5 py-2.5 rounded-lg">
-                    <Plus className="w-5 h-5" />
+                  <Button size="sm" className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold">
+                    <Plus className="w-4 h-4" />
                     Add Patient
                   </Button>
                 </DialogTrigger>
                 <DialogContent className="bg-white">
                   <DialogHeader>
-                    <DialogTitle className="text-[#1E3A5F]">Add New Patient</DialogTitle>
+                    <DialogTitle className="text-brand-blue">Add New Patient</DialogTitle>
                     <DialogDescription>Enter patient details to add them to the clinic dashboard</DialogDescription>
                   </DialogHeader>
                   <div className="space-y-4">
-                    <div>
-                      <Label htmlFor="patient-name" className="text-[#1E3A5F] font-semibold">Patient Name</Label>
-                      <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-[#F0E9DC] mt-2" />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="patient-name" className="text-brand-blue font-semibold">Patient Name</Label>
+                      <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-brand-cream-dark" />
                     </div>
-                    <div>
-                      <Label htmlFor="insurance" className="text-[#1E3A5F] font-semibold">Insurance Company</Label>
-                      <select id="insurance" value={newPatientInsurance} onChange={e => setNewPatientInsurance(e.target.value)} className="w-full border border-[#F0E9DC] rounded-md px-3 py-2 mt-2 bg-white text-[#1E3A5F] font-medium">
-                        {insuranceList.map(ins => <option key={ins} value={ins}>{ins}</option>)}
-                      </select>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="insurance" className="text-brand-blue font-semibold">Insurance Company</Label>
+                      <Select value={newPatientInsurance} onValueChange={setNewPatientInsurance}>
+                        <SelectTrigger id="insurance" className="border-brand-cream-dark w-full">
+                          <SelectValue placeholder="Select insurance company" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {insuranceList.map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
                     </div>
-                    <div>
-                      <Label htmlFor="authorized-sessions" className="text-[#1E3A5F] font-semibold">Authorized Sessions (optional)</Label>
-                      <Input id="authorized-sessions" placeholder="e.g. 12" type="number" value={newPatientAuthorized} onChange={e => setNewPatientAuthorized(e.target.value)} className="border-[#F0E9DC] mt-2" />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="authorized-sessions" className="text-brand-blue font-semibold">Authorized Sessions (optional)</Label>
+                      <Input id="authorized-sessions" placeholder="e.g. 12" type="number" value={newPatientAuthorized} onChange={e => setNewPatientAuthorized(e.target.value)} className="border-brand-cream-dark" />
                     </div>
-                    <div>
-                      <Label htmlFor="auth-date" className="text-[#1E3A5F] font-semibold">Authorization Date (optional)</Label>
-                      <Input id="auth-date" type="date" value={newPatientAuthDate} onChange={e => setNewPatientAuthDate(e.target.value)} className="border-[#F0E9DC] mt-2" />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="auth-date" className="text-brand-blue font-semibold">Authorization Date (optional)</Label>
+                      <Input id="auth-date" type="date" value={newPatientAuthDate} onChange={e => setNewPatientAuthDate(e.target.value)} className="border-brand-cream-dark" />
                     </div>
-                    <div>
-                      <Label htmlFor="auth-valid-until" className="text-[#1E3A5F] font-semibold">Authorization Valid Until (optional)</Label>
-                      <p className="text-xs text-gray-500 mt-0.5">Staff will be alerted 1 week before this date to request a new authorization.</p>
-                      <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-[#F0E9DC] mt-2" />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="auth-valid-until" className="text-brand-blue font-semibold">Authorization Valid Until (optional)</Label>
+                      <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
+                      <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-brand-cream-dark" />
                     </div>
-                    <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-[#1E3A5F] hover:bg-[#152A47] text-white font-semibold">
+                    <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
                       {(createPatient.isPending || bulkCreateVisits.isPending) ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
                       Add Patient
                     </Button>
@@ -3160,24 +3173,14 @@ export default function Dashboard() {
       <div className="max-w-[1600px] mx-auto px-6 lg:px-8 py-6">
 
         {/* KPI Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
           {[
-            { icon: <Users className="w-5 h-5 text-[#1E3A5F]" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', color: 'text-[#1E3A5F]' },
-            { icon: <CheckCircle2 className="w-5 h-5 text-[#E8A93C]" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', color: 'text-[#E8A93C]' },
-            { icon: <Clock className="w-5 h-5 text-[#1E3A5F]" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Active patient', color: 'text-[#1E3A5F]' },
-            { icon: <AlertCircle className="w-5 h-5 text-[#DC2626]" />, label: 'Utilization Rate', value: `${clinicMetrics.utilizationRate}%`, sub: 'Sessions completed', color: 'text-[#DC2626]' },
-          ].map(({ icon, label, value, sub, color }) => (
-            <Card key={label} className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition">
-              <CardHeader className="p-0 pb-3">
-                <CardTitle className="text-sm text-gray-600 font-medium flex items-center gap-2">
-                  {icon}{label}
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                <div className={`text-4xl font-bold ${color}`}>{value}</div>
-                <p className="text-xs text-gray-500 mt-1">{sub}</p>
-              </CardContent>
-            </Card>
+            { icon: <Users className="w-4 h-4 text-brand-blue" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', tone: 'navy' as const },
+            { icon: <CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', tone: 'gold' as const },
+            { icon: <Clock className="w-4 h-4 text-brand-blue" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Active patient', tone: 'navy' as const },
+            { icon: <AlertCircle className="w-4 h-4 text-destructive" />, label: 'Utilization Rate', value: `${clinicMetrics.utilizationRate}%`, sub: 'Sessions completed', tone: 'destructive' as const },
+          ].map(({ icon, label, value, sub, tone }) => (
+            <MetricCard key={label} icon={icon} label={label} value={value} sub={sub} tone={tone} />
           ))}
         </div>
 
@@ -3191,42 +3194,21 @@ export default function Dashboard() {
         />
 
         {/* ─── Active filter chips ───────────────────────────────────────────── */}
-        {activeFilterCount > 0 && (
-          <div className="mb-4 flex flex-wrap items-center gap-2">
-            {selectedInsurance && (
-              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-brand-gold/15 text-brand-blue border border-brand-gold/30">
-                Filtered by: {selectedInsurance}
-                <button
-                  onClick={() => setSelectedInsurance('')}
-                  aria-label="Clear insurance filter"
-                  className="ml-1 text-brand-blue/60 hover:text-brand-blue"
-                >
-                  ×
-                </button>
-              </span>
-            )}
-            {selectedClaimsFilter && selectedClaimsFilter !== 'all' && (
-              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-brand-gold/15 text-brand-blue border border-brand-gold/30">
-                Status: {CLAIM_STATUS_FILTERS.find(f => f.value === selectedClaimsFilter)?.label ?? selectedClaimsFilter}
-                <button
-                  onClick={() => setSelectedClaimsFilter('all')}
-                  aria-label="Clear claims status filter"
-                  className="ml-1 text-brand-blue/60 hover:text-brand-blue"
-                >
-                  ×
-                </button>
-              </span>
-            )}
-            {activeFilterCount > 1 && (
-              <button
-                onClick={handleClearFilters}
-                className="text-xs font-semibold text-brand-blue/70 hover:text-brand-blue underline"
-              >
-                Clear Filters
-              </button>
-            )}
-          </div>
-        )}
+        <FilterChips
+          chips={[
+            ...(selectedInsurance
+              ? [{ key: 'insurance', label: `Filtered by: ${selectedInsurance}`, onRemove: () => setSelectedInsurance('') }]
+              : []),
+            ...(selectedClaimsFilter && selectedClaimsFilter !== 'all'
+              ? [{
+                  key: 'claims-status',
+                  label: `Status: ${CLAIM_STATUS_FILTERS.find(f => f.value === selectedClaimsFilter)?.label ?? selectedClaimsFilter}`,
+                  onRemove: () => setSelectedClaimsFilter('all'),
+                }]
+              : []),
+          ]}
+          onClearAll={handleClearFilters}
+        />
 
         {/* Main Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-6 gap-6">
@@ -3313,58 +3295,17 @@ export default function Dashboard() {
               </div>
 
               <div className="space-y-1 max-h-96 overflow-y-auto">
-                {filteredPatients.length > 0 ? filteredPatients.map(patient => {
-                    const isActive = activePatient?.id === patient.id;
-                    return (
-                      <div
-                        key={patient.id}
-                        className={`group flex items-center rounded-lg mb-2 cursor-pointer transition ${
-                          isActive ? 'bg-brand-blue text-white border-l-4 border-brand-gold' : 'hover:bg-brand-cream'
-                        }`}
-                      >
-                        {/* Patient name — clicking selects the patient */}
-                        <button
-                          onClick={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
-                          className="flex-1 text-left p-3 min-w-0"
-                        >
-                          <p className={`font-semibold whitespace-normal cursor-pointer transition-colors ${
-                            isActive ? 'text-white' : 'text-[#1E3A5F] hover:text-[#E8A93C]'
-                          }`}>
-                            {patient.name}
-                          </p>
-                          <p className={`text-xs opacity-80 mt-1 truncate ${isActive ? 'text-white' : 'text-[#6B7280]'}`}>{patient.insurance}</p>
-                          {patient.claimsStatus && (
-                            <span className={`inline-block px-2 py-0.5 rounded-full text-xs mt-1.5 font-semibold ${
-                              patient.claimsStatus === 'approved'     ? 'bg-green-100 text-green-700' :
-                              patient.claimsStatus === 'denied'       ? 'bg-red-100 text-red-700' :
-                              patient.claimsStatus === 'pending'      ? 'bg-yellow-100 text-yellow-700' :
-                              patient.claimsStatus === 'pended'       ? 'bg-orange-100 text-orange-700' :
-                              patient.claimsStatus === 'rejected'     ? 'bg-gray-900 text-white' :
-                              patient.claimsStatus === 'resubmitted'  ? 'bg-violet-100 text-violet-700' :
-                              'bg-blue-100 text-blue-700'
-                            }`}>
-                              {patient.claimsStatus.charAt(0).toUpperCase() + patient.claimsStatus.slice(1)}
-                            </span>
-                          )}
-                        </button>
-                        {/* Delete button — visible on hover/focus, always visible on touch */}
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDeletePatientId(patient.id);
-                            setDeletePatientName(patient.name);
-                          }}
-                          title={`Delete ${patient.name}`}
-                          aria-label={`Delete patient ${patient.name}`}
-                          className={`opacity-0 group-hover:opacity-100 focus-visible:opacity-100 group-focus-within:opacity-100 sm:opacity-0 max-sm:opacity-100 transition-opacity p-2 mr-2 rounded-md focus-visible:ring-2 focus-visible:ring-red-400 shrink-0 ${
-                            isActive ? 'text-white/70 hover:text-white hover:bg-white/10' : 'text-red-400 hover:text-red-600 hover:bg-red-50'
-                          }`}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    );
-                  }) : (
+                {filteredPatients.length > 0 ? filteredPatients.map(patient => (
+                    <PatientListItem
+                      key={patient.id}
+                      name={patient.name}
+                      insurance={patient.insurance}
+                      isActive={activePatient?.id === patient.id}
+                      claimsStatus={patient.claimsStatus}
+                      onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
+                      onDelete={() => { setDeletePatientId(patient.id); setDeletePatientName(patient.name); }}
+                    />
+                  )) : (
                     <div className="p-4 text-center text-[#6B7280] text-sm">
                       {searchQuery.trim() ? 'No patients match your search.' : 'No patients for this insurance'}
                     </div>
@@ -3385,28 +3326,17 @@ export default function Dashboard() {
                 </CardHeader>
                 <CardContent className="p-0">
                   <div className="space-y-1 max-h-60 overflow-y-auto">
-                    {completedPatients.map(patient => {
-                      const isActive = activePatient?.id === patient.id;
-                      return (
-                        <div
-                          key={patient.id}
-                          className={`group flex items-center border-b border-green-100 transition-all hover:bg-green-50 ${
-                            isActive ? 'bg-green-50 border-l-4 border-l-green-500' : ''
-                          }`}
-                        >
-                          <button
-                            onClick={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
-                            className="flex-1 text-left p-3 min-w-0"
-                          >
-                            <p className="font-semibold text-green-800 hover:text-green-600 cursor-pointer transition-colors truncate text-sm">
-                              {patient.name}
-                            </p>
-                            <p className="text-xs text-green-600 mt-0.5 truncate">{patient.insurance}</p>
-                          </button>
-                          <CheckCircle2 className="w-4 h-4 text-green-500 mr-3 shrink-0" />
-                        </div>
-                      );
-                    })}
+                    {completedPatients.map(patient => (
+                      <PatientListItem
+                        key={patient.id}
+                        name={patient.name}
+                        insurance={patient.insurance}
+                        isActive={activePatient?.id === patient.id}
+                        tone="success"
+                        trailing={<CheckCircle2 className="w-4 h-4 text-green-500" />}
+                        onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
+                      />
+                    ))}
                   </div>
                 </CardContent>
               </Card>
@@ -3425,23 +3355,17 @@ export default function Dashboard() {
               </CardHeader>
               <CardContent className="p-0">
                 <div className="space-y-1 max-h-60 overflow-y-auto">
-                  {dischargedPatients.map(patient => {
-                    const isSelected = activePatient?.id === patient.id;
-                    return (
-                      <div
-                        key={patient.id}
-                        className={`group flex items-center border-b border-gray-100 transition-all hover:bg-gray-50 ${
-                          isSelected ? 'bg-gray-100 border-l-4 border-l-gray-500' : ''
-                        }`}
-                      >
-                        <button
-                          onClick={() => { setSelectedPatientId(patient.id); setShowDetailView(true); }}
-                          className="flex-1 text-left p-3 min-w-0"
-                        >
-                          <p className="font-semibold text-gray-700 hover:text-gray-500 cursor-pointer transition-colors truncate text-sm">
-                            {patient.name}
-                          </p>
-                          <p className="text-xs text-gray-500 mt-0.5 truncate">{patient.insurance}</p>
+                  {dischargedPatients.map(patient => (
+                    <PatientListItem
+                      key={patient.id}
+                      name={patient.name}
+                      insurance={patient.insurance}
+                      isActive={activePatient?.id === patient.id}
+                      tone="muted"
+                      trailing={<UserX className="w-4 h-4 text-gray-400" />}
+                      onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(true); }}
+                      meta={
+                        <>
                           {patient.dischargeDate && (
                             <p className="text-xs text-gray-400 mt-0.5">
                               Discharged: {new Date(patient.dischargeDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
@@ -3450,11 +3374,10 @@ export default function Dashboard() {
                           {patient.dischargeReason && (
                             <p className="text-xs text-gray-400 truncate">Reason: {patient.dischargeReason}</p>
                           )}
-                        </button>
-                        <UserX className="w-4 h-4 text-gray-400 mr-3 shrink-0" />
-                      </div>
-                    );
-                  })}
+                        </>
+                      }
+                    />
+                  ))}
                 </div>
               </CardContent>
             </Card>
