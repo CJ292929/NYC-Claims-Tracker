@@ -32,6 +32,13 @@ import {
 } from "./db";
 import { sdk } from "./_core/sdk";
 import { ONE_YEAR_MS } from "@shared/const";
+import {
+  clearFailedAttempts,
+  getClientIp,
+  isRateLimited,
+  normalizeUsername,
+  recordFailedAttempt,
+} from "./_core/loginRateLimit";
 
 // ─── Shared input schemas ─────────────────────────────────────────────────────
 
@@ -88,14 +95,27 @@ export const appRouter = router({
     login: publicProcedure
       .input(z.object({ username: z.string().min(1), password: z.string().min(1) }))
       .mutation(async ({ ctx, input }) => {
+        const ip = getClientIp(ctx.req);
+        const rateLimitKey = normalizeUsername(input.username);
+
+        if (isRateLimited(rateLimitKey, ip)) {
+          throw new TRPCError({
+            code: "TOO_MANY_REQUESTS",
+            message: "Too many login attempts. Please try again later.",
+          });
+        }
+
         const clinicUser = await getClinicUserByUsername(input.username);
         if (!clinicUser) {
+          recordFailedAttempt(rateLimitKey, ip);
           throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid username or password" });
         }
         const valid = await bcrypt.compare(input.password, clinicUser.passwordHash);
         if (!valid) {
+          recordFailedAttempt(rateLimitKey, ip);
           throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid username or password" });
         }
+        clearFailedAttempts(rateLimitKey, ip);
         // Create a session token using the existing JWT mechanism.
         const syntheticOpenId = `clinic_${clinicUser.username}`;
         const token = await sdk.createSessionToken(syntheticOpenId, {
