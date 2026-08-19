@@ -6,9 +6,8 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Clock, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, Search, X, SlidersHorizontal, AlertTriangle } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetFooter, SheetTrigger } from '@/components/ui/sheet';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -18,15 +17,16 @@ import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch } from '@/lib/nameMatch';
 import { matchesPatientFilters } from '@/lib/patientFilters';
-import { routeToNavSection } from '@/lib/navSection';
+import { routeToNavSection, navSectionToRoute } from '@/lib/navSection';
 import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { MetricCard } from '@/components/dashboard/MetricCard';
-import { PatientListItem } from '@/components/dashboard/PatientListItem';
 import { FilterChips } from '@/components/dashboard/FilterChips';
 import { AuthAlertPanel } from '@/components/dashboard/AuthAlertPanel';
 import { ClaimsFollowUpPanel } from '@/components/dashboard/ClaimsFollowUpPanel';
-import { PatientFilters } from '@/components/dashboard/PatientFilters';
 import { PatientAnalytics } from '@/components/dashboard/PatientAnalytics';
+import { PatientOverview } from '@/components/dashboard/PatientOverview';
+import { PatientRecordsWorkspace } from '@/components/dashboard/PatientRecordsWorkspace';
+import { DischargedPatientsWorkspace } from '@/components/dashboard/DischargedPatientsWorkspace';
 import { DashboardShell } from '@/components/dashboard/DashboardShell';
 import type { NavSection } from '@/components/dashboard/DashboardSidebar';
 
@@ -267,7 +267,17 @@ export default function Dashboard() {
   /** Delete confirmation dialog */
   const [deletePatientId, setDeletePatientId] = useState<string | null>(null);
   const [deletePatientName, setDeletePatientName] = useState<string>('');
-  const [mainTab, setMainTab] = useState<'active' | 'discharged'>('active');
+  // Patient selected within the Patient Records workspace's own snapshot
+  // pane — deliberately separate from selectedPatientId (which still backs
+  // the Dashboard KPI/Analytics fallback and the Visits/Claims detail
+  // routes) so entering /patients/records never inherits a patients[0]
+  // fallback from elsewhere and never leaks into /patients/discharged.
+  const [selectedRecordsPatientId, setSelectedRecordsPatientId] = useState<string | null>(null);
+  // Same idea for /patients/discharged — its own selection, never shared
+  // with the active-patient list.
+  const [selectedDischargedPatientId, setSelectedDischargedPatientId] = useState<string | null>(null);
+  const [dischargedSearchQuery, setDischargedSearchQuery] = useState('');
+  const [showDischargedFilters, setShowDischargedFilters] = useState(false);
   // Discharge confirmation dialog state
   const [showDischargeDialog, setShowDischargeDialog] = useState(false);
   const [pendingDischargePatientId, setPendingDischargePatientId] = useState<string | null>(null);
@@ -369,6 +379,25 @@ export default function Dashboard() {
       { patientId: activePatient?.id ?? '' },
       { enabled: !!activePatient }
     );
+
+  // Patient Records' own selection — never falls back to patients[0] (see
+  // selectedRecordsPatientId above). Looked up from activePatients (not
+  // `patients`) so a discharged patient's id can never resolve here.
+  const selectedRecordsPatient: DbPatient | null =
+    patients.find(p => p.id === selectedRecordsPatientId && p.isActive !== false) ?? null;
+  const { data: recordsVisits = [] } = trpc.visits.listByPatient.useQuery(
+    { patientId: selectedRecordsPatientId ?? '' },
+    { enabled: !!selectedRecordsPatient }
+  );
+
+  // Discharged Patients' own selection — same idea, looked up only among
+  // discharged patients so an active patient's id can never resolve here.
+  const selectedDischargedPatient: DbPatient | null =
+    patients.find(p => p.id === selectedDischargedPatientId && p.isActive === false) ?? null;
+  const { data: dischargedVisits = [] } = trpc.visits.listByPatient.useQuery(
+    { patientId: selectedDischargedPatientId ?? '' },
+    { enabled: !!selectedDischargedPatient }
+  );
 
   // Pre-compute periods for claims queries
   const periods = useMemo(() => {
@@ -490,10 +519,8 @@ export default function Dashboard() {
       const wasDischarging = !vars.isActive;
       if (wasDischarging) {
         toast.success('Patient moved to Discharged Patients');
-        setMainTab('discharged');
       } else {
         toast.success('Patient reactivated');
-        setMainTab('active');
       }
     },
     onError: (e) => toast.error(`Failed to update patient status: ${e.message}`),
@@ -511,6 +538,14 @@ export default function Dashboard() {
       // Reactivating → do it immediately, clear discharge fields
       setPatientActive.mutate({ id: patientId, isActive: true, dischargeDate: null, dischargeReason: null });
     }
+  };
+
+  const handleRecordsToggleActive = (checked: boolean) => {
+    if (selectedRecordsPatient) handleToggleActive(selectedRecordsPatient.id, checked);
+  };
+
+  const handleDischargedToggleActive = (checked: boolean) => {
+    if (selectedDischargedPatient) handleToggleActive(selectedDischargedPatient.id, checked);
   };
 
   /** Submit the discharge form */
@@ -622,16 +657,22 @@ export default function Dashboard() {
       setShowUploadDialog(true);
       return;
     }
-    navigate(`/${section}`);
+    const route = navSectionToRoute(section);
+    if (route) navigate(route);
   };
 
   /** Centralized "select this patient, optionally jump to a detail route"
    *  helper for every patient-selection entry point that should also
    *  navigate (alert cards, follow-up cards, "View Full Records"). Plain
-   *  list-row selection — which should only update the Patient Workspace
-   *  preview, not navigate — calls setSelectedPatientId directly instead. */
-  const selectPatient = (patientId: string, destination?: '/visits' | '/claims') => {
+   *  list-row selection — which should only update a workspace's own
+   *  preview, not navigate — calls the relevant setSelected*PatientId
+   *  directly instead. Navigating to Patient Records also seeds that
+   *  workspace's own selection, since it doesn't share selectedPatientId. */
+  const selectPatient = (patientId: string, destination?: '/visits' | '/claims' | '/patients/records') => {
     setSelectedPatientId(patientId);
+    if (destination === '/patients/records') {
+      setSelectedRecordsPatientId(patientId);
+    }
     if (destination) navigate(destination);
   };
 
@@ -702,6 +743,12 @@ export default function Dashboard() {
   const activeMetrics = useMemo(() => getPatientMetrics(visits), [visits]);
   const alertStatus = activePatient ? getAlertStatus(activePatient, activeMetrics.remaining) : null;
 
+  // Metrics for whichever patient is selected in the Patient Records / Discharged snapshot panes
+  const recordsMetrics = useMemo(() => getPatientMetrics(recordsVisits), [recordsVisits]);
+  const recordsAlertStatus = selectedRecordsPatient ? getAlertStatus(selectedRecordsPatient, recordsMetrics.remaining) : null;
+  const dischargedMetrics = useMemo(() => getPatientMetrics(dischargedVisits), [dischargedVisits]);
+  const dischargedAlertStatus = selectedDischargedPatient ? getAlertStatus(selectedDischargedPatient, dischargedMetrics.remaining) : null;
+
   // Completed patients — those with 0 remaining and all sessions dated
   const { data: completedIds = [] } = trpc.visits.completedPatientIds.useQuery();
   const completedSet = useMemo(() => new Set(completedIds), [completedIds]);
@@ -738,6 +785,24 @@ export default function Dashboard() {
     if (selectedPatient && !matchesPatientFilters(selectedPatient, filterScope)) {
       skipAutoSelectRef.current = true;
       setSelectedPatientId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedInsurance, selectedClaimsFilter, patientIdsByStatus]);
+
+  // Same accuracy behavior (PR #25) for the Patient Records workspace's own
+  // selection — no auto-select ref needed here, since Records never
+  // auto-selects a patient in the first place.
+  useEffect(() => {
+    if (selectedRecordsPatient && !matchesPatientFilters(selectedRecordsPatient, filterScope)) {
+      setSelectedRecordsPatientId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedInsurance, selectedClaimsFilter, patientIdsByStatus]);
+
+  // Same accuracy behavior for the Discharged Patients workspace's own selection.
+  useEffect(() => {
+    if (selectedDischargedPatient && !matchesPatientFilters(selectedDischargedPatient, filterScope)) {
+      setSelectedDischargedPatientId(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedInsurance, selectedClaimsFilter, patientIdsByStatus]);
@@ -783,6 +848,17 @@ export default function Dashboard() {
   // Completed Sessions folder, scoped to the same Insurance / Claims Status
   // filter as the active list (previously ignored the filter entirely).
   const completedPatients = activePatients.filter(p => completedSet.has(p.id) && matchesPatientFilters(p, filterScope));
+
+  // ── Patients Overview (unfiltered — population-wide, not scoped to the
+  // Insurance/Claims Status filters used by Records/Discharged) ────────────
+  const overviewCompletedPatients = useMemo(
+    () => activePatients.filter(p => completedSet.has(p.id)),
+    [activePatients, completedSet]
+  );
+  const recentPatients = useMemo(
+    () => [...patients].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 8),
+    [patients]
+  );
 
   // Clinic-wide metrics (approximate — based on active patient visits + patient count)
   const clinicMetrics = useMemo(() => {
@@ -1562,8 +1638,8 @@ export default function Dashboard() {
                 ? 'Select a patient to view visit records.'
                 : 'Select a patient to view claims records.'}
             </p>
-            <Button onClick={() => navigate('/patients')} className="bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
-              Go to Patients
+            <Button onClick={() => navigate('/patients/records')} className="bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
+              Go to Patient Records
             </Button>
           </div>
           {bulkUploadDialog}
@@ -3011,7 +3087,8 @@ export default function Dashboard() {
     );
   }
 
-  // ── Shared list-view content (used by /dashboard and /patients) ────────────
+  // ── Shared list-view content (used by /dashboard, /patients/records and
+  // /patients/discharged) ─────────────────────────────────────────────────
 
   const filterChipsElement = (
     <FilterChips
@@ -3031,249 +3108,69 @@ export default function Dashboard() {
     />
   );
 
-  const patientWorkspaceSection = (
-    <section>
-      <Card className="border-border shadow-sm rounded-xl overflow-hidden py-0 gap-0">
-        <CardHeader className="border-b border-border px-5 py-4 [.border-b]:pb-4">
-          <CardTitle className="text-base font-semibold text-brand-blue">Patient Workspace</CardTitle>
-          <CardDescription className="text-xs">Filter, search, and review patients in one place</CardDescription>
-        </CardHeader>
-        <CardContent className="p-0">
-          <div className="lg:grid lg:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[260px_320px_minmax(0,1fr)]">
-            {/* Filters — xl+ only; below xl uses the Filters sheet */}
-            <div className="hidden xl:block border-r border-border p-4 max-h-[720px] overflow-y-auto">
-              <PatientFilters
-                insuranceList={insuranceList}
-                insuranceCounts={insuranceCounts}
-                selectedInsurance={selectedInsurance}
-                onSelectInsurance={handleSelectInsurance}
-                claimStatusFilters={CLAIM_STATUS_FILTERS}
-                claimStatusCounts={claimStatusCounts}
-                selectedClaimsFilter={selectedClaimsFilter}
-                onSelectClaimsFilter={handleSelectClaimsStatus}
-              />
-            </div>
-
-            {/* Patient List */}
-            <div className="border-r border-border p-4 space-y-4 max-h-[720px] overflow-y-auto">
-              <div>
-                <h3 className="text-sm font-semibold text-brand-blue mb-0.5">Patients</h3>
-                <p className="text-xs text-muted-foreground mb-3">{filteredPatients.length} in {selectedInsurance || 'all insurances'}</p>
-
-                {/* Search + mobile filters control */}
-                <div className="mb-3 space-y-2">
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" aria-hidden="true" />
-                    <Input
-                      type="text"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Search patients..."
-                      aria-label="Search patients by name"
-                      className="pl-9 pr-9"
-                    />
-                    {searchQuery !== '' && (
-                      <button
-                        type="button"
-                        onClick={() => setSearchQuery('')}
-                        aria-label="Clear search"
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-
-                  <div className="xl:hidden">
-                    <Sheet open={showMobileFilters} onOpenChange={setShowMobileFilters}>
-                      <SheetTrigger asChild>
-                        <Button variant="outline" size="sm" className="gap-1.5">
-                          <SlidersHorizontal className="w-3.5 h-3.5" />
-                          Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
-                        </Button>
-                      </SheetTrigger>
-                      <SheetContent side="bottom" className="max-h-[80vh] overflow-y-auto">
-                        <SheetHeader>
-                          <SheetTitle>Filters</SheetTitle>
-                        </SheetHeader>
-                        <div className="px-4 pb-4">
-                          <PatientFilters
-                            insuranceList={insuranceList}
-                            insuranceCounts={insuranceCounts}
-                            selectedInsurance={selectedInsurance}
-                            onSelectInsurance={handleSelectInsurance}
-                            claimStatusFilters={CLAIM_STATUS_FILTERS}
-                            claimStatusCounts={claimStatusCounts}
-                            selectedClaimsFilter={selectedClaimsFilter}
-                            onSelectClaimsFilter={handleSelectClaimsStatus}
-                          />
-                        </div>
-                        <SheetFooter>
-                          <Button variant="outline" onClick={handleClearFilters} disabled={activeFilterCount === 0}>
-                            Clear Filters
-                          </Button>
-                        </SheetFooter>
-                      </SheetContent>
-                    </Sheet>
-                  </div>
-                </div>
-
-                <div className="space-y-1 max-h-96 overflow-y-auto">
-                  {filteredPatients.length > 0 ? filteredPatients.map(patient => (
-                      <PatientListItem
-                        key={patient.id}
-                        name={patient.name}
-                        insurance={patient.insurance}
-                        isActive={activePatient?.id === patient.id}
-                        claimsStatus={patient.claimsStatus}
-                        onSelect={() => setSelectedPatientId(patient.id)}
-                        onDelete={() => { setDeletePatientId(patient.id); setDeletePatientName(patient.name); }}
-                      />
-                    )) : (
-                      <div className="p-4 text-center text-muted-foreground text-sm">
-                        {searchQuery.trim() ? 'No patients match your search.' : 'No patients for this insurance'}
-                      </div>
-                    )}
-                </div>
-              </div>
-
-              {/* ─── Completed Sessions Folder ─────────────────────────────────── */}
-              {completedPatients.length > 0 && (
-                <Card className="border-green-200 shadow-sm py-0 gap-0 overflow-hidden">
-                  <CardHeader className="bg-green-700 text-white py-2.5 px-3 [.border-b]:pb-2.5">
-                    <CardTitle className="text-xs flex items-center gap-2 font-semibold">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      Completed Sessions
-                      <Badge className="bg-white text-green-700 text-[10px] ml-auto">{completedPatients.length}</Badge>
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="p-0">
-                    <div className="space-y-1 max-h-48 overflow-y-auto">
-                      {completedPatients.map(patient => (
-                        <PatientListItem
-                          key={patient.id}
-                          name={patient.name}
-                          insurance={patient.insurance}
-                          isActive={activePatient?.id === patient.id}
-                          tone="success"
-                          trailing={<CheckCircle2 className="w-4 h-4 text-green-500" />}
-                          onSelect={() => setSelectedPatientId(patient.id)}
-                        />
-                      ))}
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* Discharged Patients Folder — inside the patients column */}
-              {dischargedPatients.length > 0 && (
-              <Card className="border-gray-300 shadow-sm py-0 gap-0 overflow-hidden">
-                <CardHeader className="bg-gray-600 text-white py-2.5 px-3 [.border-b]:pb-2.5">
-                  <CardTitle className="text-xs flex items-center gap-2 font-semibold">
-                    <UserX className="w-3.5 h-3.5" />
-                    Discharged Patients
-                    <Badge className="bg-white text-gray-700 text-[10px] ml-auto">{dischargedPatients.length}</Badge>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="p-0">
-                  <div className="space-y-1 max-h-48 overflow-y-auto">
-                    {dischargedPatients.map(patient => (
-                      <PatientListItem
-                        key={patient.id}
-                        name={patient.name}
-                        insurance={patient.insurance}
-                        isActive={activePatient?.id === patient.id}
-                        tone="muted"
-                        trailing={<UserX className="w-4 h-4 text-gray-400" />}
-                        onSelect={() => setSelectedPatientId(patient.id)}
-                        meta={
-                          <>
-                            {patient.dischargeDate && (
-                              <p className="text-xs text-gray-400 mt-0.5">
-                                Discharged: {new Date(patient.dischargeDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                              </p>
-                            )}
-                            {patient.dischargeReason && (
-                              <p className="text-xs text-gray-400 truncate">Reason: {patient.dischargeReason}</p>
-                            )}
-                          </>
-                        }
-                      />
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
-              )}
-            </div>
-
-            {/* Patient Detail — the dominant workspace area */}
-            <div className="p-5">
-              {activePatient ? (
-                <div className="space-y-4">
-                  <div className="flex items-start justify-between gap-3 flex-wrap">
-                    <div>
-                      <button onClick={() => navigate('/visits')} className="group text-left">
-                        <h3 className="text-xl font-semibold text-brand-blue group-hover:text-brand-gold transition-colors cursor-pointer">
-                          {activePatient.name}
-                        </h3>
-                      </button>
-                      <div className="mt-1.5 flex items-center gap-3 flex-wrap text-sm text-muted-foreground">
-                        <span>Insurance: {activePatient.insurance}</span>
-                        <span className="flex items-center gap-2">
-                          <span className={activePatient.isActive !== false ? 'text-green-700 font-semibold' : 'text-gray-500 font-semibold'}>
-                            {activePatient.isActive !== false ? 'Active' : 'Discharged'}
-                          </span>
-                          <Switch
-                            checked={activePatient.isActive !== false}
-                            onCheckedChange={(checked) => handleToggleActive(activePatient.id, checked)}
-                            disabled={setPatientActive.isPending}
-                            aria-label="Toggle patient active status"
-                          />
-                        </span>
-                      </div>
-                    </div>
-                    {alertStatus && (
-                      <Badge className={`text-xs px-2.5 py-1 rounded-full font-medium ${alertStatus.color}`}>{alertStatus.label}</Badge>
-                    )}
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
-                      <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Authorized</p>
-                      <p className="text-2xl font-bold text-brand-gold">{activeMetrics.totalAuthorized}</p>
-                    </div>
-                    <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
-                      <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Completed</p>
-                      <p className="text-2xl font-bold text-green-600">{activeMetrics.completed}</p>
-                    </div>
-                    <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
-                      <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Remaining</p>
-                      <p className="text-2xl font-bold text-brand-blue">{activeMetrics.remaining}</p>
-                    </div>
-                  </div>
-
-                  <Button
-                    onClick={() => navigate('/visits')}
-                    className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
-                  >
-                    View Full Records &amp; Edit Date ASH Submitted
-                  </Button>
-                </div>
-              ) : (
-                <div className="h-full min-h-[200px] flex items-center justify-center text-sm text-muted-foreground">
-                  Select a patient to see their summary.
-                </div>
-              )}
-            </div>
+  /** Add Patient trigger + dialog — reused on both /dashboard and
+   *  /patients/records so the action is reachable from either. */
+  const addPatientAction = (
+    <Dialog open={showAddPatient} onOpenChange={setShowAddPatient}>
+      <DialogTrigger asChild>
+        <Button size="sm" className="gap-1.5 bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold">
+          <Plus className="w-4 h-4" />
+          <span className="hidden sm:inline">Add Patient</span>
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="bg-white max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="text-brand-blue">Add New Patient</DialogTitle>
+          <DialogDescription>Enter patient details to add them to the clinic dashboard</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="patient-name" className="text-brand-blue font-semibold">Patient Name</Label>
+            <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-brand-cream-dark" />
           </div>
-        </CardContent>
-      </Card>
-    </section>
+          <div className="space-y-1.5">
+            <Label htmlFor="insurance" className="text-brand-blue font-semibold">Insurance Company</Label>
+            <Select value={newPatientInsurance} onValueChange={setNewPatientInsurance}>
+              <SelectTrigger id="insurance" className="border-brand-cream-dark w-full">
+                <SelectValue placeholder="Select insurance company" />
+              </SelectTrigger>
+              <SelectContent>
+                {insuranceList.map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="authorized-sessions" className="text-brand-blue font-semibold">Authorized Sessions (optional)</Label>
+            <Input id="authorized-sessions" placeholder="e.g. 12" type="number" value={newPatientAuthorized} onChange={e => setNewPatientAuthorized(e.target.value)} className="border-brand-cream-dark" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="auth-date" className="text-brand-blue font-semibold">Authorization Date (optional)</Label>
+            <Input id="auth-date" type="date" value={newPatientAuthDate} onChange={e => setNewPatientAuthDate(e.target.value)} className="border-brand-cream-dark" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="auth-valid-until" className="text-brand-blue font-semibold">Authorization Valid Until (optional)</Label>
+            <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
+            <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-brand-cream-dark" />
+          </div>
+          <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
+            {(createPatient.isPending || bulkCreateVisits.isPending) ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+            Add Patient
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 
-  // ── /patients ────────────────────────────────────────────────────────────
+  const bulkUploadTrigger = (
+    <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setShowUploadDialog(true)}>
+      <Upload className="w-4 h-4" />
+      <span className="hidden sm:inline">Bulk Upload</span>
+    </Button>
+  );
 
-  if (activeSection === 'patients') {
+  // ── /patients (Overview) ────────────────────────────────────────────────
+
+  if (activeSection === 'patients-overview') {
     return (
       <DashboardShell
         activeSection={activeSection}
@@ -3281,14 +3178,115 @@ export default function Dashboard() {
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
         topbarTitle="Patients"
-        topbarSubtitle="Filter, search, and review patients in one place"
+        topbarSubtitle="Current state of the patient population"
+      >
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
+          <PatientOverview
+            totalPatients={patients.length}
+            activePatients={activePatients.length}
+            completedPatients={overviewCompletedPatients.length}
+            dischargedPatients={dischargedPatientsRaw.length}
+            insuranceCounts={insuranceCounts}
+            recentPatients={recentPatients}
+            onSelectPatient={(id) => selectPatient(id, '/patients/records')}
+            onSelectAuthAlertPatient={(id) => selectPatient(id, '/visits')}
+          />
+        </div>
+        {bulkUploadDialog}
+      </DashboardShell>
+    );
+  }
+
+  // ── /patients/records ───────────────────────────────────────────────────
+
+  if (activeSection === 'patients-records') {
+    return (
+      <DashboardShell
+        activeSection={activeSection}
+        onNavigate={handleNavigate}
+        onSignOut={handleSignOut}
+        signingOut={logoutMutation.isPending}
+        topbarTitle="Patient Records"
+        topbarSubtitle="Find and select a patient to view their information"
+        topbarActions={addPatientAction}
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6">
           {filterChipsElement}
-          {patientWorkspaceSection}
+          <PatientRecordsWorkspace
+            insuranceList={insuranceList}
+            insuranceCounts={insuranceCounts}
+            selectedInsurance={selectedInsurance}
+            onSelectInsurance={handleSelectInsurance}
+            claimStatusFilters={CLAIM_STATUS_FILTERS}
+            claimStatusCounts={claimStatusCounts}
+            selectedClaimsFilter={selectedClaimsFilter}
+            onSelectClaimsFilter={handleSelectClaimsStatus}
+            searchQuery={searchQuery}
+            onSearchQueryChange={setSearchQuery}
+            showMobileFilters={showMobileFilters}
+            onShowMobileFiltersChange={setShowMobileFilters}
+            activeFilterCount={activeFilterCount}
+            onClearFilters={handleClearFilters}
+            filteredPatients={filteredPatients}
+            completedPatients={completedPatients}
+            selectedPatientId={selectedRecordsPatientId}
+            onSelectPatient={setSelectedRecordsPatientId}
+            onDeletePatient={(id, name) => { setDeletePatientId(id); setDeletePatientName(name); }}
+            snapshotPatient={selectedRecordsPatient}
+            snapshotMetrics={recordsMetrics}
+            snapshotAlertStatus={recordsAlertStatus}
+            onToggleActive={handleRecordsToggleActive}
+            togglePending={setPatientActive.isPending}
+            onViewFullRecords={() => { if (selectedRecordsPatient) selectPatient(selectedRecordsPatient.id, '/visits'); }}
+          />
         </div>
         {bulkUploadDialog}
         {patientActionDialogs}
+      </DashboardShell>
+    );
+  }
+
+  // ── /patients/discharged ────────────────────────────────────────────────
+
+  if (activeSection === 'patients-discharged') {
+    return (
+      <DashboardShell
+        activeSection={activeSection}
+        onNavigate={handleNavigate}
+        onSignOut={handleSignOut}
+        signingOut={logoutMutation.isPending}
+        topbarTitle="Discharged Patients"
+        topbarSubtitle="Review patients no longer in active care"
+      >
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6">
+          {filterChipsElement}
+          <DischargedPatientsWorkspace
+            patients={dischargedPatients}
+            searchQuery={dischargedSearchQuery}
+            onSearchQueryChange={setDischargedSearchQuery}
+            insuranceList={insuranceList}
+            insuranceCounts={insuranceCounts}
+            selectedInsurance={selectedInsurance}
+            onSelectInsurance={handleSelectInsurance}
+            claimStatusFilters={CLAIM_STATUS_FILTERS}
+            claimStatusCounts={claimStatusCounts}
+            selectedClaimsFilter={selectedClaimsFilter}
+            onSelectClaimsFilter={handleSelectClaimsStatus}
+            showFilters={showDischargedFilters}
+            onShowFiltersChange={setShowDischargedFilters}
+            activeFilterCount={activeFilterCount}
+            onClearFilters={handleClearFilters}
+            selectedPatientId={selectedDischargedPatientId}
+            onSelectPatient={setSelectedDischargedPatientId}
+            snapshotPatient={selectedDischargedPatient}
+            snapshotMetrics={dischargedMetrics}
+            snapshotAlertStatus={dischargedAlertStatus}
+            onToggleActive={handleDischargedToggleActive}
+            togglePending={setPatientActive.isPending}
+            onViewFullRecords={() => { if (selectedDischargedPatient) selectPatient(selectedDischargedPatient.id, '/visits'); }}
+          />
+        </div>
+        {bulkUploadDialog}
       </DashboardShell>
     );
   }
@@ -3328,60 +3326,8 @@ export default function Dashboard() {
           {/* Bulk Upload — dialog itself is rendered globally (bulkUploadDialog
               below) so it also opens from the sidebar action on every route;
               this button just opens it without navigating. */}
-          <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setShowUploadDialog(true)}>
-            <Upload className="w-4 h-4" />
-            <span className="hidden sm:inline">Bulk Upload</span>
-          </Button>
-
-          {/* Add Patient */}
-          <Dialog open={showAddPatient} onOpenChange={setShowAddPatient}>
-            <DialogTrigger asChild>
-              <Button size="sm" className="gap-1.5 bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold">
-                <Plus className="w-4 h-4" />
-                <span className="hidden sm:inline">Add Patient</span>
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="bg-white max-h-[90vh] overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle className="text-brand-blue">Add New Patient</DialogTitle>
-                <DialogDescription>Enter patient details to add them to the clinic dashboard</DialogDescription>
-              </DialogHeader>
-              <div className="space-y-4">
-                <div className="space-y-1.5">
-                  <Label htmlFor="patient-name" className="text-brand-blue font-semibold">Patient Name</Label>
-                  <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-brand-cream-dark" />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="insurance" className="text-brand-blue font-semibold">Insurance Company</Label>
-                  <Select value={newPatientInsurance} onValueChange={setNewPatientInsurance}>
-                    <SelectTrigger id="insurance" className="border-brand-cream-dark w-full">
-                      <SelectValue placeholder="Select insurance company" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {insuranceList.map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="authorized-sessions" className="text-brand-blue font-semibold">Authorized Sessions (optional)</Label>
-                  <Input id="authorized-sessions" placeholder="e.g. 12" type="number" value={newPatientAuthorized} onChange={e => setNewPatientAuthorized(e.target.value)} className="border-brand-cream-dark" />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="auth-date" className="text-brand-blue font-semibold">Authorization Date (optional)</Label>
-                  <Input id="auth-date" type="date" value={newPatientAuthDate} onChange={e => setNewPatientAuthDate(e.target.value)} className="border-brand-cream-dark" />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="auth-valid-until" className="text-brand-blue font-semibold">Authorization Valid Until (optional)</Label>
-                  <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
-                  <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-brand-cream-dark" />
-                </div>
-                <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
-                  {(createPatient.isPending || bulkCreateVisits.isPending) ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-                  Add Patient
-                </Button>
-              </div>
-            </DialogContent>
-          </Dialog>
+          {bulkUploadTrigger}
+          {addPatientAction}
         </>
       }
     >
@@ -3415,9 +3361,6 @@ export default function Dashboard() {
             </div>
           </div>
         </section>
-
-        {filterChipsElement}
-        {patientWorkspaceSection}
 
         {/* ─── Patient Analytics ──────────────────────────────────────────── */}
         <div>
