@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
+import { useLocation } from 'wouter';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -17,6 +18,7 @@ import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch } from '@/lib/nameMatch';
 import { matchesPatientFilters } from '@/lib/patientFilters';
+import { routeToNavSection } from '@/lib/navSection';
 import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { MetricCard } from '@/components/dashboard/MetricCard';
 import { PatientListItem } from '@/components/dashboard/PatientListItem';
@@ -238,23 +240,16 @@ function todayForFilename(): string {
 export default function Dashboard() {
   const utils = trpc.useUtils();
 
-  // ── Nav scroll targets ────────────────────────────────────────────────────
-  const authorizationAlertsRef = useRef<HTMLDivElement>(null);
-  const claimsFollowUpRef = useRef<HTMLDivElement>(null);
-  const patientWorkspaceRef = useRef<HTMLDivElement>(null);
-  const visitsSectionRef = useRef<HTMLDivElement>(null);
-  const claimsSectionRef = useRef<HTMLDivElement>(null);
-  // Which detail-view section (Visits or Claims Tracker) to scroll to once the
-  // detail view finishes rendering for the target patient — set by
-  // handleNavigate, consumed and cleared by the effect below.
-  const [pendingDetailScrollTarget, setPendingDetailScrollTarget] = useState<'visits' | 'claims' | null>(null);
-  // Presentational-only: which sidebar item should render as active. Kept
-  // independent of business state so it never implies data has changed.
-  const [activeNavSection, setActiveNavSection] = useState<NavSection>('dashboard');
+  // ── Route-derived nav state ────────────────────────────────────────────────
+  // The URL is the single source of truth for which section is active — no
+  // parallel activeNavSection state to drift out of sync with it.
+  const [location, navigate] = useLocation();
+  const activeSection: NavSection = useMemo(() => routeToNavSection(location), [location]);
+  // Derived (not stateful): true only on the per-patient detail routes.
+  const showDetailView = activeSection === 'visits' || activeSection === 'claims';
 
   // ── State ──────────────────────────────────────────────────────────────────
   const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null);
-  const [showDetailView, setShowDetailView] = useState(false);
   const [showAddPatient, setShowAddPatient] = useState(false);
   const [selectedInsurance, setSelectedInsurance] = useState<string>('Aetna');
   const [newPatientName, setNewPatientName] = useState('');
@@ -419,12 +414,15 @@ export default function Dashboard() {
   // below; cleared as soon as a patient is explicitly selected again.
   const skipAutoSelectRef = useRef(false);
 
-  // Auto-select first patient
+  // Auto-select first patient — skipped on /visits and /claims so those
+  // routes never silently show patients[0]; a patient must be explicitly
+  // selected (from Patients, an alert card, etc.) to see visit/claims data.
   useEffect(() => {
+    if (showDetailView) return;
     if (!selectedPatientId && patients.length > 0 && !skipAutoSelectRef.current) {
       setSelectedPatientId(patients[0].id);
     }
-  }, [patients, selectedPatientId]);
+  }, [patients, selectedPatientId, showDetailView]);
 
   useEffect(() => {
     if (selectedPatientId) {
@@ -616,68 +614,26 @@ export default function Dashboard() {
     });
   };
 
-  /** Sidebar nav — only routes to functionality that actually exists on this
-   *  single-page dashboard (no client-side router), by scrolling to the
-   *  relevant section or, for per-patient data, opening the Detail View. */
+  /** Sidebar nav — real routes for every destination except Bulk Upload,
+   *  which stays a same-page action (opens the existing dialog, no URL
+   *  change) rather than becoming a fake page. */
   const handleNavigate = (section: NavSection) => {
-    switch (section) {
-      case 'dashboard':
-        setActiveNavSection('dashboard');
-        setShowDetailView(false);
-        requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
-        break;
-      case 'patients':
-        setActiveNavSection('patients');
-        setShowDetailView(false);
-        requestAnimationFrame(() => patientWorkspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-        break;
-      case 'authorizations':
-        setActiveNavSection('authorizations');
-        setShowDetailView(false);
-        requestAnimationFrame(() => authorizationAlertsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-        break;
-      case 'claims-followup':
-        setActiveNavSection('claims-followup');
-        setShowDetailView(false);
-        requestAnimationFrame(() => claimsFollowUpRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-        break;
-      case 'visits':
-      case 'claims':
-        if (activePatient) {
-          setActiveNavSection(section);
-          setPendingDetailScrollTarget(section);
-          setShowDetailView(true);
-        } else {
-          setActiveNavSection('patients');
-          setShowDetailView(false);
-          requestAnimationFrame(() => patientWorkspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-        }
-        break;
-      case 'bulk-upload':
-        setShowDetailView(false);
-        setShowUploadDialog(true);
-        break;
+    if (section === 'bulk-upload') {
+      setShowUploadDialog(true);
+      return;
     }
+    navigate(`/${section}`);
   };
 
-  // Once the Detail View has actually rendered for the target patient, the
-  // Visits / Claims Tracker sections exist in the DOM — scroll to whichever
-  // one handleNavigate requested. Runs after render (not inside the click
-  // handler above) because showDetailView flips true first and the section
-  // ref isn't attached until this effect's render has committed.
-  useEffect(() => {
-    if (!pendingDetailScrollTarget || !showDetailView || !activePatient) return;
-    const target = pendingDetailScrollTarget;
-    requestAnimationFrame(() => {
-      const ref = target === 'visits' ? visitsSectionRef : claimsSectionRef;
-      if (ref.current) {
-        ref.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      } else {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      }
-    });
-    setPendingDetailScrollTarget(null);
-  }, [pendingDetailScrollTarget, showDetailView, activePatient]);
+  /** Centralized "select this patient, optionally jump to a detail route"
+   *  helper for every patient-selection entry point that should also
+   *  navigate (alert cards, follow-up cards, "View Full Records"). Plain
+   *  list-row selection — which should only update the Patient Workspace
+   *  preview, not navigate — calls setSelectedPatientId directly instead. */
+  const selectPatient = (patientId: string, destination?: '/visits' | '/claims') => {
+    setSelectedPatientId(patientId);
+    if (destination) navigate(destination);
+  };
 
   // ── Computed metrics ───────────────────────────────────────────────────────
 
@@ -782,7 +738,6 @@ export default function Dashboard() {
     if (selectedPatient && !matchesPatientFilters(selectedPatient, filterScope)) {
       skipAutoSelectRef.current = true;
       setSelectedPatientId(null);
-      setShowDetailView(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedInsurance, selectedClaimsFilter, patientIdsByStatus]);
@@ -819,25 +774,10 @@ export default function Dashboard() {
 
   const handleSelectInsurance = (insurance: string) => {
     setSelectedInsurance(insurance);
-    // Switching insurance while viewing a patient on a different one would
-    // leave the detail view showing someone outside the new filter — back
-    // out to the list.
-    if (selectedPatient && selectedPatient.insurance !== insurance) {
-      setShowDetailView(false);
-    }
   };
 
   const handleSelectClaimsStatus = (status: string) => {
     setSelectedClaimsFilter(status);
-    // Same reasoning as handleSelectInsurance above: don't leave the
-    // full-screen detail view open on a patient the new status filter
-    // excludes.
-    if (
-      selectedPatient &&
-      !matchesPatientFilters(selectedPatient, { selectedInsurance, selectedClaimsFilter: status, patientIdsByStatus })
-    ) {
-      setShowDetailView(false);
-    }
   };
 
   // Completed Sessions folder, scoped to the same Insurance / Claims Status
@@ -1454,6 +1394,139 @@ export default function Dashboard() {
     toast.success('Template downloaded!');
   };
 
+  // ── Shared dialogs ─────────────────────────────────────────────────────────
+  // Rendered on every route branch below (not just the branch that shows
+  // their trigger button) so an action reachable from the sidebar — or from
+  // a control on a different route branch, like the Active/Discharged
+  // switch — always has somewhere to actually appear.
+
+  const bulkUploadDialog = (
+    <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
+      <DialogContent className="bg-white sm:max-w-md max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="text-brand-blue">Bulk Upload Patient Data</DialogTitle>
+          <DialogDescription>Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="border-2 border-dashed border-brand-cream-dark rounded-lg p-6 text-center hover:border-brand-gold transition-colors">
+            <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" id="file-upload" />
+            <label htmlFor="file-upload" className="cursor-pointer block">
+              <Upload className="w-8 h-8 text-brand-gold mx-auto mb-2" />
+              <p className="text-brand-blue font-semibold">Click to upload CSV</p>
+            </label>
+          </div>
+          {uploadProgress > 0 && uploadProgress < 100 && (
+            <div className="w-full bg-brand-cream-dark rounded-full h-2">
+              <div className="bg-brand-gold h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
+            </div>
+          )}
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
+            <div className="flex items-center justify-between mb-2">
+              <p className="font-semibold">CSV Format:</p>
+              <Button
+                size="sm"
+                onClick={handleDownloadTemplate}
+                className="h-auto gap-1.5 bg-brand-blue hover:bg-brand-blue-dark text-white text-xs font-semibold px-3 py-1.5"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Download Template
+              </Button>
+            </div>
+            <p className="font-mono">Patient Name, Insurance, Authorized Sessions, …</p>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+
+  const patientActionDialogs = (
+    <>
+      {/* ── Discharge Patient Dialog ─────────────────────────────── */}
+      <Dialog open={showDischargeDialog} onOpenChange={(open) => { if (!open) { setShowDischargeDialog(false); setPendingDischargePatientId(null); } }}>
+        <DialogContent className="bg-white max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-brand-blue text-xl flex items-center gap-2">
+              <UserX className="w-5 h-5 text-gray-500" />
+              Discharge Patient
+            </DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              Please fill in the discharge details. The patient will be moved to the Discharged Patients folder.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <Label htmlFor="discharge-date" className="text-brand-blue font-semibold">Date of Discharge</Label>
+              <Input
+                id="discharge-date"
+                type="date"
+                value={dischargeDate}
+                onChange={e => setDischargeDate(e.target.value)}
+                className="mt-1 border-brand-cream-dark focus:border-brand-blue"
+              />
+            </div>
+            <div>
+              <Label htmlFor="discharge-reason" className="text-brand-blue font-semibold">Reason of Discharge</Label>
+              <Input
+                id="discharge-reason"
+                placeholder="e.g. Goals met, Moved, Insurance ended…"
+                value={dischargeReason}
+                onChange={e => setDischargeReason(e.target.value)}
+                className="mt-1 border-brand-cream-dark focus:border-brand-blue"
+              />
+            </div>
+          </div>
+          <div className="flex gap-3 pt-2">
+            <Button
+              variant="outline"
+              className="flex-1"
+              onClick={() => { setShowDischargeDialog(false); setPendingDischargePatientId(null); }}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="flex-1 bg-gray-600 hover:bg-gray-700 text-white font-semibold"
+              onClick={handleDischargeSubmit}
+              disabled={setPatientActive.isPending}
+            >
+              {setPatientActive.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <UserX className="w-4 h-4 mr-2" />}
+              Confirm Discharge
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Delete Patient Confirmation Dialog ─────────────────────────────── */}
+      <AlertDialog open={deletePatientId !== null} onOpenChange={(open) => { if (!open) { setDeletePatientId(null); setDeletePatientName(''); } }}>
+        <AlertDialogContent className="bg-white">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-brand-blue text-xl">Delete Patient?</AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground">
+              You are about to permanently delete <strong>{deletePatientName}</strong> and all of their visit records.
+              This action <strong>cannot be undone</strong>.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="border-brand-cream-dark text-brand-blue hover:bg-brand-cream">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (deletePatientId !== null) {
+                  deletePatient.mutate({ id: deletePatientId });
+                }
+              }}
+              disabled={deletePatient.isPending}
+              className="bg-red-600 hover:bg-red-700 text-white font-semibold"
+            >
+              {deletePatient.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Trash2 className="w-4 h-4 mr-2" />}
+              Yes, Delete Patient
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+
   // ── Loading state ──────────────────────────────────────────────────────────
 
   if (patientsLoading) {
@@ -1469,10 +1542,41 @@ export default function Dashboard() {
 
   // ── Detail View ────────────────────────────────────────────────────────────
 
-  if (showDetailView && activePatient) {
+  if (showDetailView) {
+    // Explicit — no patients[0] fallback. A patient must actually have been
+    // selected (Patients list, an alert card, "View Full Records", …) for
+    // /visits or /claims to show anything.
+    if (!selectedPatient) {
+      return (
+        <DashboardShell
+          activeSection={activeSection}
+          onNavigate={handleNavigate}
+          onSignOut={handleSignOut}
+          signingOut={logoutMutation.isPending}
+          topbarTitle={activeSection === 'visits' ? 'Visits' : 'Claims'}
+          topbarSubtitle="No patient selected"
+        >
+          <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-20 text-center">
+            <p className="text-muted-foreground mb-4">
+              {activeSection === 'visits'
+                ? 'Select a patient to view visit records.'
+                : 'Select a patient to view claims records.'}
+            </p>
+            <Button onClick={() => navigate('/patients')} className="bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
+              Go to Patients
+            </Button>
+          </div>
+          {bulkUploadDialog}
+        </DashboardShell>
+      );
+    }
+    // Shadow the fallback-including `activePatient` with the just-verified
+    // non-null selection so TypeScript narrows it for the rest of this branch.
+    const activePatient = selectedPatient;
+
     return (
       <DashboardShell
-        activeSection={activeNavSection}
+        activeSection={activeSection}
         onNavigate={handleNavigate}
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
@@ -1507,7 +1611,7 @@ export default function Dashboard() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => { setActiveNavSection('dashboard'); setShowDetailView(false); }}
+            onClick={() => navigate('/dashboard')}
             className="mb-4 -ml-2 gap-1.5 text-brand-blue hover:text-brand-blue hover:bg-brand-cream"
           >
             <ChevronLeft className="w-4 h-4" />
@@ -1569,7 +1673,7 @@ export default function Dashboard() {
               Loading visits…
             </div>
           ) : visits.length === 0 ? (
-            <Card ref={visitsSectionRef} className="border-brand-cream-dark shadow-md scroll-mt-20">
+            <Card className="border-brand-cream-dark shadow-md">
               <CardContent className="py-12 text-center text-muted-foreground">No visit records yet. Log a session to get started.</CardContent>
             </Card>
           ) : (
@@ -1586,9 +1690,9 @@ export default function Dashboard() {
                   const isActive = period === activePeriod;
                   return (
                     <div key={`period-${period}`}>
+                    {activeSection !== 'claims' && (
                     <Card
-                      ref={periodIndex === 0 ? visitsSectionRef : undefined}
-                      className={`shadow-sm rounded-xl overflow-hidden py-0 gap-0 mb-6 border scroll-mt-20 ${
+                      className={`shadow-sm rounded-xl overflow-hidden py-0 gap-0 mb-6 border ${
                       isActive ? 'border-gray-100 border-t-4 border-t-brand-gold' : 'border-gray-200'
                     }`}>
                       <CardHeader className={`px-6 py-5 flex flex-row items-center justify-between ${
@@ -1833,12 +1937,13 @@ export default function Dashboard() {
                         </div>
                       </CardContent>
                     </Card>
+                    )}
 
                     {/* Claims Tracking Card — Below Authorization Period */}
+                    {activeSection !== 'visits' && (
                     <Card
                       key={`claims-${period}`}
-                      ref={periodIndex === 0 ? claimsSectionRef : undefined}
-                      className="border border-border border-t-4 border-t-brand-gold shadow-brand rounded-xl mb-6 ml-0 scroll-mt-20"
+                      className="border border-border border-t-4 border-t-brand-gold shadow-brand rounded-xl mb-6 ml-0"
                     >
                       <CardHeader className="bg-white rounded-t-xl">
                         <div className="flex items-start justify-between gap-4 mb-4">
@@ -2389,6 +2494,7 @@ export default function Dashboard() {
                         })()}
                       </CardContent>
                     </Card>
+                    )}
                     </div>
                   );
                 });
@@ -2899,6 +3005,310 @@ export default function Dashboard() {
         </DialogContent>
       </Dialog>
 
+      {bulkUploadDialog}
+      {patientActionDialogs}
+      </DashboardShell>
+    );
+  }
+
+  // ── Shared list-view content (used by /dashboard and /patients) ────────────
+
+  const filterChipsElement = (
+    <FilterChips
+      chips={[
+        ...(selectedInsurance
+          ? [{ key: 'insurance', label: `Filtered by: ${selectedInsurance}`, onRemove: () => setSelectedInsurance('') }]
+          : []),
+        ...(selectedClaimsFilter && selectedClaimsFilter !== 'all'
+          ? [{
+              key: 'claims-status',
+              label: `Status: ${CLAIM_STATUS_FILTERS.find(f => f.value === selectedClaimsFilter)?.label ?? selectedClaimsFilter}`,
+              onRemove: () => setSelectedClaimsFilter('all'),
+            }]
+          : []),
+      ]}
+      onClearAll={handleClearFilters}
+    />
+  );
+
+  const patientWorkspaceSection = (
+    <section>
+      <Card className="border-border shadow-sm rounded-xl overflow-hidden py-0 gap-0">
+        <CardHeader className="border-b border-border px-5 py-4 [.border-b]:pb-4">
+          <CardTitle className="text-base font-semibold text-brand-blue">Patient Workspace</CardTitle>
+          <CardDescription className="text-xs">Filter, search, and review patients in one place</CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          <div className="lg:grid lg:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[260px_320px_minmax(0,1fr)]">
+            {/* Filters — xl+ only; below xl uses the Filters sheet */}
+            <div className="hidden xl:block border-r border-border p-4 max-h-[720px] overflow-y-auto">
+              <PatientFilters
+                insuranceList={insuranceList}
+                insuranceCounts={insuranceCounts}
+                selectedInsurance={selectedInsurance}
+                onSelectInsurance={handleSelectInsurance}
+                claimStatusFilters={CLAIM_STATUS_FILTERS}
+                claimStatusCounts={claimStatusCounts}
+                selectedClaimsFilter={selectedClaimsFilter}
+                onSelectClaimsFilter={handleSelectClaimsStatus}
+              />
+            </div>
+
+            {/* Patient List */}
+            <div className="border-r border-border p-4 space-y-4 max-h-[720px] overflow-y-auto">
+              <div>
+                <h3 className="text-sm font-semibold text-brand-blue mb-0.5">Patients</h3>
+                <p className="text-xs text-muted-foreground mb-3">{filteredPatients.length} in {selectedInsurance || 'all insurances'}</p>
+
+                {/* Search + mobile filters control */}
+                <div className="mb-3 space-y-2">
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" aria-hidden="true" />
+                    <Input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Search patients..."
+                      aria-label="Search patients by name"
+                      className="pl-9 pr-9"
+                    />
+                    {searchQuery !== '' && (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery('')}
+                        aria-label="Clear search"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="xl:hidden">
+                    <Sheet open={showMobileFilters} onOpenChange={setShowMobileFilters}>
+                      <SheetTrigger asChild>
+                        <Button variant="outline" size="sm" className="gap-1.5">
+                          <SlidersHorizontal className="w-3.5 h-3.5" />
+                          Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+                        </Button>
+                      </SheetTrigger>
+                      <SheetContent side="bottom" className="max-h-[80vh] overflow-y-auto">
+                        <SheetHeader>
+                          <SheetTitle>Filters</SheetTitle>
+                        </SheetHeader>
+                        <div className="px-4 pb-4">
+                          <PatientFilters
+                            insuranceList={insuranceList}
+                            insuranceCounts={insuranceCounts}
+                            selectedInsurance={selectedInsurance}
+                            onSelectInsurance={handleSelectInsurance}
+                            claimStatusFilters={CLAIM_STATUS_FILTERS}
+                            claimStatusCounts={claimStatusCounts}
+                            selectedClaimsFilter={selectedClaimsFilter}
+                            onSelectClaimsFilter={handleSelectClaimsStatus}
+                          />
+                        </div>
+                        <SheetFooter>
+                          <Button variant="outline" onClick={handleClearFilters} disabled={activeFilterCount === 0}>
+                            Clear Filters
+                          </Button>
+                        </SheetFooter>
+                      </SheetContent>
+                    </Sheet>
+                  </div>
+                </div>
+
+                <div className="space-y-1 max-h-96 overflow-y-auto">
+                  {filteredPatients.length > 0 ? filteredPatients.map(patient => (
+                      <PatientListItem
+                        key={patient.id}
+                        name={patient.name}
+                        insurance={patient.insurance}
+                        isActive={activePatient?.id === patient.id}
+                        claimsStatus={patient.claimsStatus}
+                        onSelect={() => setSelectedPatientId(patient.id)}
+                        onDelete={() => { setDeletePatientId(patient.id); setDeletePatientName(patient.name); }}
+                      />
+                    )) : (
+                      <div className="p-4 text-center text-muted-foreground text-sm">
+                        {searchQuery.trim() ? 'No patients match your search.' : 'No patients for this insurance'}
+                      </div>
+                    )}
+                </div>
+              </div>
+
+              {/* ─── Completed Sessions Folder ─────────────────────────────────── */}
+              {completedPatients.length > 0 && (
+                <Card className="border-green-200 shadow-sm py-0 gap-0 overflow-hidden">
+                  <CardHeader className="bg-green-700 text-white py-2.5 px-3 [.border-b]:pb-2.5">
+                    <CardTitle className="text-xs flex items-center gap-2 font-semibold">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      Completed Sessions
+                      <Badge className="bg-white text-green-700 text-[10px] ml-auto">{completedPatients.length}</Badge>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="p-0">
+                    <div className="space-y-1 max-h-48 overflow-y-auto">
+                      {completedPatients.map(patient => (
+                        <PatientListItem
+                          key={patient.id}
+                          name={patient.name}
+                          insurance={patient.insurance}
+                          isActive={activePatient?.id === patient.id}
+                          tone="success"
+                          trailing={<CheckCircle2 className="w-4 h-4 text-green-500" />}
+                          onSelect={() => setSelectedPatientId(patient.id)}
+                        />
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Discharged Patients Folder — inside the patients column */}
+              {dischargedPatients.length > 0 && (
+              <Card className="border-gray-300 shadow-sm py-0 gap-0 overflow-hidden">
+                <CardHeader className="bg-gray-600 text-white py-2.5 px-3 [.border-b]:pb-2.5">
+                  <CardTitle className="text-xs flex items-center gap-2 font-semibold">
+                    <UserX className="w-3.5 h-3.5" />
+                    Discharged Patients
+                    <Badge className="bg-white text-gray-700 text-[10px] ml-auto">{dischargedPatients.length}</Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    {dischargedPatients.map(patient => (
+                      <PatientListItem
+                        key={patient.id}
+                        name={patient.name}
+                        insurance={patient.insurance}
+                        isActive={activePatient?.id === patient.id}
+                        tone="muted"
+                        trailing={<UserX className="w-4 h-4 text-gray-400" />}
+                        onSelect={() => setSelectedPatientId(patient.id)}
+                        meta={
+                          <>
+                            {patient.dischargeDate && (
+                              <p className="text-xs text-gray-400 mt-0.5">
+                                Discharged: {new Date(patient.dischargeDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                              </p>
+                            )}
+                            {patient.dischargeReason && (
+                              <p className="text-xs text-gray-400 truncate">Reason: {patient.dischargeReason}</p>
+                            )}
+                          </>
+                        }
+                      />
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+              )}
+            </div>
+
+            {/* Patient Detail — the dominant workspace area */}
+            <div className="p-5">
+              {activePatient ? (
+                <div className="space-y-4">
+                  <div className="flex items-start justify-between gap-3 flex-wrap">
+                    <div>
+                      <button onClick={() => navigate('/visits')} className="group text-left">
+                        <h3 className="text-xl font-semibold text-brand-blue group-hover:text-brand-gold transition-colors cursor-pointer">
+                          {activePatient.name}
+                        </h3>
+                      </button>
+                      <div className="mt-1.5 flex items-center gap-3 flex-wrap text-sm text-muted-foreground">
+                        <span>Insurance: {activePatient.insurance}</span>
+                        <span className="flex items-center gap-2">
+                          <span className={activePatient.isActive !== false ? 'text-green-700 font-semibold' : 'text-gray-500 font-semibold'}>
+                            {activePatient.isActive !== false ? 'Active' : 'Discharged'}
+                          </span>
+                          <Switch
+                            checked={activePatient.isActive !== false}
+                            onCheckedChange={(checked) => handleToggleActive(activePatient.id, checked)}
+                            disabled={setPatientActive.isPending}
+                            aria-label="Toggle patient active status"
+                          />
+                        </span>
+                      </div>
+                    </div>
+                    {alertStatus && (
+                      <Badge className={`text-xs px-2.5 py-1 rounded-full font-medium ${alertStatus.color}`}>{alertStatus.label}</Badge>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
+                      <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Authorized</p>
+                      <p className="text-2xl font-bold text-brand-gold">{activeMetrics.totalAuthorized}</p>
+                    </div>
+                    <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
+                      <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Completed</p>
+                      <p className="text-2xl font-bold text-green-600">{activeMetrics.completed}</p>
+                    </div>
+                    <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
+                      <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Remaining</p>
+                      <p className="text-2xl font-bold text-brand-blue">{activeMetrics.remaining}</p>
+                    </div>
+                  </div>
+
+                  <Button
+                    onClick={() => navigate('/visits')}
+                    className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
+                  >
+                    View Full Records &amp; Edit Date ASH Submitted
+                  </Button>
+                </div>
+              ) : (
+                <div className="h-full min-h-[200px] flex items-center justify-center text-sm text-muted-foreground">
+                  Select a patient to see their summary.
+                </div>
+              )}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </section>
+  );
+
+  // ── /patients ────────────────────────────────────────────────────────────
+
+  if (activeSection === 'patients') {
+    return (
+      <DashboardShell
+        activeSection={activeSection}
+        onNavigate={handleNavigate}
+        onSignOut={handleSignOut}
+        signingOut={logoutMutation.isPending}
+        topbarTitle="Patients"
+        topbarSubtitle="Filter, search, and review patients in one place"
+      >
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6">
+          {filterChipsElement}
+          {patientWorkspaceSection}
+        </div>
+        {bulkUploadDialog}
+        {patientActionDialogs}
+      </DashboardShell>
+    );
+  }
+
+  // ── /authorizations ─────────────────────────────────────────────────────
+
+  if (activeSection === 'authorizations') {
+    return (
+      <DashboardShell
+        activeSection={activeSection}
+        onNavigate={handleNavigate}
+        onSignOut={handleSignOut}
+        signingOut={logoutMutation.isPending}
+        topbarTitle="Authorizations"
+        topbarSubtitle="Clinic-wide authorization alerts"
+      >
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
+          <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
+        </div>
+        {bulkUploadDialog}
       </DashboardShell>
     );
   }
@@ -2907,7 +3317,7 @@ export default function Dashboard() {
 
   return (
     <DashboardShell
-      activeSection={activeNavSection}
+      activeSection={activeSection}
       onNavigate={handleNavigate}
       onSignOut={handleSignOut}
       signingOut={logoutMutation.isPending}
@@ -2915,49 +3325,13 @@ export default function Dashboard() {
       topbarSubtitle="Authorization & Claims Overview"
       topbarActions={
         <>
-          {/* Bulk Upload */}
-          <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
-            <DialogTrigger asChild>
-              <Button size="sm" variant="outline" className="gap-1.5">
-                <Upload className="w-4 h-4" />
-                <span className="hidden sm:inline">Bulk Upload</span>
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="bg-white sm:max-w-md max-h-[90vh] overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle className="text-brand-blue">Bulk Upload Patient Data</DialogTitle>
-                <DialogDescription>Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions</DialogDescription>
-              </DialogHeader>
-              <div className="space-y-4">
-                <div className="border-2 border-dashed border-brand-cream-dark rounded-lg p-6 text-center hover:border-brand-gold transition-colors">
-                  <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" id="file-upload" />
-                  <label htmlFor="file-upload" className="cursor-pointer block">
-                    <Upload className="w-8 h-8 text-brand-gold mx-auto mb-2" />
-                    <p className="text-brand-blue font-semibold">Click to upload CSV</p>
-                  </label>
-                </div>
-                {uploadProgress > 0 && uploadProgress < 100 && (
-                  <div className="w-full bg-brand-cream-dark rounded-full h-2">
-                    <div className="bg-brand-gold h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
-                  </div>
-                )}
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
-                  <div className="flex items-center justify-between mb-2">
-                    <p className="font-semibold">CSV Format:</p>
-                    <Button
-                      size="sm"
-                      onClick={handleDownloadTemplate}
-                      className="h-auto gap-1.5 bg-brand-blue hover:bg-brand-blue-dark text-white text-xs font-semibold px-3 py-1.5"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Download Template
-                    </Button>
-                  </div>
-                  <p className="font-mono">Patient Name, Insurance, Authorized Sessions, …</p>
-                </div>
-              </div>
-            </DialogContent>
-          </Dialog>
+          {/* Bulk Upload — dialog itself is rendered globally (bulkUploadDialog
+              below) so it also opens from the sidebar action on every route;
+              this button just opens it without navigating. */}
+          <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setShowUploadDialog(true)}>
+            <Upload className="w-4 h-4" />
+            <span className="hidden sm:inline">Bulk Upload</span>
+          </Button>
 
           {/* Add Patient */}
           <Dialog open={showAddPatient} onOpenChange={setShowAddPatient}>
@@ -3027,276 +3401,23 @@ export default function Dashboard() {
         </div>
 
         {/* ─── Needs Attention ────────────────────────────────────────────── */}
-        <section className="scroll-mt-20">
+        <section>
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-3">Needs Attention</h2>
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 xl:gap-6">
-            <div ref={authorizationAlertsRef} className="lg:col-span-4 scroll-mt-20">
-              <AuthAlertPanel onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }} />
+            <div className="lg:col-span-4">
+              <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
             </div>
-            <div ref={claimsFollowUpRef} className="lg:col-span-8 scroll-mt-20">
+            <div className="lg:col-span-8">
               <ClaimsFollowUpPanel
                 insurance={selectedInsurance}
-                onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }}
+                onSelectPatient={(id) => selectPatient(id, '/claims')}
               />
             </div>
           </div>
         </section>
 
-        {/* ─── Active filter chips ───────────────────────────────────────────── */}
-        <FilterChips
-          chips={[
-            ...(selectedInsurance
-              ? [{ key: 'insurance', label: `Filtered by: ${selectedInsurance}`, onRemove: () => setSelectedInsurance('') }]
-              : []),
-            ...(selectedClaimsFilter && selectedClaimsFilter !== 'all'
-              ? [{
-                  key: 'claims-status',
-                  label: `Status: ${CLAIM_STATUS_FILTERS.find(f => f.value === selectedClaimsFilter)?.label ?? selectedClaimsFilter}`,
-                  onRemove: () => setSelectedClaimsFilter('all'),
-                }]
-              : []),
-          ]}
-          onClearAll={handleClearFilters}
-        />
-
-        {/* ─── Patient Workspace ──────────────────────────────────────────── */}
-        <section ref={patientWorkspaceRef} className="scroll-mt-20">
-          <Card className="border-border shadow-sm rounded-xl overflow-hidden py-0 gap-0">
-            <CardHeader className="border-b border-border px-5 py-4 [.border-b]:pb-4">
-              <CardTitle className="text-base font-semibold text-brand-blue">Patient Workspace</CardTitle>
-              <CardDescription className="text-xs">Filter, search, and review patients in one place</CardDescription>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="lg:grid lg:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[260px_320px_minmax(0,1fr)]">
-                {/* Filters — xl+ only; below xl uses the Filters sheet */}
-                <div className="hidden xl:block border-r border-border p-4 max-h-[720px] overflow-y-auto">
-                  <PatientFilters
-                    insuranceList={insuranceList}
-                    insuranceCounts={insuranceCounts}
-                    selectedInsurance={selectedInsurance}
-                    onSelectInsurance={handleSelectInsurance}
-                    claimStatusFilters={CLAIM_STATUS_FILTERS}
-                    claimStatusCounts={claimStatusCounts}
-                    selectedClaimsFilter={selectedClaimsFilter}
-                    onSelectClaimsFilter={handleSelectClaimsStatus}
-                  />
-                </div>
-
-                {/* Patient List */}
-                <div className="border-r border-border p-4 space-y-4 max-h-[720px] overflow-y-auto">
-                  <div>
-                    <h3 className="text-sm font-semibold text-brand-blue mb-0.5">Patients</h3>
-                    <p className="text-xs text-muted-foreground mb-3">{filteredPatients.length} in {selectedInsurance || 'all insurances'}</p>
-
-                    {/* Search + mobile filters control */}
-                    <div className="mb-3 space-y-2">
-                      <div className="relative">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" aria-hidden="true" />
-                        <Input
-                          type="text"
-                          value={searchQuery}
-                          onChange={(e) => setSearchQuery(e.target.value)}
-                          placeholder="Search patients..."
-                          aria-label="Search patients by name"
-                          className="pl-9 pr-9"
-                        />
-                        {searchQuery !== '' && (
-                          <button
-                            type="button"
-                            onClick={() => setSearchQuery('')}
-                            aria-label="Clear search"
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
-                        )}
-                      </div>
-
-                      <div className="xl:hidden">
-                        <Sheet open={showMobileFilters} onOpenChange={setShowMobileFilters}>
-                          <SheetTrigger asChild>
-                            <Button variant="outline" size="sm" className="gap-1.5">
-                              <SlidersHorizontal className="w-3.5 h-3.5" />
-                              Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
-                            </Button>
-                          </SheetTrigger>
-                          <SheetContent side="bottom" className="max-h-[80vh] overflow-y-auto">
-                            <SheetHeader>
-                              <SheetTitle>Filters</SheetTitle>
-                            </SheetHeader>
-                            <div className="px-4 pb-4">
-                              <PatientFilters
-                                insuranceList={insuranceList}
-                                insuranceCounts={insuranceCounts}
-                                selectedInsurance={selectedInsurance}
-                                onSelectInsurance={handleSelectInsurance}
-                                claimStatusFilters={CLAIM_STATUS_FILTERS}
-                                claimStatusCounts={claimStatusCounts}
-                                selectedClaimsFilter={selectedClaimsFilter}
-                                onSelectClaimsFilter={handleSelectClaimsStatus}
-                              />
-                            </div>
-                            <SheetFooter>
-                              <Button variant="outline" onClick={handleClearFilters} disabled={activeFilterCount === 0}>
-                                Clear Filters
-                              </Button>
-                            </SheetFooter>
-                          </SheetContent>
-                        </Sheet>
-                      </div>
-                    </div>
-
-                    <div className="space-y-1 max-h-96 overflow-y-auto">
-                      {filteredPatients.length > 0 ? filteredPatients.map(patient => (
-                          <PatientListItem
-                            key={patient.id}
-                            name={patient.name}
-                            insurance={patient.insurance}
-                            isActive={activePatient?.id === patient.id}
-                            claimsStatus={patient.claimsStatus}
-                            onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
-                            onDelete={() => { setDeletePatientId(patient.id); setDeletePatientName(patient.name); }}
-                          />
-                        )) : (
-                          <div className="p-4 text-center text-muted-foreground text-sm">
-                            {searchQuery.trim() ? 'No patients match your search.' : 'No patients for this insurance'}
-                          </div>
-                        )}
-                    </div>
-                  </div>
-
-                  {/* ─── Completed Sessions Folder ─────────────────────────────────── */}
-                  {completedPatients.length > 0 && (
-                    <Card className="border-green-200 shadow-sm py-0 gap-0 overflow-hidden">
-                      <CardHeader className="bg-green-700 text-white py-2.5 px-3 [.border-b]:pb-2.5">
-                        <CardTitle className="text-xs flex items-center gap-2 font-semibold">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          Completed Sessions
-                          <Badge className="bg-white text-green-700 text-[10px] ml-auto">{completedPatients.length}</Badge>
-                        </CardTitle>
-                      </CardHeader>
-                      <CardContent className="p-0">
-                        <div className="space-y-1 max-h-48 overflow-y-auto">
-                          {completedPatients.map(patient => (
-                            <PatientListItem
-                              key={patient.id}
-                              name={patient.name}
-                              insurance={patient.insurance}
-                              isActive={activePatient?.id === patient.id}
-                              tone="success"
-                              trailing={<CheckCircle2 className="w-4 h-4 text-green-500" />}
-                              onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
-                            />
-                          ))}
-                        </div>
-                      </CardContent>
-                    </Card>
-                  )}
-
-                  {/* Discharged Patients Folder — inside the patients column */}
-                  {dischargedPatients.length > 0 && (
-                  <Card className="border-gray-300 shadow-sm py-0 gap-0 overflow-hidden">
-                    <CardHeader className="bg-gray-600 text-white py-2.5 px-3 [.border-b]:pb-2.5">
-                      <CardTitle className="text-xs flex items-center gap-2 font-semibold">
-                        <UserX className="w-3.5 h-3.5" />
-                        Discharged Patients
-                        <Badge className="bg-white text-gray-700 text-[10px] ml-auto">{dischargedPatients.length}</Badge>
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="p-0">
-                      <div className="space-y-1 max-h-48 overflow-y-auto">
-                        {dischargedPatients.map(patient => (
-                          <PatientListItem
-                            key={patient.id}
-                            name={patient.name}
-                            insurance={patient.insurance}
-                            isActive={activePatient?.id === patient.id}
-                            tone="muted"
-                            trailing={<UserX className="w-4 h-4 text-gray-400" />}
-                            onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
-                            meta={
-                              <>
-                                {patient.dischargeDate && (
-                                  <p className="text-xs text-gray-400 mt-0.5">
-                                    Discharged: {new Date(patient.dischargeDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                                  </p>
-                                )}
-                                {patient.dischargeReason && (
-                                  <p className="text-xs text-gray-400 truncate">Reason: {patient.dischargeReason}</p>
-                                )}
-                              </>
-                            }
-                          />
-                        ))}
-                      </div>
-                    </CardContent>
-                  </Card>
-                  )}
-                </div>
-
-                {/* Patient Detail — the dominant workspace area */}
-                <div className="p-5">
-                  {activePatient ? (
-                    <div className="space-y-4">
-                      <div className="flex items-start justify-between gap-3 flex-wrap">
-                        <div>
-                          <button onClick={() => setShowDetailView(true)} className="group text-left">
-                            <h3 className="text-xl font-semibold text-brand-blue group-hover:text-brand-gold transition-colors cursor-pointer">
-                              {activePatient.name}
-                            </h3>
-                          </button>
-                          <div className="mt-1.5 flex items-center gap-3 flex-wrap text-sm text-muted-foreground">
-                            <span>Insurance: {activePatient.insurance}</span>
-                            <span className="flex items-center gap-2">
-                              <span className={activePatient.isActive !== false ? 'text-green-700 font-semibold' : 'text-gray-500 font-semibold'}>
-                                {activePatient.isActive !== false ? 'Active' : 'Discharged'}
-                              </span>
-                              <Switch
-                                checked={activePatient.isActive !== false}
-                                onCheckedChange={(checked) => handleToggleActive(activePatient.id, checked)}
-                                disabled={setPatientActive.isPending}
-                                aria-label="Toggle patient active status"
-                              />
-                            </span>
-                          </div>
-                        </div>
-                        {alertStatus && (
-                          <Badge className={`text-xs px-2.5 py-1 rounded-full font-medium ${alertStatus.color}`}>{alertStatus.label}</Badge>
-                        )}
-                      </div>
-
-                      <div className="grid grid-cols-3 gap-3">
-                        <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
-                          <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Authorized</p>
-                          <p className="text-2xl font-bold text-brand-gold">{activeMetrics.totalAuthorized}</p>
-                        </div>
-                        <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
-                          <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Completed</p>
-                          <p className="text-2xl font-bold text-green-600">{activeMetrics.completed}</p>
-                        </div>
-                        <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
-                          <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Remaining</p>
-                          <p className="text-2xl font-bold text-brand-blue">{activeMetrics.remaining}</p>
-                        </div>
-                      </div>
-
-                      <Button
-                        onClick={() => setShowDetailView(true)}
-                        className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
-                      >
-                        View Full Records &amp; Edit Date ASH Submitted
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="h-full min-h-[200px] flex items-center justify-center text-sm text-muted-foreground">
-                      Select a patient to see their summary.
-                    </div>
-                  )}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </section>
+        {filterChipsElement}
+        {patientWorkspaceSection}
 
         {/* ─── Patient Analytics ──────────────────────────────────────────── */}
         <div>
@@ -3305,89 +3426,8 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* ── Discharge Patient Dialog ─────────────────────────────── */}
-      <Dialog open={showDischargeDialog} onOpenChange={(open) => { if (!open) { setShowDischargeDialog(false); setPendingDischargePatientId(null); } }}>
-        <DialogContent className="bg-white max-w-md">
-          <DialogHeader>
-            <DialogTitle className="text-brand-blue text-xl flex items-center gap-2">
-              <UserX className="w-5 h-5 text-gray-500" />
-              Discharge Patient
-            </DialogTitle>
-            <DialogDescription className="text-muted-foreground">
-              Please fill in the discharge details. The patient will be moved to the Discharged Patients folder.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div>
-              <Label htmlFor="discharge-date" className="text-brand-blue font-semibold">Date of Discharge</Label>
-              <Input
-                id="discharge-date"
-                type="date"
-                value={dischargeDate}
-                onChange={e => setDischargeDate(e.target.value)}
-                className="mt-1 border-brand-cream-dark focus:border-brand-blue"
-              />
-            </div>
-            <div>
-              <Label htmlFor="discharge-reason" className="text-brand-blue font-semibold">Reason of Discharge</Label>
-              <Input
-                id="discharge-reason"
-                placeholder="e.g. Goals met, Moved, Insurance ended…"
-                value={dischargeReason}
-                onChange={e => setDischargeReason(e.target.value)}
-                className="mt-1 border-brand-cream-dark focus:border-brand-blue"
-              />
-            </div>
-          </div>
-          <div className="flex gap-3 pt-2">
-            <Button
-              variant="outline"
-              className="flex-1"
-              onClick={() => { setShowDischargeDialog(false); setPendingDischargePatientId(null); }}
-            >
-              Cancel
-            </Button>
-            <Button
-              className="flex-1 bg-gray-600 hover:bg-gray-700 text-white font-semibold"
-              onClick={handleDischargeSubmit}
-              disabled={setPatientActive.isPending}
-            >
-              {setPatientActive.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <UserX className="w-4 h-4 mr-2" />}
-              Confirm Discharge
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Delete Patient Confirmation Dialog ─────────────────────────────── */}
-      <AlertDialog open={deletePatientId !== null} onOpenChange={(open) => { if (!open) { setDeletePatientId(null); setDeletePatientName(''); } }}>
-        <AlertDialogContent className="bg-white">
-          <AlertDialogHeader>
-            <AlertDialogTitle className="text-brand-blue text-xl">Delete Patient?</AlertDialogTitle>
-            <AlertDialogDescription className="text-muted-foreground">
-              You are about to permanently delete <strong>{deletePatientName}</strong> and all of their visit records.
-              This action <strong>cannot be undone</strong>.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel className="border-brand-cream-dark text-brand-blue hover:bg-brand-cream">
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                if (deletePatientId !== null) {
-                  deletePatient.mutate({ id: deletePatientId });
-                }
-              }}
-              disabled={deletePatient.isPending}
-              className="bg-red-600 hover:bg-red-700 text-white font-semibold"
-            >
-              {deletePatient.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Trash2 className="w-4 h-4 mr-2" />}
-              Yes, Delete Patient
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {bulkUploadDialog}
+      {patientActionDialogs}
     </DashboardShell>
   );
 }
