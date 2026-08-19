@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { routeToNavSection } from './navSection';
+import { routeToNavSection, navSectionToRoute } from './navSection';
 
 describe('routeToNavSection', () => {
   it('maps each real route to its sidebar section', () => {
     expect(routeToNavSection('/dashboard')).toBe('dashboard');
-    expect(routeToNavSection('/patients')).toBe('patients');
+    expect(routeToNavSection('/patients')).toBe('patients-overview');
+    expect(routeToNavSection('/patients/records')).toBe('patients-records');
+    expect(routeToNavSection('/patients/discharged')).toBe('patients-discharged');
     expect(routeToNavSection('/authorizations')).toBe('authorizations');
     expect(routeToNavSection('/visits')).toBe('visits');
     expect(routeToNavSection('/claims')).toBe('claims');
@@ -13,5 +15,22 @@ describe('routeToNavSection', () => {
   it('falls back to dashboard for "/" and any unrecognized path', () => {
     expect(routeToNavSection('/')).toBe('dashboard');
     expect(routeToNavSection('/something-else')).toBe('dashboard');
+    expect(routeToNavSection('/patients/unknown')).toBe('dashboard');
+  });
+});
+
+describe('navSectionToRoute', () => {
+  it('is the inverse of routeToNavSection for every routable section', () => {
+    expect(navSectionToRoute('dashboard')).toBe('/dashboard');
+    expect(navSectionToRoute('patients-overview')).toBe('/patients');
+    expect(navSectionToRoute('patients-records')).toBe('/patients/records');
+    expect(navSectionToRoute('patients-discharged')).toBe('/patients/discharged');
+    expect(navSectionToRoute('authorizations')).toBe('/authorizations');
+    expect(navSectionToRoute('visits')).toBe('/visits');
+    expect(navSectionToRoute('claims')).toBe('/claims');
+  });
+
+  it('returns null for bulk-upload, which has no route of its own', () => {
+    expect(navSectionToRoute('bulk-upload')).toBeNull();
   });
 });

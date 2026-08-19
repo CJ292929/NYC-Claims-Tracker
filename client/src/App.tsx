@@ -43,6 +43,8 @@ function Router() {
       <Route path="/" component={() => <Redirect to="/dashboard" />} />
       <Route path="/dashboard" component={() => <ProtectedRoute component={Dashboard} />} />
       <Route path="/patients" component={() => <ProtectedRoute component={Dashboard} />} />
+      <Route path="/patients/records" component={() => <ProtectedRoute component={Dashboard} />} />
+      <Route path="/patients/discharged" component={() => <ProtectedRoute component={Dashboard} />} />
       <Route path="/authorizations" component={() => <ProtectedRoute component={Dashboard} />} />
       <Route path="/visits" component={() => <ProtectedRoute component={Dashboard} />} />
       <Route path="/claims" component={() => <ProtectedRoute component={Dashboard} />} />

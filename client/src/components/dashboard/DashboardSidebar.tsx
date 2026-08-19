@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import {
@@ -9,42 +10,88 @@ import {
   UploadCloud,
   LogOut,
   Loader2,
+  ChevronDown,
 } from 'lucide-react';
 import logoIcon from '@/assets/logos/logo-icon.png';
 
 export type NavSection =
   | 'dashboard'
-  | 'patients'
+  | 'patients-overview'
+  | 'patients-records'
+  | 'patients-discharged'
   | 'authorizations'
   | 'visits'
   | 'claims'
   | 'bulk-upload';
 
-const NAV_GROUPS: Array<{
+type IconType = React.ComponentType<{ className?: string }>;
+
+interface NavLeaf {
+  type: 'leaf';
+  key: NavSection;
   label: string;
-  items: Array<{ key: NavSection; label: string; icon: React.ComponentType<{ className?: string }> }>;
-}> = [
+  icon?: IconType;
+}
+
+interface NavParent {
+  type: 'parent';
+  key: string;
+  label: string;
+  icon: IconType;
+  children: NavLeaf[];
+}
+
+type NavEntry = NavLeaf | NavParent;
+
+const leaf = (key: NavSection, label: string, icon?: IconType): NavLeaf => ({ type: 'leaf', key, label, icon });
+
+const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
   {
     label: 'Main',
-    items: [{ key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard }],
+    items: [leaf('dashboard', 'Dashboard', LayoutDashboard)],
   },
   {
     label: 'Patient Management',
     items: [
-      { key: 'patients', label: 'Patients', icon: Users },
-      { key: 'authorizations', label: 'Authorizations', icon: ShieldAlert },
-      { key: 'visits', label: 'Visits', icon: CalendarCheck },
+      {
+        type: 'parent',
+        key: 'patients',
+        label: 'Patients',
+        icon: Users,
+        children: [
+          leaf('patients-overview', 'Overview'),
+          leaf('patients-records', 'Patient Records'),
+          leaf('patients-discharged', 'Discharged Patients'),
+        ],
+      },
+      leaf('authorizations', 'Authorizations', ShieldAlert),
     ],
   },
   {
-    label: 'Claims Management',
-    items: [{ key: 'claims', label: 'Claims', icon: FileStack }],
+    label: 'Clinical / Billing',
+    items: [
+      leaf('visits', 'Visits', CalendarCheck),
+      leaf('claims', 'Claims', FileStack),
+    ],
   },
   {
     label: 'Actions',
-    items: [{ key: 'bulk-upload', label: 'Bulk Upload', icon: UploadCloud }],
+    items: [leaf('bulk-upload', 'Bulk Upload', UploadCloud)],
   },
 ];
+
+/** Group keys whose children include the given section. */
+function parentKeysContaining(activeSection: NavSection): string[] {
+  const keys: string[] = [];
+  for (const group of NAV_GROUPS) {
+    for (const item of group.items) {
+      if (item.type === 'parent' && item.children.some((c) => c.key === activeSection)) {
+        keys.push(item.key);
+      }
+    }
+  }
+  return keys;
+}
 
 export function SidebarNav({
   activeSection = 'dashboard',
@@ -57,6 +104,37 @@ export function SidebarNav({
   onSignOut: () => void;
   signingOut?: boolean;
 }) {
+  // Which parent groups (e.g. "Patients") are expanded. Initialized open for
+  // whichever group contains the current section, then kept in sync as the
+  // user navigates — but a manual collapse click is respected until the next
+  // navigation into that group, rather than being fought every render.
+  const [openGroups, setOpenGroups] = useState<Set<string>>(() => new Set(parentKeysContaining(activeSection)));
+
+  useEffect(() => {
+    const keys = parentKeysContaining(activeSection);
+    if (keys.length === 0) return;
+    setOpenGroups((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const key of keys) {
+        if (!next.has(key)) {
+          next.add(key);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [activeSection]);
+
+  const toggleGroup = (key: string) => {
+    setOpenGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
   return (
     <div className="flex h-full flex-col bg-brand-blue text-white">
       <div className="flex items-center gap-2.5 px-5 py-5 border-b border-white/10">
@@ -74,23 +152,69 @@ export function SidebarNav({
               {group.label}
             </p>
             <div className="space-y-0.5">
-              {group.items.map(({ key, label, icon: Icon }) => {
-                const isActive = activeSection === key;
+              {group.items.map((item) => {
+                if (item.type === 'leaf') {
+                  const isActive = activeSection === item.key;
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.key}
+                      onClick={() => onNavigate(item.key)}
+                      aria-current={isActive ? 'page' : undefined}
+                      className={cn(
+                        'w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
+                        isActive
+                          ? 'bg-brand-gold text-brand-blue font-semibold'
+                          : 'text-white/80 hover:bg-white/10 hover:text-white'
+                      )}
+                    >
+                      {Icon && <Icon className="w-4 h-4 shrink-0" />}
+                      <span className="truncate">{item.label}</span>
+                    </button>
+                  );
+                }
+
+                const isOpen = openGroups.has(item.key);
+                const isParentActive = item.children.some((c) => c.key === activeSection);
                 return (
-                  <button
-                    key={key}
-                    onClick={() => onNavigate(key)}
-                    aria-current={isActive ? 'page' : undefined}
-                    className={cn(
-                      'w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
-                      isActive
-                        ? 'bg-brand-gold text-brand-blue font-semibold'
-                        : 'text-white/80 hover:bg-white/10 hover:text-white'
+                  <div key={item.key}>
+                    <button
+                      onClick={() => toggleGroup(item.key)}
+                      aria-expanded={isOpen}
+                      className={cn(
+                        'w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
+                        isParentActive
+                          ? 'bg-white/10 text-white font-semibold'
+                          : 'text-white/80 hover:bg-white/10 hover:text-white'
+                      )}
+                    >
+                      <item.icon className="w-4 h-4 shrink-0" />
+                      <span className="flex-1 text-left truncate">{item.label}</span>
+                      <ChevronDown className={cn('w-3.5 h-3.5 shrink-0 transition-transform', isOpen && 'rotate-180')} />
+                    </button>
+                    {isOpen && (
+                      <div className="mt-0.5 ml-4 pl-3 border-l border-white/10 space-y-0.5">
+                        {item.children.map((child) => {
+                          const isActive = activeSection === child.key;
+                          return (
+                            <button
+                              key={child.key}
+                              onClick={() => onNavigate(child.key)}
+                              aria-current={isActive ? 'page' : undefined}
+                              className={cn(
+                                'w-full flex items-center rounded-md px-2.5 py-1.5 text-sm transition-colors',
+                                isActive
+                                  ? 'bg-brand-gold text-brand-blue font-semibold'
+                                  : 'text-white/70 hover:bg-white/10 hover:text-white'
+                              )}
+                            >
+                              <span className="truncate">{child.label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
                     )}
-                  >
-                    <Icon className="w-4 h-4 shrink-0" />
-                    <span className="truncate">{label}</span>
-                  </button>
+                  </div>
                 );
               })}
             </div>

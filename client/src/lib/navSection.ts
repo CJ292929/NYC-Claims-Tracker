@@ -4,10 +4,28 @@ import type { NavSection } from '@/components/dashboard/DashboardSidebar';
  *  (including "/") falls back to 'dashboard'. */
 export function routeToNavSection(location: string): NavSection {
   switch (location) {
-    case '/patients': return 'patients';
+    case '/patients': return 'patients-overview';
+    case '/patients/records': return 'patients-records';
+    case '/patients/discharged': return 'patients-discharged';
     case '/authorizations': return 'authorizations';
     case '/visits': return 'visits';
     case '/claims': return 'claims';
     default: return 'dashboard';
+  }
+}
+
+/** Reverse of routeToNavSection, for sections that map to a real route.
+ *  'bulk-upload' has no route of its own (it opens a dialog in place), so
+ *  it returns null rather than a fabricated path. */
+export function navSectionToRoute(section: NavSection): string | null {
+  switch (section) {
+    case 'dashboard': return '/dashboard';
+    case 'patients-overview': return '/patients';
+    case 'patients-records': return '/patients/records';
+    case 'patients-discharged': return '/patients/discharged';
+    case 'authorizations': return '/authorizations';
+    case 'visits': return '/visits';
+    case 'claims': return '/claims';
+    case 'bulk-upload': return null;
   }
 }
