@@ -73,6 +73,40 @@ var init_env = __esm({
   }
 });
 
+// shared/authPeriodMetrics.ts
+function normalizePeriod(visit) {
+  return visit.authPeriod ?? 1;
+}
+function getSortedUniquePeriods(visits) {
+  return Array.from(new Set(visits.map(normalizePeriod))).sort((a, b) => a - b);
+}
+function getPeriodMetrics(visits, period) {
+  const periodVisits = visits.filter((v) => normalizePeriod(v) === period);
+  const authRow = periodVisits.find((v) => v.sessionsAuthorized != null);
+  const authorized = authRow?.sessionsAuthorized ?? 0;
+  const completed = periodVisits.filter((v) => v.dateOfService != null).length;
+  const remaining = Math.max(0, authorized - completed);
+  return { authorized, completed, remaining };
+}
+function determineActivePeriod(visits) {
+  const periods = getSortedUniquePeriods(visits);
+  for (const period of periods) {
+    if (getPeriodMetrics(visits, period).remaining > 0) return period;
+  }
+  return null;
+}
+function deriveAuthPeriodMetrics(visits) {
+  const periods = getSortedUniquePeriods(visits);
+  const activePeriod = determineActivePeriod(visits);
+  const activeMetrics = activePeriod != null ? getPeriodMetrics(visits, activePeriod) : { authorized: 0, completed: 0, remaining: 0 };
+  return { periods, activePeriod, activeMetrics };
+}
+var init_authPeriodMetrics = __esm({
+  "shared/authPeriodMetrics.ts"() {
+    "use strict";
+  }
+});
+
 // server/db.ts
 var db_exports = {};
 __export(db_exports, {
@@ -354,26 +388,13 @@ async function getAuthAlertSummaries() {
         authValidUntil: patient.authValidUntil ?? null
       };
     }
-    const allPeriods = Array.from(new Set(pVisits.map((v) => v.authPeriod ?? 1))).sort((a, b) => a - b);
-    let activePeriod = null;
-    for (const period of allPeriods) {
-      const periodVisits = pVisits.filter((v) => (v.authPeriod ?? 1) === period);
-      const authRow2 = periodVisits.find((v) => v.sessionsAuthorized != null);
-      const periodAuthorized = authRow2?.sessionsAuthorized ?? 0;
-      const periodCompleted = periodVisits.filter((v) => v.dateOfService != null).length;
-      const periodRemaining = Math.max(0, periodAuthorized - periodCompleted);
-      if (periodRemaining > 0) {
-        activePeriod = period;
-        break;
-      }
-    }
+    const { periods: allPeriods, activePeriod } = deriveAuthPeriodMetrics(pVisits);
     const latestPeriod = allPeriods[allPeriods.length - 1];
     const targetPeriod = activePeriod ?? latestPeriod;
     const targetVisits = pVisits.filter((v) => (v.authPeriod ?? 1) === targetPeriod);
     const authRow = targetVisits.find((v) => v.sessionsAuthorized != null);
     const sessionsAuthorized = authRow?.sessionsAuthorized ?? null;
-    const completed = targetVisits.filter((v) => v.dateOfService != null).length;
-    const sessionsRemaining = activePeriod !== null ? Math.max(0, (sessionsAuthorized ?? 0) - completed) : 0;
+    const sessionsRemaining = activePeriod !== null ? getPeriodMetrics(pVisits, targetPeriod).remaining : 0;
     const lastActiveRow = targetVisits[targetVisits.length - 1];
     const authStatus = lastActiveRow?.authStatus ?? "none";
     const dateAshSubmitted = lastActiveRow?.dateAshSubmitted ?? null;
@@ -414,16 +435,13 @@ async function getLatestVisitIdForPatient(patientId) {
   return data[data.length - 1].id;
 }
 function determineActiveAuthPeriod(visits) {
-  const periods = Array.from(new Set(visits.map((v) => v.auth_period ?? 1))).sort((a, b) => a - b);
-  for (const period of periods) {
-    const periodVisits = visits.filter((v) => (v.auth_period ?? 1) === period);
-    const authRow = periodVisits.find((v) => v.sessions_authorized != null);
-    const periodAuthorized = authRow?.sessions_authorized ?? 0;
-    const periodCompleted = periodVisits.filter((v) => v.date_of_service != null).length;
-    const periodRemaining = Math.max(0, periodAuthorized - periodCompleted);
-    if (periodRemaining > 0) return period;
-  }
-  return null;
+  return determineActivePeriod(
+    visits.map((v) => ({
+      authPeriod: v.auth_period,
+      sessionsAuthorized: v.sessions_authorized,
+      dateOfService: v.date_of_service
+    }))
+  );
 }
 function determineMarkAsRequestedTargetRow(visits) {
   if (visits.length === 0) return null;
@@ -722,6 +740,7 @@ var init_db = __esm({
     "use strict";
     init_supabase();
     init_env();
+    init_authPeriodMetrics();
     FOLLOW_UP_STALE_DAYS = 30;
     FOLLOW_UP_URGENCY_RANK = {
       rejected: 1,
