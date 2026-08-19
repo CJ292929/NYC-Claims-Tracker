@@ -30,6 +30,8 @@ import { DischargedPatientsWorkspace } from '@/components/dashboard/DischargedPa
 import { DashboardShell } from '@/components/dashboard/DashboardShell';
 import type { NavSection } from '@/components/dashboard/DashboardSidebar';
 import { getPatientMetrics } from '@/lib/patientMetrics';
+import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
+import type { AuthUrgency } from '@shared/authUrgency';
 
 /**
  * Dashboard Component — Database-backed
@@ -129,6 +131,35 @@ const toInputDate = (d: Date | null | undefined): string => {
     return '';
   }
 };
+
+/** Full-width auth-urgency banner styling per shared urgency state, kept
+ *  distinct from the small snapshot badge's colors (which come straight from
+ *  patientAuthUrgency.ts). Not shown for 'ok' — nothing to alert about,
+ *  same convention AuthAlertPanel uses to decide which patients are "urgent". */
+const AUTH_BANNER_STYLE: Record<Exclude<AuthUrgency, 'ok'>, { border: string; bg: string; icon: string; heading: string; body: string }> = {
+  exhausted: { border: 'border-red-400', bg: 'bg-red-50', icon: 'text-red-600', heading: 'text-red-800', body: 'text-red-700' },
+  critical: { border: 'border-orange-400', bg: 'bg-orange-50', icon: 'text-orange-600', heading: 'text-orange-800', body: 'text-orange-700' },
+  warning: { border: 'border-yellow-400', bg: 'bg-yellow-50', icon: 'text-yellow-600', heading: 'text-yellow-800', body: 'text-yellow-700' },
+  pending: { border: 'border-blue-400', bg: 'bg-blue-50', icon: 'text-blue-600', heading: 'text-blue-800', body: 'text-blue-700' },
+};
+
+/** Body copy for the active-patient auth banner. Presentational text only —
+ *  the urgency itself is already decided by deriveAuthorizationUrgency; this
+ *  just picks the sentence for a state that was already determined. */
+function authBannerMessage(
+  urgency: Exclude<AuthUrgency, 'ok'>,
+  remaining: number,
+  insurance: string,
+  authExpiryWarning: boolean,
+): string {
+  if (authExpiryWarning) return `Authorization is expiring soon. Contact ${insurance} to renew.`;
+  switch (urgency) {
+    case 'exhausted': return `${remaining} session(s) remaining. Authorization request is urgent.`;
+    case 'critical': return `Only ${remaining} session(s) remaining. Request new authorization from ${insurance} immediately.`;
+    case 'warning': return `Only ${remaining} session(s) remaining. Request new authorization from ${insurance} soon.`;
+    case 'pending': return `Authorization request is pending with ${insurance}. Follow up if not resolved soon.`;
+  }
+}
 
 /** Compact colored dropdown for a visit's auth status. `onChange` receives the
  *  same '' | 'Pending' | 'Approved' | 'Denied' shape handleUpdateAuthStatus expects. */
@@ -681,27 +712,21 @@ export default function Dashboard() {
   // getPatientMetrics itself now lives in @/lib/patientMetrics, delegating
   // period math to shared/authPeriodMetrics.ts (kept in sync with server/db.ts).
 
-  // For the list view we need metrics per patient — but visits are only loaded for the active patient.
-  // We derive a rough remaining from the patient's own visits when available.
-  const getAlertStatus = (patient: DbPatient, remaining: number) => {
-    if (remaining === 0) {
-      return { status: 'exhausted', label: 'Sessions Exhausted', color: 'bg-red-100 text-red-800', message: 'No sessions remaining. Authorization request is urgent.' };
-    }
-    if (remaining <= 3) {
-      return { status: 'warning', label: 'Request Authorization', color: 'bg-orange-100 text-orange-800', message: `Only ${remaining} session(s) remaining. Request new authorization from ${patient.insurance} immediately.` };
-    }
-    return { status: 'ok', label: 'On Track', color: 'bg-green-100 text-green-800', message: null };
-  };
-
   // Active patient metrics (from loaded visits)
   const activeMetrics = useMemo(() => getPatientMetrics(visits), [visits]);
-  const alertStatus = activePatient ? getAlertStatus(activePatient, activeMetrics.remaining) : null;
+  const alertStatus = activePatient
+    ? derivePatientAlertPresentation(visits, activeMetrics.remaining, activePatient.authValidUntil)
+    : null;
 
   // Metrics for whichever patient is selected in the Patient Records / Discharged snapshot panes
   const recordsMetrics = useMemo(() => getPatientMetrics(recordsVisits), [recordsVisits]);
-  const recordsAlertStatus = selectedRecordsPatient ? getAlertStatus(selectedRecordsPatient, recordsMetrics.remaining) : null;
+  const recordsAlertStatus = selectedRecordsPatient
+    ? derivePatientAlertPresentation(recordsVisits, recordsMetrics.remaining, selectedRecordsPatient.authValidUntil)
+    : null;
   const dischargedMetrics = useMemo(() => getPatientMetrics(dischargedVisits), [dischargedVisits]);
-  const dischargedAlertStatus = selectedDischargedPatient ? getAlertStatus(selectedDischargedPatient, dischargedMetrics.remaining) : null;
+  const dischargedAlertStatus = selectedDischargedPatient
+    ? derivePatientAlertPresentation(dischargedVisits, dischargedMetrics.remaining, selectedDischargedPatient.authValidUntil)
+    : null;
 
   // Completed patients — those with 0 remaining and all sessions dated
   const { data: completedIds = [] } = trpc.visits.completedPatientIds.useQuery();
@@ -1669,21 +1694,23 @@ export default function Dashboard() {
           )}
 
           {/* Auth Alert */}
-          {alertStatus && (alertStatus.status === 'warning' || alertStatus.status === 'exhausted') && (
-            <div className={`mb-6 rounded-xl border-2 p-4 shadow-md flex items-start gap-3 ${
-              alertStatus.status === 'exhausted' ? 'border-red-400 bg-red-50' : 'border-orange-400 bg-orange-50'
-            }`}>
-              <AlertCircle className={`w-6 h-6 mt-0.5 shrink-0 ${alertStatus.status === 'exhausted' ? 'text-red-600' : 'text-orange-600'}`} />
-              <div>
-                <h3 className={`font-bold text-base mb-1 ${alertStatus.status === 'exhausted' ? 'text-red-800' : 'text-orange-800'}`}>
-                  {alertStatus.label}
-                </h3>
-                <p className={`text-sm ${alertStatus.status === 'exhausted' ? 'text-red-700' : 'text-orange-700'}`}>
-                  {alertStatus.message}
-                </p>
+          {alertStatus && alertStatus.urgency !== 'ok' && (() => {
+            const style = AUTH_BANNER_STYLE[alertStatus.urgency];
+            const message = authBannerMessage(alertStatus.urgency, activeMetrics.remaining, activePatient.insurance, alertStatus.authExpiryWarning);
+            return (
+              <div role="status" className={`mb-6 rounded-xl border-2 p-4 shadow-md flex items-start gap-3 ${style.border} ${style.bg}`}>
+                <AlertCircle className={`w-6 h-6 mt-0.5 shrink-0 ${style.icon}`} />
+                <div>
+                  <h3 className={`font-bold text-base mb-1 ${style.heading}`}>
+                    {alertStatus.label}
+                  </h3>
+                  <p className={`text-sm ${style.body}`}>
+                    {message}
+                  </p>
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Summary cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
