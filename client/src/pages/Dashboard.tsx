@@ -137,6 +137,7 @@ const toInputDate = (d: Date | null | undefined): string => {
  *  patientAuthUrgency.ts). Not shown for 'ok' — nothing to alert about,
  *  same convention AuthAlertPanel uses to decide which patients are "urgent". */
 const AUTH_BANNER_STYLE: Record<Exclude<AuthUrgency, 'ok'>, { border: string; bg: string; icon: string; heading: string; body: string }> = {
+  denied: { border: 'border-red-600', bg: 'bg-red-50', icon: 'text-red-700', heading: 'text-red-800', body: 'text-red-700' },
   exhausted: { border: 'border-red-400', bg: 'bg-red-50', icon: 'text-red-600', heading: 'text-red-800', body: 'text-red-700' },
   critical: { border: 'border-orange-400', bg: 'bg-orange-50', icon: 'text-orange-600', heading: 'text-orange-800', body: 'text-orange-700' },
   warning: { border: 'border-yellow-400', bg: 'bg-yellow-50', icon: 'text-yellow-600', heading: 'text-yellow-800', body: 'text-yellow-700' },
@@ -154,6 +155,7 @@ function authBannerMessage(
 ): string {
   if (authExpiryWarning) return `Authorization is expiring soon. Contact ${insurance} to renew.`;
   switch (urgency) {
+    case 'denied': return `Authorization was denied. ${remaining} session(s) remaining.`;
     case 'exhausted': return `${remaining} session(s) remaining. Authorization request is urgent.`;
     case 'critical': return `Only ${remaining} session(s) remaining. Request new authorization from ${insurance} immediately.`;
     case 'warning': return `Only ${remaining} session(s) remaining. Request new authorization from ${insurance} soon.`;

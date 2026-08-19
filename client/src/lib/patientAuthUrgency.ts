@@ -18,6 +18,7 @@ const URGENCY_LABEL: Record<AuthUrgency, string> = {
   warning: 'Warning — 3 Sessions Left',
   pending: 'Authorization Pending',
   ok: 'On Track',
+  denied: 'Authorization Denied',
 };
 
 const URGENCY_COLOR: Record<AuthUrgency, string> = {
@@ -26,6 +27,9 @@ const URGENCY_COLOR: Record<AuthUrgency, string> = {
   warning: 'bg-yellow-100 text-yellow-800',
   pending: 'bg-blue-100 text-blue-800',
   ok: 'bg-green-100 text-green-800',
+  // Reuses the existing authorization-denied badge convention (VisitAuthStatusSelect),
+  // distinct from exhausted's red-800 text.
+  denied: 'bg-red-100 text-red-700',
 };
 
 // Mirrors server/db.ts getAuthAlertSummaries' target-period + status-row
