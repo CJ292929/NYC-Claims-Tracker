@@ -18,7 +18,7 @@ import {
   bulkCreateVisitRecords,
   getClinicUserByUsername,
   getAuthAlertSummaries,
-  getLatestVisitIdForPatient,
+  getMarkAsRequestedTargetVisitId,
   approveAndCreateNewBatch,
   getCompletedPatients,
   getClaimsByPatientAndPeriod,
@@ -302,11 +302,12 @@ export const appRouter = router({
       return getCompletedPatients();
     }),
 
-    // Sets the latest visit row for a patient to authStatus=pending + today's dateAshSubmitted
+    // Sets the active-period visit row (same period getAuthAlertSummaries is
+    // showing) to authStatus=pending + today's dateAshSubmitted
     markAsRequested: protectedProcedure
       .input(z.object({ patientId: z.string().uuid() }))
       .mutation(async ({ input }) => {
-        const visitId = await getLatestVisitIdForPatient(input.patientId);
+        const visitId = await getMarkAsRequestedTargetVisitId(input.patientId);
         if (!visitId) throw new TRPCError({ code: "NOT_FOUND", message: "No visit records found for this patient" });
         const today = new Date();
         const todayMidnight = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));

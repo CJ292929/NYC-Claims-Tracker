@@ -87,12 +87,14 @@ __export(db_exports, {
   deleteClaimRecord: () => deleteClaimRecord,
   deletePatient: () => deletePatient,
   determineActiveAuthPeriod: () => determineActiveAuthPeriod,
+  determineMarkAsRequestedTargetRow: () => determineMarkAsRequestedTargetRow,
   getAllPatients: () => getAllPatients,
   getAuthAlertSummaries: () => getAuthAlertSummaries,
   getClaimsByPatientAndPeriod: () => getClaimsByPatientAndPeriod,
   getClinicUserByUsername: () => getClinicUserByUsername,
   getCompletedPatients: () => getCompletedPatients,
   getLatestVisitIdForPatient: () => getLatestVisitIdForPatient,
+  getMarkAsRequestedTargetVisitId: () => getMarkAsRequestedTargetVisitId,
   getPatientById: () => getPatientById,
   getUserByOpenId: () => getUserByOpenId,
   getVisitsByPatientId: () => getVisitsByPatientId,
@@ -422,6 +424,25 @@ function determineActiveAuthPeriod(visits) {
     if (periodRemaining > 0) return period;
   }
   return null;
+}
+function determineMarkAsRequestedTargetRow(visits) {
+  if (visits.length === 0) return null;
+  const periods = Array.from(new Set(visits.map((v) => v.auth_period ?? 1))).sort((a, b) => a - b);
+  const latestPeriod = periods[periods.length - 1];
+  const activePeriod = determineActiveAuthPeriod(visits);
+  const targetPeriod = activePeriod ?? latestPeriod;
+  const targetVisits = visits.filter((v) => (v.auth_period ?? 1) === targetPeriod).sort((a, b) => (a.session_number ?? 0) - (b.session_number ?? 0));
+  return targetVisits[targetVisits.length - 1] ?? null;
+}
+async function getMarkAsRequestedTargetVisitId(patientId) {
+  const { data, error } = await supabase.from("visit_records").select("id, auth_period, session_number, sessions_authorized, date_of_service").eq("patient_id", patientId);
+  if (error) {
+    console.error("[Supabase] getMarkAsRequestedTargetVisitId:", error);
+    return null;
+  }
+  if (!data || data.length === 0) return null;
+  const target = determineMarkAsRequestedTargetRow(data);
+  return target?.id ?? null;
 }
 async function approveAndCreateNewBatch(patientId, sessionsAuthorized, authDate, newInsurance, authValidUntil) {
   const { data: periodStatusRows, error: periodStatusErr } = await supabase.from("visit_records").select("auth_period, sessions_authorized, date_of_service").eq("patient_id", patientId);
@@ -3438,9 +3459,10 @@ var appRouter = router({
     completedPatientIds: protectedProcedure.query(async () => {
       return getCompletedPatients();
     }),
-    // Sets the latest visit row for a patient to authStatus=pending + today's dateAshSubmitted
+    // Sets the active-period visit row (same period getAuthAlertSummaries is
+    // showing) to authStatus=pending + today's dateAshSubmitted
     markAsRequested: protectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).mutation(async ({ input }) => {
-      const visitId = await getLatestVisitIdForPatient(input.patientId);
+      const visitId = await getMarkAsRequestedTargetVisitId(input.patientId);
       if (!visitId) throw new TRPCError3({ code: "NOT_FOUND", message: "No visit records found for this patient" });
       const today = /* @__PURE__ */ new Date();
       const todayMidnight = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
