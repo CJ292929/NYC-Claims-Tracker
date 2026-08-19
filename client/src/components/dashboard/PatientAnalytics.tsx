@@ -40,7 +40,7 @@ export function PatientAnalytics({
 
       <Card className="border-border shadow-sm rounded-xl">
         <CardHeader>
-          <CardTitle className="text-base font-semibold text-brand-blue">Clinic Overview</CardTitle>
+          <CardTitle className="text-base font-semibold text-brand-blue">Patient Overview</CardTitle>
           <CardDescription className="text-xs">Sessions for the selected patient</CardDescription>
         </CardHeader>
         <CardContent>
