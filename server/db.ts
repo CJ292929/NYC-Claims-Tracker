@@ -9,6 +9,7 @@ import { supabase } from "./supabase";
 import { ENV } from "./_core/env";
 import type { User, Patient, VisitRecord, ClinicUser, InsertVisitRecord } from "../drizzle/schema";
 import { determineActivePeriod, deriveAuthPeriodMetrics, getPeriodMetrics } from "@shared/authPeriodMetrics";
+import { deriveAuthorizationUrgency } from "@shared/authUrgency";
 
 // ─── Row adapters (Supabase snake_case → app camelCase) ───────────────────────
 
@@ -402,22 +403,13 @@ export async function getAuthAlertSummaries() {
     const authStatus = lastActiveRow?.authStatus ?? "none";
     const dateAshSubmitted = lastActiveRow?.dateAshSubmitted ?? null;
 
-    let urgency: "exhausted" | "critical" | "warning" | "pending" | "ok" = "ok";
-    if (sessionsRemaining === 0) urgency = "exhausted";
-    else if (sessionsRemaining <= 2) urgency = "critical";
-    else if (sessionsRemaining <= 3) urgency = "warning";
-    if (authStatus === "pending" && urgency === "ok") urgency = "pending";
-    if (authStatus === "denied") urgency = "exhausted";
-
-    // Check if auth expires within 7 days
-    const now = Date.now();
-    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
     const authValidUntil = patient.authValidUntil ?? null;
-    const expiresWithin7Days = authValidUntil !== null && authValidUntil > now && authValidUntil - now <= sevenDaysMs;
-    const alreadyExpired = authValidUntil !== null && authValidUntil < now;
-    // authExpiryWarning = true means the warning is ONLY because of expiry date, not session count
-    const authExpiryWarning = (expiresWithin7Days || alreadyExpired) && urgency === "ok";
-    if (authExpiryWarning) urgency = "warning";
+    const { urgency, authExpiryWarning } = deriveAuthorizationUrgency({
+      remaining: sessionsRemaining,
+      authStatus,
+      authValidUntil,
+      now: new Date(),
+    });
 
     return {
       patientId: patient.id, patientName: patient.name, insurance: patient.insurance,
