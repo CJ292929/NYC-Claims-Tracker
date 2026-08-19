@@ -3213,7 +3213,7 @@ export default function Dashboard() {
                             isActive={activePatient?.id === patient.id}
                             tone="muted"
                             trailing={<UserX className="w-4 h-4 text-gray-400" />}
-                            onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(true); }}
+                            onSelect={() => { setSelectedPatientId(patient.id); setShowDetailView(false); }}
                             meta={
                               <>
                                 {patient.dischargeDate && (
