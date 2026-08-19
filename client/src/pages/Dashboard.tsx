@@ -1918,11 +1918,11 @@ export default function Dashboard() {
                                   ].map(col => (
                                     <div key={col.key} className="flex items-center gap-2 py-0.5">
                                       <Checkbox
-                                        id={`col-${col.key}`}
+                                        id={`col-${period}-${col.key}`}
                                         checked={!hiddenClaimsColumns.has(col.key)}
                                         onCheckedChange={() => toggleClaimsColumn(col.key)}
                                       />
-                                      <label htmlFor={`col-${col.key}`} className="text-xs text-gray-700 cursor-pointer select-none">
+                                      <label htmlFor={`col-${period}-${col.key}`} className="text-xs text-gray-700 cursor-pointer select-none">
                                         {col.label}
                                       </label>
                                     </div>
