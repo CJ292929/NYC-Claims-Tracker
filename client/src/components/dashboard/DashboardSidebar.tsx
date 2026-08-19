@@ -6,7 +6,6 @@ import {
   ShieldAlert,
   CalendarCheck,
   FileStack,
-  AlertCircle,
   UploadCloud,
   LogOut,
   Loader2,
@@ -19,7 +18,6 @@ export type NavSection =
   | 'authorizations'
   | 'visits'
   | 'claims'
-  | 'claims-followup'
   | 'bulk-upload';
 
 const NAV_GROUPS: Array<{
@@ -39,12 +37,12 @@ const NAV_GROUPS: Array<{
     ],
   },
   {
-    label: 'Claims',
-    items: [
-      { key: 'claims', label: 'Claims', icon: FileStack },
-      { key: 'claims-followup', label: 'Claims Follow-Up', icon: AlertCircle },
-      { key: 'bulk-upload', label: 'Bulk Upload', icon: UploadCloud },
-    ],
+    label: 'Claims Management',
+    items: [{ key: 'claims', label: 'Claims', icon: FileStack }],
+  },
+  {
+    label: 'Actions',
+    items: [{ key: 'bulk-upload', label: 'Bulk Upload', icon: UploadCloud }],
   },
 ];
 
