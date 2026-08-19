@@ -107,6 +107,36 @@ var init_authPeriodMetrics = __esm({
   }
 });
 
+// shared/authUrgency.ts
+function toMillis(value) {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "number") return value;
+  return new Date(value).getTime();
+}
+function deriveAuthorizationUrgency(input) {
+  const { remaining, authStatus = null, authValidUntil = null, now = /* @__PURE__ */ new Date() } = input;
+  let urgency = "ok";
+  if (remaining === 0) urgency = "exhausted";
+  else if (remaining <= 2) urgency = "critical";
+  else if (remaining <= 3) urgency = "warning";
+  if (authStatus === "pending" && urgency === "ok") urgency = "pending";
+  if (authStatus === "denied") urgency = "exhausted";
+  const nowMs = now.getTime();
+  const authValidUntilMs = authValidUntil !== null ? toMillis(authValidUntil) : null;
+  const expiresWithin7Days = authValidUntilMs !== null && authValidUntilMs > nowMs && authValidUntilMs - nowMs <= SEVEN_DAYS_MS;
+  const alreadyExpired = authValidUntilMs !== null && authValidUntilMs < nowMs;
+  const authExpiryWarning = (expiresWithin7Days || alreadyExpired) && urgency === "ok";
+  if (authExpiryWarning) urgency = "warning";
+  return { urgency, authExpiryWarning };
+}
+var SEVEN_DAYS_MS;
+var init_authUrgency = __esm({
+  "shared/authUrgency.ts"() {
+    "use strict";
+    SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+  }
+});
+
 // server/db.ts
 var db_exports = {};
 __export(db_exports, {
@@ -398,19 +428,13 @@ async function getAuthAlertSummaries() {
     const lastActiveRow = targetVisits[targetVisits.length - 1];
     const authStatus = lastActiveRow?.authStatus ?? "none";
     const dateAshSubmitted = lastActiveRow?.dateAshSubmitted ?? null;
-    let urgency = "ok";
-    if (sessionsRemaining === 0) urgency = "exhausted";
-    else if (sessionsRemaining <= 2) urgency = "critical";
-    else if (sessionsRemaining <= 3) urgency = "warning";
-    if (authStatus === "pending" && urgency === "ok") urgency = "pending";
-    if (authStatus === "denied") urgency = "exhausted";
-    const now = Date.now();
-    const sevenDaysMs = 7 * 24 * 60 * 60 * 1e3;
     const authValidUntil = patient.authValidUntil ?? null;
-    const expiresWithin7Days = authValidUntil !== null && authValidUntil > now && authValidUntil - now <= sevenDaysMs;
-    const alreadyExpired = authValidUntil !== null && authValidUntil < now;
-    const authExpiryWarning = (expiresWithin7Days || alreadyExpired) && urgency === "ok";
-    if (authExpiryWarning) urgency = "warning";
+    const { urgency, authExpiryWarning } = deriveAuthorizationUrgency({
+      remaining: sessionsRemaining,
+      authStatus,
+      authValidUntil,
+      now: /* @__PURE__ */ new Date()
+    });
     return {
       patientId: patient.id,
       patientName: patient.name,
@@ -734,6 +758,7 @@ var init_db = __esm({
     init_supabase();
     init_env();
     init_authPeriodMetrics();
+    init_authUrgency();
     FOLLOW_UP_STALE_DAYS = 30;
     FOLLOW_UP_URGENCY_RANK = {
       rejected: 1,
