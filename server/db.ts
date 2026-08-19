@@ -8,6 +8,7 @@
 import { supabase } from "./supabase";
 import { ENV } from "./_core/env";
 import type { User, Patient, VisitRecord, ClinicUser, InsertVisitRecord } from "../drizzle/schema";
+import { determineActivePeriod, deriveAuthPeriodMetrics, getPeriodMetrics } from "@shared/authPeriodMetrics";
 
 // ─── Row adapters (Supabase snake_case → app camelCase) ───────────────────────
 
@@ -385,17 +386,7 @@ export async function getAuthAlertSummaries() {
       };
     }
 
-    const allPeriods = Array.from(new Set(pVisits.map(v => v.authPeriod ?? 1))).sort((a, b) => a - b);
-
-    let activePeriod: number | null = null;
-    for (const period of allPeriods) {
-      const periodVisits = pVisits.filter(v => (v.authPeriod ?? 1) === period);
-      const authRow = periodVisits.find(v => v.sessionsAuthorized != null);
-      const periodAuthorized = authRow?.sessionsAuthorized ?? 0;
-      const periodCompleted = periodVisits.filter(v => v.dateOfService != null).length;
-      const periodRemaining = Math.max(0, periodAuthorized - periodCompleted);
-      if (periodRemaining > 0) { activePeriod = period; break; }
-    }
+    const { periods: allPeriods, activePeriod } = deriveAuthPeriodMetrics(pVisits);
 
     const latestPeriod = allPeriods[allPeriods.length - 1];
     const targetPeriod = activePeriod ?? latestPeriod;
@@ -403,9 +394,8 @@ export async function getAuthAlertSummaries() {
 
     const authRow = targetVisits.find(v => v.sessionsAuthorized != null);
     const sessionsAuthorized = authRow?.sessionsAuthorized ?? null;
-    const completed = targetVisits.filter(v => v.dateOfService != null).length;
     const sessionsRemaining = activePeriod !== null
-      ? Math.max(0, (sessionsAuthorized ?? 0) - completed)
+      ? getPeriodMetrics(pVisits, targetPeriod).remaining
       : 0;
 
     const lastActiveRow = targetVisits[targetVisits.length - 1];
@@ -462,16 +452,13 @@ export async function getLatestVisitIdForPatient(patientId: string): Promise<str
 export function determineActiveAuthPeriod(
   visits: { auth_period: number | null; sessions_authorized: number | null; date_of_service: string | null }[],
 ): number | null {
-  const periods = Array.from(new Set(visits.map(v => v.auth_period ?? 1))).sort((a, b) => a - b);
-  for (const period of periods) {
-    const periodVisits = visits.filter(v => (v.auth_period ?? 1) === period);
-    const authRow = periodVisits.find(v => v.sessions_authorized != null);
-    const periodAuthorized = authRow?.sessions_authorized ?? 0;
-    const periodCompleted = periodVisits.filter(v => v.date_of_service != null).length;
-    const periodRemaining = Math.max(0, periodAuthorized - periodCompleted);
-    if (periodRemaining > 0) return period;
-  }
-  return null;
+  return determineActivePeriod(
+    visits.map(v => ({
+      authPeriod: v.auth_period,
+      sessionsAuthorized: v.sessions_authorized,
+      dateOfService: v.date_of_service,
+    }))
+  );
 }
 
 type MarkAsRequestedRow = {
