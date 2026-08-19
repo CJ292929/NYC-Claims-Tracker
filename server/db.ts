@@ -455,6 +455,25 @@ export async function getLatestVisitIdForPatient(patientId: string): Promise<str
   return (data[data.length - 1] as { id: string }).id;
 }
 
+// Mirrors the active-period rule in getAuthAlertSummaries: the oldest period
+// with remaining sessions > 0, or null if every period is exhausted. Kept as a
+// pure function so approval always targets the same period the alert showed,
+// without touching any historical (already-resolved) period.
+export function determineActiveAuthPeriod(
+  visits: { auth_period: number | null; sessions_authorized: number | null; date_of_service: string | null }[],
+): number | null {
+  const periods = Array.from(new Set(visits.map(v => v.auth_period ?? 1))).sort((a, b) => a - b);
+  for (const period of periods) {
+    const periodVisits = visits.filter(v => (v.auth_period ?? 1) === period);
+    const authRow = periodVisits.find(v => v.sessions_authorized != null);
+    const periodAuthorized = authRow?.sessions_authorized ?? 0;
+    const periodCompleted = periodVisits.filter(v => v.date_of_service != null).length;
+    const periodRemaining = Math.max(0, periodAuthorized - periodCompleted);
+    if (periodRemaining > 0) return period;
+  }
+  return null;
+}
+
 export async function approveAndCreateNewBatch(
   patientId: string,
   sessionsAuthorized: number,
@@ -462,15 +481,30 @@ export async function approveAndCreateNewBatch(
   newInsurance?: string,
   authValidUntil?: number | null,
 ): Promise<{ newVisitIds: string[] }> {
-  // 1. Mark all existing visit rows as approved
+  // 1. Determine which existing authorization period the approval applies to
+  const { data: periodStatusRows, error: periodStatusErr } = await supabase
+    .from("visit_records")
+    .select("auth_period, sessions_authorized, date_of_service")
+    .eq("patient_id", patientId);
+
+  if (periodStatusErr) { console.error("[Supabase] approveAndCreateNewBatch periodStatus:", periodStatusErr); throw periodStatusErr; }
+
+  const statusRows = (periodStatusRows ?? []) as { auth_period: number | null; sessions_authorized: number | null; date_of_service: string | null }[];
+  const statusPeriods = Array.from(new Set(statusRows.map(r => r.auth_period ?? 1))).sort((a, b) => a - b);
+  const latestStatusPeriod = statusPeriods.length > 0 ? statusPeriods[statusPeriods.length - 1] : 1;
+  const targetApprovalPeriod = determineActiveAuthPeriod(statusRows) ?? latestStatusPeriod;
+
+  // 2. Mark only the target authorization period's visit rows as approved —
+  // other periods (e.g. an earlier denied/pending period) are left untouched
   const { error: approveErr } = await supabase
     .from("visit_records")
     .update({ auth_status: "approved" })
-    .eq("patient_id", patientId);
+    .eq("patient_id", patientId)
+    .eq("auth_period", targetApprovalPeriod);
 
   if (approveErr) { console.error("[Supabase] approveAndCreateNewBatch approve:", approveErr); throw approveErr; }
 
-  // 2. Update patient authDate and/or insurance
+  // 3. Update patient authDate and/or insurance
   const patientUpdates: Record<string, unknown> = {};
   if (authDate) patientUpdates.auth_date = authDate.toISOString().split("T")[0];
   if (newInsurance && newInsurance.trim()) patientUpdates.insurance = newInsurance.trim();
@@ -484,7 +518,7 @@ export async function approveAndCreateNewBatch(
     if (patErr) { console.error("[Supabase] approveAndCreateNewBatch update patient:", patErr); throw patErr; }
   }
 
-  // 3. Determine next auth period
+  // 4. Determine next auth period
   const { data: periodRows, error: periodErr } = await supabase
     .from("visit_records")
     .select("auth_period")
@@ -497,7 +531,7 @@ export async function approveAndCreateNewBatch(
     : 1;
   const nextPeriod = maxPeriod + 1;
 
-  // 4. Resolve the insurance to stamp on the new batch rows
+  // 5. Resolve the insurance to stamp on the new batch rows
   // Use newInsurance if provided, otherwise fall back to the patient's current insurance
   let batchInsurance: string | null = newInsurance?.trim() || null;
   if (!batchInsurance) {
@@ -509,7 +543,7 @@ export async function approveAndCreateNewBatch(
     batchInsurance = (patRow as { insurance?: string } | null)?.insurance ?? null;
   }
 
-  // 5. Build and insert new batch
+  // 6. Build and insert new batch
   const newRows = Array.from({ length: sessionsAuthorized }, (_, i) => ({
     patient_id: patientId,
     sessions_authorized: sessionsAuthorized,
