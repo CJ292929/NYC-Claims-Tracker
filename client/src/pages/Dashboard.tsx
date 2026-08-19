@@ -16,6 +16,7 @@ import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch } from '@/lib/nameMatch';
+import { matchesPatientFilters } from '@/lib/patientFilters';
 import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { MetricCard } from '@/components/dashboard/MetricCard';
 import { PatientListItem } from '@/components/dashboard/PatientListItem';
@@ -401,12 +402,25 @@ export default function Dashboard() {
     return map;
   }, [periods, claimsQuery1, claimsQuery2, claimsQuery3, claimsQuery4, claimsQuery5]);
 
+  // When a filter change clears the selection below (patient no longer in
+  // scope), we want the detail pane to land on its normal empty state — not
+  // have this auto-select effect immediately re-populate it with whatever
+  // patient happens to be first. Set only by the filter-validity effect
+  // below; cleared as soon as a patient is explicitly selected again.
+  const skipAutoSelectRef = useRef(false);
+
   // Auto-select first patient
   useEffect(() => {
-    if (!selectedPatientId && patients.length > 0) {
+    if (!selectedPatientId && patients.length > 0 && !skipAutoSelectRef.current) {
       setSelectedPatientId(patients[0].id);
     }
   }, [patients, selectedPatientId]);
+
+  useEffect(() => {
+    if (selectedPatientId) {
+      skipAutoSelectRef.current = false;
+    }
+  }, [selectedPatientId]);
 
   // Keep the Insurance filter in sync with whichever patient is actually
   // selected (via the Patients list, the Auth Alert panel, the Claims
@@ -699,7 +713,7 @@ export default function Dashboard() {
 
   // Split patients into active and discharged
   const activePatients = patients.filter(p => p.isActive !== false);
-  const dischargedPatients = patients.filter(p => p.isActive === false);
+  const dischargedPatientsRaw = patients.filter(p => p.isActive === false);
 
   // Claims Status counts — aggregated server-side directly from claims_records
   // (never from the stale patients.claims_status roll-up), scoped by the same
@@ -714,22 +728,41 @@ export default function Dashboard() {
   };
   const patientIdsByStatus = statusCountsData?.patientIdsByStatus ?? {};
 
+  // Single shared Insurance + Claims Status scope — used by the active
+  // patient list, the Completed Sessions folder, the Discharged Patients
+  // folder, and the selected-patient validity check below, so none of them
+  // can ever disagree about which patients are "in scope". Intentionally
+  // excludes search: search only hides rows, it isn't part of filter scope.
+  const filterScope = { selectedInsurance, selectedClaimsFilter, patientIdsByStatus };
+
+  // If the currently selected patient no longer matches the active filter
+  // scope (the user changed Insurance or Claims Status directly, not by
+  // picking a patient), clear the selection instead of leaving the Patient
+  // Detail pane showing someone outside the current filter.
+  useEffect(() => {
+    if (selectedPatient && !matchesPatientFilters(selectedPatient, filterScope)) {
+      skipAutoSelectRef.current = true;
+      setSelectedPatientId(null);
+      setShowDetailView(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedInsurance, selectedClaimsFilter, patientIdsByStatus]);
+
   // filteredPatients = active patients matching the selected insurance AND claims status filter
   // The sidebar count and the patient list both use the same filter so they always match.
   const filteredPatients = useMemo(() => {
-    let result = selectedInsurance
-      ? activePatients.filter(p => p.insurance === selectedInsurance)
-      : activePatients;
-    if (selectedClaimsFilter && selectedClaimsFilter !== 'all') {
-      const matchingIds = new Set((patientIdsByStatus as Record<string, string[]>)[selectedClaimsFilter] ?? []);
-      result = result.filter(p => matchingIds.has(p.id));
-    }
+    let result = activePatients.filter(p => matchesPatientFilters(p, filterScope));
     const query = searchQuery.trim().toLowerCase();
     if (query) {
       result = result.filter(p => p.name.toLowerCase().includes(query));
     }
     return result;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePatients, selectedInsurance, selectedClaimsFilter, patientIdsByStatus, searchQuery]);
+
+  // Discharged Patients folder, scoped to the same Insurance / Claims Status
+  // filter as the active list (previously ignored the filter entirely).
+  const dischargedPatients = dischargedPatientsRaw.filter(p => matchesPatientFilters(p, filterScope));
 
   const activeFilterCount = (selectedInsurance ? 1 : 0) + (selectedClaimsFilter && selectedClaimsFilter !== 'all' ? 1 : 0);
 
@@ -755,7 +788,22 @@ export default function Dashboard() {
     }
   };
 
-  const completedPatients = activePatients.filter(p => completedSet.has(p.id));
+  const handleSelectClaimsStatus = (status: string) => {
+    setSelectedClaimsFilter(status);
+    // Same reasoning as handleSelectInsurance above: don't leave the
+    // full-screen detail view open on a patient the new status filter
+    // excludes.
+    if (
+      selectedPatient &&
+      !matchesPatientFilters(selectedPatient, { selectedInsurance, selectedClaimsFilter: status, patientIdsByStatus })
+    ) {
+      setShowDetailView(false);
+    }
+  };
+
+  // Completed Sessions folder, scoped to the same Insurance / Claims Status
+  // filter as the active list (previously ignored the filter entirely).
+  const completedPatients = activePatients.filter(p => completedSet.has(p.id) && matchesPatientFilters(p, filterScope));
 
   // Clinic-wide metrics (approximate — based on active patient visits + patient count)
   const clinicMetrics = useMemo(() => {
@@ -2984,7 +3032,7 @@ export default function Dashboard() {
                     claimStatusFilters={CLAIM_STATUS_FILTERS}
                     claimStatusCounts={claimStatusCounts}
                     selectedClaimsFilter={selectedClaimsFilter}
-                    onSelectClaimsFilter={setSelectedClaimsFilter}
+                    onSelectClaimsFilter={handleSelectClaimsStatus}
                   />
                 </div>
 
@@ -3039,7 +3087,7 @@ export default function Dashboard() {
                                 claimStatusFilters={CLAIM_STATUS_FILTERS}
                                 claimStatusCounts={claimStatusCounts}
                                 selectedClaimsFilter={selectedClaimsFilter}
-                                onSelectClaimsFilter={setSelectedClaimsFilter}
+                                onSelectClaimsFilter={handleSelectClaimsStatus}
                               />
                             </div>
                             <SheetFooter>
