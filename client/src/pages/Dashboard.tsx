@@ -239,8 +239,18 @@ export default function Dashboard() {
   const utils = trpc.useUtils();
 
   // ── Nav scroll targets ────────────────────────────────────────────────────
-  const attentionSectionRef = useRef<HTMLDivElement>(null);
+  const authorizationAlertsRef = useRef<HTMLDivElement>(null);
+  const claimsFollowUpRef = useRef<HTMLDivElement>(null);
   const patientWorkspaceRef = useRef<HTMLDivElement>(null);
+  const visitsSectionRef = useRef<HTMLDivElement>(null);
+  const claimsSectionRef = useRef<HTMLDivElement>(null);
+  // Which detail-view section (Visits or Claims Tracker) to scroll to once the
+  // detail view finishes rendering for the target patient — set by
+  // handleNavigate, consumed and cleared by the effect below.
+  const [pendingDetailScrollTarget, setPendingDetailScrollTarget] = useState<'visits' | 'claims' | null>(null);
+  // Presentational-only: which sidebar item should render as active. Kept
+  // independent of business state so it never implies data has changed.
+  const [activeNavSection, setActiveNavSection] = useState<NavSection>('dashboard');
 
   // ── State ──────────────────────────────────────────────────────────────────
   const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null);
@@ -612,23 +622,33 @@ export default function Dashboard() {
   const handleNavigate = (section: NavSection) => {
     switch (section) {
       case 'dashboard':
+        setActiveNavSection('dashboard');
         setShowDetailView(false);
         requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
         break;
       case 'patients':
+        setActiveNavSection('patients');
         setShowDetailView(false);
         requestAnimationFrame(() => patientWorkspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
         break;
       case 'authorizations':
-      case 'claims-followup':
+        setActiveNavSection('authorizations');
         setShowDetailView(false);
-        requestAnimationFrame(() => attentionSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+        requestAnimationFrame(() => authorizationAlertsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+        break;
+      case 'claims-followup':
+        setActiveNavSection('claims-followup');
+        setShowDetailView(false);
+        requestAnimationFrame(() => claimsFollowUpRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
         break;
       case 'visits':
       case 'claims':
         if (activePatient) {
+          setActiveNavSection(section);
+          setPendingDetailScrollTarget(section);
           setShowDetailView(true);
         } else {
+          setActiveNavSection('patients');
           setShowDetailView(false);
           requestAnimationFrame(() => patientWorkspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
         }
@@ -639,6 +659,25 @@ export default function Dashboard() {
         break;
     }
   };
+
+  // Once the Detail View has actually rendered for the target patient, the
+  // Visits / Claims Tracker sections exist in the DOM — scroll to whichever
+  // one handleNavigate requested. Runs after render (not inside the click
+  // handler above) because showDetailView flips true first and the section
+  // ref isn't attached until this effect's render has committed.
+  useEffect(() => {
+    if (!pendingDetailScrollTarget || !showDetailView || !activePatient) return;
+    const target = pendingDetailScrollTarget;
+    requestAnimationFrame(() => {
+      const ref = target === 'visits' ? visitsSectionRef : claimsSectionRef;
+      if (ref.current) {
+        ref.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } else {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    });
+    setPendingDetailScrollTarget(null);
+  }, [pendingDetailScrollTarget, showDetailView, activePatient]);
 
   // ── Computed metrics ───────────────────────────────────────────────────────
 
@@ -1433,6 +1472,7 @@ export default function Dashboard() {
   if (showDetailView && activePatient) {
     return (
       <DashboardShell
+        activeSection={activeNavSection}
         onNavigate={handleNavigate}
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
@@ -1467,7 +1507,7 @@ export default function Dashboard() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setShowDetailView(false)}
+            onClick={() => { setActiveNavSection('dashboard'); setShowDetailView(false); }}
             className="mb-4 -ml-2 gap-1.5 text-brand-blue hover:text-brand-blue hover:bg-brand-cream"
           >
             <ChevronLeft className="w-4 h-4" />
@@ -1529,7 +1569,7 @@ export default function Dashboard() {
               Loading visits…
             </div>
           ) : visits.length === 0 ? (
-            <Card className="border-brand-cream-dark shadow-md">
+            <Card ref={visitsSectionRef} className="border-brand-cream-dark shadow-md scroll-mt-20">
               <CardContent className="py-12 text-center text-muted-foreground">No visit records yet. Log a session to get started.</CardContent>
             </Card>
           ) : (
@@ -1538,7 +1578,7 @@ export default function Dashboard() {
                 const periods = Array.from(new Set(visits.map(v => v.authPeriod ?? 1))).sort((a, b) => b - a); // newest first
                 // Active period = oldest with remaining sessions (from activeMetrics)
                 const activePeriod = activeMetrics.activePeriod;
-                return periods.map(period => {
+                return periods.map((period, periodIndex) => {
                   // Load claims for this period
                   const periodVisits = visits.filter(v => (v.authPeriod ?? 1) === period);
                   const periodAuth = periodVisits.find(v => v.sessionsAuthorized != null)?.sessionsAuthorized ?? 0;
@@ -1546,7 +1586,9 @@ export default function Dashboard() {
                   const isActive = period === activePeriod;
                   return (
                     <div key={`period-${period}`}>
-                    <Card className={`shadow-sm rounded-xl overflow-hidden py-0 gap-0 mb-6 border ${
+                    <Card
+                      ref={periodIndex === 0 ? visitsSectionRef : undefined}
+                      className={`shadow-sm rounded-xl overflow-hidden py-0 gap-0 mb-6 border scroll-mt-20 ${
                       isActive ? 'border-gray-100 border-t-4 border-t-brand-gold' : 'border-gray-200'
                     }`}>
                       <CardHeader className={`px-6 py-5 flex flex-row items-center justify-between ${
@@ -1793,7 +1835,11 @@ export default function Dashboard() {
                     </Card>
 
                     {/* Claims Tracking Card — Below Authorization Period */}
-                    <Card key={`claims-${period}`} className="border border-border border-t-4 border-t-brand-gold shadow-brand rounded-xl mb-6 ml-0">
+                    <Card
+                      key={`claims-${period}`}
+                      ref={periodIndex === 0 ? claimsSectionRef : undefined}
+                      className="border border-border border-t-4 border-t-brand-gold shadow-brand rounded-xl mb-6 ml-0 scroll-mt-20"
+                    >
                       <CardHeader className="bg-white rounded-t-xl">
                         <div className="flex items-start justify-between gap-4 mb-4">
                           <div className="space-y-1">
@@ -2861,7 +2907,7 @@ export default function Dashboard() {
 
   return (
     <DashboardShell
-      activeSection="dashboard"
+      activeSection={activeNavSection}
       onNavigate={handleNavigate}
       onSignOut={handleSignOut}
       signingOut={logoutMutation.isPending}
@@ -2981,13 +3027,13 @@ export default function Dashboard() {
         </div>
 
         {/* ─── Needs Attention ────────────────────────────────────────────── */}
-        <section ref={attentionSectionRef} className="scroll-mt-20">
+        <section className="scroll-mt-20">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-3">Needs Attention</h2>
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 xl:gap-6">
-            <div className="lg:col-span-4">
+            <div ref={authorizationAlertsRef} className="lg:col-span-4 scroll-mt-20">
               <AuthAlertPanel onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }} />
             </div>
-            <div className="lg:col-span-8">
+            <div ref={claimsFollowUpRef} className="lg:col-span-8 scroll-mt-20">
               <ClaimsFollowUpPanel
                 insurance={selectedInsurance}
                 onSelectPatient={(id) => { setSelectedPatientId(id); setShowDetailView(true); }}
