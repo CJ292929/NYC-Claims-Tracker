@@ -474,6 +474,52 @@ export function determineActiveAuthPeriod(
   return null;
 }
 
+type MarkAsRequestedRow = {
+  id: string;
+  auth_period: number | null;
+  session_number: number | null;
+  sessions_authorized: number | null;
+  date_of_service: string | null;
+};
+
+// Picks the visit row that Mark Requested should update: the last row (by
+// session_number) within the same active-period the alert panel is showing —
+// activePeriod ?? latestPeriod, exactly as getAuthAlertSummaries computes
+// targetPeriod. This keeps the write scoped to the period staff are looking
+// at, and matches the row getAuthAlertSummaries reads authStatus/
+// dateAshSubmitted back from (targetVisits[targetVisits.length - 1]).
+export function determineMarkAsRequestedTargetRow(
+  visits: MarkAsRequestedRow[],
+): MarkAsRequestedRow | null {
+  if (visits.length === 0) return null;
+
+  const periods = Array.from(new Set(visits.map(v => v.auth_period ?? 1))).sort((a, b) => a - b);
+  const latestPeriod = periods[periods.length - 1];
+  const activePeriod = determineActiveAuthPeriod(visits);
+  const targetPeriod = activePeriod ?? latestPeriod;
+
+  const targetVisits = visits
+    .filter(v => (v.auth_period ?? 1) === targetPeriod)
+    .sort((a, b) => (a.session_number ?? 0) - (b.session_number ?? 0));
+
+  return targetVisits[targetVisits.length - 1] ?? null;
+}
+
+// Resolves the visit row markAsRequested should update, scoped to the same
+// active authorization period getAuthAlertSummaries used to render the alert.
+export async function getMarkAsRequestedTargetVisitId(patientId: string): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("visit_records")
+    .select("id, auth_period, session_number, sessions_authorized, date_of_service")
+    .eq("patient_id", patientId);
+
+  if (error) { console.error("[Supabase] getMarkAsRequestedTargetVisitId:", error); return null; }
+  if (!data || data.length === 0) return null;
+
+  const target = determineMarkAsRequestedTargetRow(data as MarkAsRequestedRow[]);
+  return target?.id ?? null;
+}
+
 export async function approveAndCreateNewBatch(
   patientId: string,
   sessionsAuthorized: number,
