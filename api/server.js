@@ -120,7 +120,7 @@ function deriveAuthorizationUrgency(input) {
   else if (remaining <= 2) urgency = "critical";
   else if (remaining <= 3) urgency = "warning";
   if (authStatus === "pending" && urgency === "ok") urgency = "pending";
-  if (authStatus === "denied") urgency = "exhausted";
+  if (authStatus === "denied") urgency = "denied";
   const nowMs = now.getTime();
   const authValidUntilMs = authValidUntil !== null ? toMillis(authValidUntil) : null;
   const expiresWithin7Days = authValidUntilMs !== null && authValidUntilMs > nowMs && authValidUntilMs - nowMs <= SEVEN_DAYS_MS;
