@@ -3018,9 +3018,9 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           {[
             { icon: <Users className="w-4 h-4 text-brand-blue" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', tone: 'navy' as const },
-            { icon: <CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Total authorized', tone: 'gold' as const },
-            { icon: <Clock className="w-4 h-4 text-brand-blue" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Active patient', tone: 'navy' as const },
-            { icon: <AlertCircle className="w-4 h-4 text-destructive" />, label: 'Utilization Rate', value: `${clinicMetrics.utilizationRate}%`, sub: 'Sessions completed', tone: 'destructive' as const },
+            { icon: <CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Selected patient', tone: 'gold' as const },
+            { icon: <Clock className="w-4 h-4 text-brand-blue" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Selected patient', tone: 'navy' as const },
+            { icon: <AlertCircle className="w-4 h-4 text-destructive" />, label: 'Utilization Rate', value: `${clinicMetrics.utilizationRate}%`, sub: 'Selected patient', tone: 'destructive' as const },
           ].map(({ icon, label, value, sub, tone }) => (
             <MetricCard key={label} icon={icon} label={label} value={value} sub={sub} tone={tone} />
           ))}
