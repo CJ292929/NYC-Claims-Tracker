@@ -86,6 +86,7 @@ __export(db_exports, {
   createVisitRecord: () => createVisitRecord,
   deleteClaimRecord: () => deleteClaimRecord,
   deletePatient: () => deletePatient,
+  determineActiveAuthPeriod: () => determineActiveAuthPeriod,
   getAllPatients: () => getAllPatients,
   getAuthAlertSummaries: () => getAuthAlertSummaries,
   getClaimsByPatientAndPeriod: () => getClaimsByPatientAndPeriod,
@@ -410,8 +411,29 @@ async function getLatestVisitIdForPatient(patientId) {
   if (!data || data.length === 0) return null;
   return data[data.length - 1].id;
 }
+function determineActiveAuthPeriod(visits) {
+  const periods = Array.from(new Set(visits.map((v) => v.auth_period ?? 1))).sort((a, b) => a - b);
+  for (const period of periods) {
+    const periodVisits = visits.filter((v) => (v.auth_period ?? 1) === period);
+    const authRow = periodVisits.find((v) => v.sessions_authorized != null);
+    const periodAuthorized = authRow?.sessions_authorized ?? 0;
+    const periodCompleted = periodVisits.filter((v) => v.date_of_service != null).length;
+    const periodRemaining = Math.max(0, periodAuthorized - periodCompleted);
+    if (periodRemaining > 0) return period;
+  }
+  return null;
+}
 async function approveAndCreateNewBatch(patientId, sessionsAuthorized, authDate, newInsurance, authValidUntil) {
-  const { error: approveErr } = await supabase.from("visit_records").update({ auth_status: "approved" }).eq("patient_id", patientId);
+  const { data: periodStatusRows, error: periodStatusErr } = await supabase.from("visit_records").select("auth_period, sessions_authorized, date_of_service").eq("patient_id", patientId);
+  if (periodStatusErr) {
+    console.error("[Supabase] approveAndCreateNewBatch periodStatus:", periodStatusErr);
+    throw periodStatusErr;
+  }
+  const statusRows = periodStatusRows ?? [];
+  const statusPeriods = Array.from(new Set(statusRows.map((r) => r.auth_period ?? 1))).sort((a, b) => a - b);
+  const latestStatusPeriod = statusPeriods.length > 0 ? statusPeriods[statusPeriods.length - 1] : 1;
+  const targetApprovalPeriod = determineActiveAuthPeriod(statusRows) ?? latestStatusPeriod;
+  const { error: approveErr } = await supabase.from("visit_records").update({ auth_status: "approved" }).eq("patient_id", patientId).eq("auth_period", targetApprovalPeriod);
   if (approveErr) {
     console.error("[Supabase] approveAndCreateNewBatch approve:", approveErr);
     throw approveErr;
