@@ -68,7 +68,7 @@ export function PatientSnapshotPane({
           </div>
         </div>
         {alertStatus && (
-          <Badge className={`text-xs px-2.5 py-1 rounded-full font-medium ${alertStatus.color}`}>{alertStatus.label}</Badge>
+          <Badge role="status" className={`text-xs px-2.5 py-1 rounded-full font-medium ${alertStatus.color}`}>{alertStatus.label}</Badge>
         )}
       </div>
 
