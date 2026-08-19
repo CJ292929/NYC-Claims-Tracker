@@ -29,6 +29,7 @@ import { PatientRecordsWorkspace } from '@/components/dashboard/PatientRecordsWo
 import { DischargedPatientsWorkspace } from '@/components/dashboard/DischargedPatientsWorkspace';
 import { DashboardShell } from '@/components/dashboard/DashboardShell';
 import type { NavSection } from '@/components/dashboard/DashboardSidebar';
+import { getPatientMetrics } from '@/lib/patientMetrics';
 
 /**
  * Dashboard Component — Database-backed
@@ -677,55 +678,8 @@ export default function Dashboard() {
   };
 
   // ── Computed metrics ───────────────────────────────────────────────────────
-
-  const getPatientMetrics = (patientVisits: DbVisit[]) => {
-    if (patientVisits.length === 0) return { totalAuthorized: 0, completed: 0, remaining: 0, activePeriod: null as number | null };
-
-    // Find all distinct auth periods sorted oldest first
-    const allPeriods = Array.from(new Set(patientVisits.map(v => v.authPeriod ?? 1))).sort((a, b) => a - b);
-
-    // Active period = the OLDEST period that still has sessions remaining (> 0).
-    // This ensures staff use up Period 1 before Period 2 becomes active.
-    // Returns null if all periods are exhausted (no sessions remaining anywhere).
-    // IMPORTANT: Use Authorized - Completed (not stored sessionsRemaining) for accuracy.
-    let activePeriod: number | null = null;
-    for (const period of allPeriods) {
-      const periodVisits = patientVisits.filter(v => (v.authPeriod ?? 1) === period);
-      const authRow = periodVisits.find(v => v.sessionsAuthorized != null);
-      const periodAuthorized = authRow?.sessionsAuthorized ?? 0;
-      const periodCompleted = periodVisits.filter(v => v.dateOfService != null).length;
-      const periodRemaining = Math.max(0, periodAuthorized - periodCompleted);
-      if (periodRemaining > 0) {
-        activePeriod = period;
-        break; // Found the oldest period with remaining sessions
-      }
-    }
-
-    if (activePeriod === null) {
-      // All periods exhausted — show totals from the latest period for display purposes
-      const latestPeriod = allPeriods[allPeriods.length - 1];
-      const latestVisits = patientVisits.filter(v => (v.authPeriod ?? 1) === latestPeriod);
-      const authRow = latestVisits.find(v => v.sessionsAuthorized != null);
-      const totalAuthorized = authRow?.sessionsAuthorized ?? 0;
-      const completed = latestVisits.filter(v => v.dateOfService != null).length;
-      return { totalAuthorized, completed, remaining: 0, activePeriod: null };
-    }
-
-    const currentPeriodVisits = patientVisits.filter(v => (v.authPeriod ?? 1) === activePeriod);
-
-    // Authorized = sessionsAuthorized from any row in the active period
-    const authRow = currentPeriodVisits.find(v => v.sessionsAuthorized != null);
-    const totalAuthorized = authRow?.sessionsAuthorized ?? 0;
-
-    // Completed = rows in the active period that have a date of service
-    const completed = currentPeriodVisits.filter(v => v.dateOfService != null).length;
-
-    // Remaining = Authorized - Completed (always derived, never from stored sessionsRemaining)
-    // This is the only mathematically accurate approach — stored sessionsRemaining can be stale.
-    const remaining = Math.max(0, totalAuthorized - completed);
-
-    return { totalAuthorized, completed, remaining, activePeriod };
-  };
+  // getPatientMetrics itself now lives in @/lib/patientMetrics, delegating
+  // period math to shared/authPeriodMetrics.ts (kept in sync with server/db.ts).
 
   // For the list view we need metrics per patient — but visits are only loaded for the active patient.
   // We derive a rough remaining from the patient's own visits when available.
