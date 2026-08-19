@@ -612,27 +612,17 @@ export async function getCompletedPatients(): Promise<string[]> {
 
   const { data: allVisits, error: vErr } = await supabase
     .from("visit_records")
-    .select("id, patient_id, date_of_service, sessions_remaining, auth_period, session_number");
+    .select("id, patient_id, date_of_service, sessions_authorized, auth_period");
 
   if (vErr) { console.error("[Supabase] getCompletedPatients visits:", vErr); return []; }
-  const visits = (allVisits ?? []) as {
-    id: string; patient_id: string; date_of_service: string | null;
-    sessions_remaining: number | null; auth_period: number; session_number: number | null;
-  }[];
+  const visits = (allVisits ?? []).map(toVisitRecord);
 
   return (allPatients as { id: string }[])
     .filter(patient => {
-      const pVisits = visits.filter(v => v.patient_id === patient.id);
+      const pVisits = visits.filter(v => v.patientId === patient.id);
       if (pVisits.length === 0) return false;
 
-      const sorted = [...pVisits].sort((a, b) => {
-        const pd = (a.auth_period ?? 1) - (b.auth_period ?? 1);
-        if (pd !== 0) return pd;
-        return (a.session_number ?? 0) - (b.session_number ?? 0);
-      });
-      const latest = sorted[sorted.length - 1];
-      if (latest.sessions_remaining !== 0) return false;
-      return pVisits.every(v => v.date_of_service != null);
+      return determineActivePeriod(pVisits) === null;
     })
     .map(p => p.id);
 }
