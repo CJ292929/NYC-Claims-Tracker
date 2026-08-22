@@ -12,7 +12,7 @@ export interface PatientAlertPresentation {
   color: string;
 }
 
-const URGENCY_LABEL: Record<AuthUrgency, string> = {
+export const URGENCY_LABEL: Record<AuthUrgency, string> = {
   exhausted: 'Sessions Exhausted',
   critical: 'Critical — 1-2 Sessions Left',
   warning: 'Warning — 3 Sessions Left',
@@ -21,7 +21,7 @@ const URGENCY_LABEL: Record<AuthUrgency, string> = {
   denied: 'Authorization Denied',
 };
 
-const URGENCY_COLOR: Record<AuthUrgency, string> = {
+export const URGENCY_COLOR: Record<AuthUrgency, string> = {
   exhausted: 'bg-red-100 text-red-800',
   critical: 'bg-orange-100 text-orange-800',
   warning: 'bg-yellow-100 text-yellow-800',
