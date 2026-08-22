@@ -191,6 +191,17 @@ function VisitAuthStatusSelect({ visit, onChange }: { visit: DbVisit; onChange: 
   );
 }
 
+/** Structural "coming soon" placeholder for authorization child routes whose
+ *  real content lands in a later phase (C6B+). No metrics/records — just a
+ *  neutral empty state so the route exists and is navigable now. */
+function AuthorizationsRoutePlaceholder({ message }: { message: string }) {
+  return (
+    <div className="rounded-lg border border-dashed border-muted-foreground/25 bg-muted/20 px-6 py-16 text-center text-sm text-muted-foreground">
+      {message}
+    </div>
+  );
+}
+
 // ─── CSV Export ─────────────────────────────────────────────────────────────
 // The 18 canonical columns, in dashboard order. Reads the same raw (snake_case)
 // claim shape returned by claims.getByPatientAndPeriod that the table itself renders.
@@ -3274,9 +3285,11 @@ export default function Dashboard() {
     );
   }
 
-  // ── /authorizations ─────────────────────────────────────────────────────
+  // ── /authorizations (Overview) ──────────────────────────────────────────
+  // Still hosts the existing AuthAlertPanel queue for C6A — C6B relocates it
+  // to /authorizations/attention and replaces this with real overview content.
 
-  if (activeSection === 'authorizations') {
+  if (activeSection === 'authorizations-overview') {
     return (
       <DashboardShell
         activeSection={activeSection}
@@ -3288,6 +3301,48 @@ export default function Dashboard() {
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
           <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
+        </div>
+        {bulkUploadDialog}
+      </DashboardShell>
+    );
+  }
+
+  // ── /authorizations/attention ───────────────────────────────────────────
+  // Placeholder only — C6B moves the AuthAlertPanel queue here.
+
+  if (activeSection === 'authorizations-attention') {
+    return (
+      <DashboardShell
+        activeSection={activeSection}
+        onNavigate={handleNavigate}
+        onSignOut={handleSignOut}
+        signingOut={logoutMutation.isPending}
+        topbarTitle="Needs Attention"
+        topbarSubtitle="Authorizations that require follow-up"
+      >
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
+          <AuthorizationsRoutePlaceholder message="Authorizations needing attention will appear here." />
+        </div>
+        {bulkUploadDialog}
+      </DashboardShell>
+    );
+  }
+
+  // ── /authorizations/records ─────────────────────────────────────────────
+  // Placeholder only — content lands in a later phase.
+
+  if (activeSection === 'authorizations-records') {
+    return (
+      <DashboardShell
+        activeSection={activeSection}
+        onNavigate={handleNavigate}
+        onSignOut={handleSignOut}
+        signingOut={logoutMutation.isPending}
+        topbarTitle="Authorization Records"
+        topbarSubtitle="Review patient authorization status and records."
+      >
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
+          <AuthorizationsRoutePlaceholder message="Authorization records will appear here." />
         </div>
         {bulkUploadDialog}
       </DashboardShell>

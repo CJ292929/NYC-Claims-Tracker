@@ -19,7 +19,9 @@ export type NavSection =
   | 'patients-overview'
   | 'patients-records'
   | 'patients-discharged'
-  | 'authorizations'
+  | 'authorizations-overview'
+  | 'authorizations-attention'
+  | 'authorizations-records'
   | 'visits'
   | 'claims'
   | 'bulk-upload';
@@ -64,7 +66,17 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
           leaf('patients-discharged', 'Discharged Patients'),
         ],
       },
-      leaf('authorizations', 'Authorizations', ShieldAlert),
+      {
+        type: 'parent',
+        key: 'authorizations',
+        label: 'Authorizations',
+        icon: ShieldAlert,
+        children: [
+          leaf('authorizations-overview', 'Overview'),
+          leaf('authorizations-attention', 'Needs Attention'),
+          leaf('authorizations-records', 'Records'),
+        ],
+      },
     ],
   },
   {

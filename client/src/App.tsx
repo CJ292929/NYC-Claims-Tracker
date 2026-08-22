@@ -46,6 +46,8 @@ function Router() {
       <Route path="/patients/records" component={() => <ProtectedRoute component={Dashboard} />} />
       <Route path="/patients/discharged" component={() => <ProtectedRoute component={Dashboard} />} />
       <Route path="/authorizations" component={() => <ProtectedRoute component={Dashboard} />} />
+      <Route path="/authorizations/attention" component={() => <ProtectedRoute component={Dashboard} />} />
+      <Route path="/authorizations/records" component={() => <ProtectedRoute component={Dashboard} />} />
       <Route path="/visits" component={() => <ProtectedRoute component={Dashboard} />} />
       <Route path="/claims" component={() => <ProtectedRoute component={Dashboard} />} />
       <Route path="/404" component={NotFound} />
