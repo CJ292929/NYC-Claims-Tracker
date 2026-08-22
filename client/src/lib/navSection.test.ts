@@ -7,7 +7,9 @@ describe('routeToNavSection', () => {
     expect(routeToNavSection('/patients')).toBe('patients-overview');
     expect(routeToNavSection('/patients/records')).toBe('patients-records');
     expect(routeToNavSection('/patients/discharged')).toBe('patients-discharged');
-    expect(routeToNavSection('/authorizations')).toBe('authorizations');
+    expect(routeToNavSection('/authorizations')).toBe('authorizations-overview');
+    expect(routeToNavSection('/authorizations/attention')).toBe('authorizations-attention');
+    expect(routeToNavSection('/authorizations/records')).toBe('authorizations-records');
     expect(routeToNavSection('/visits')).toBe('visits');
     expect(routeToNavSection('/claims')).toBe('claims');
   });
@@ -25,7 +27,9 @@ describe('navSectionToRoute', () => {
     expect(navSectionToRoute('patients-overview')).toBe('/patients');
     expect(navSectionToRoute('patients-records')).toBe('/patients/records');
     expect(navSectionToRoute('patients-discharged')).toBe('/patients/discharged');
-    expect(navSectionToRoute('authorizations')).toBe('/authorizations');
+    expect(navSectionToRoute('authorizations-overview')).toBe('/authorizations');
+    expect(navSectionToRoute('authorizations-attention')).toBe('/authorizations/attention');
+    expect(navSectionToRoute('authorizations-records')).toBe('/authorizations/records');
     expect(navSectionToRoute('visits')).toBe('/visits');
     expect(navSectionToRoute('claims')).toBe('/claims');
   });
