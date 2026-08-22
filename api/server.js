@@ -415,7 +415,8 @@ async function getAuthAlertSummaries() {
         authStatus: "none",
         dateAshSubmitted: null,
         urgency: "ok",
-        authValidUntil: patient.authValidUntil ?? null
+        authValidUntil: patient.authValidUntil ?? null,
+        authPeriod: null
       };
     }
     const { periods: allPeriods, activePeriod } = deriveAuthPeriodMetrics(pVisits);
@@ -445,7 +446,8 @@ async function getAuthAlertSummaries() {
       dateAshSubmitted: dateAshSubmitted instanceof Date ? dateAshSubmitted.toISOString().split("T")[0] : dateAshSubmitted,
       urgency,
       authValidUntil,
-      authExpiryWarning
+      authExpiryWarning,
+      authPeriod: targetPeriod
     };
   });
 }
