@@ -22,6 +22,7 @@ import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { MetricCard } from '@/components/dashboard/MetricCard';
 import { FilterChips } from '@/components/dashboard/FilterChips';
 import { AuthAlertPanel } from '@/components/dashboard/AuthAlertPanel';
+import { AuthorizationRecordsWorkspace } from '@/components/dashboard/AuthorizationRecordsWorkspace';
 import { ClaimsFollowUpPanel } from '@/components/dashboard/ClaimsFollowUpPanel';
 import { PatientAnalytics } from '@/components/dashboard/PatientAnalytics';
 import { PatientOverview } from '@/components/dashboard/PatientOverview';
@@ -188,17 +189,6 @@ function VisitAuthStatusSelect({ visit, onChange }: { visit: DbVisit; onChange: 
         <SelectItem value="Denied">Denied</SelectItem>
       </SelectContent>
     </Select>
-  );
-}
-
-/** Structural "coming soon" placeholder for authorization child routes whose
- *  real content lands in a later phase (C6B+). No metrics/records — just a
- *  neutral empty state so the route exists and is navigable now. */
-function AuthorizationsRoutePlaceholder({ message }: { message: string }) {
-  return (
-    <div className="rounded-lg border border-dashed border-muted-foreground/25 bg-muted/20 px-6 py-16 text-center text-sm text-muted-foreground">
-      {message}
-    </div>
   );
 }
 
@@ -3355,7 +3345,10 @@ export default function Dashboard() {
   }
 
   // ── /authorizations/records ─────────────────────────────────────────────
-  // Placeholder only — content lands in a later phase.
+  // Clinic-wide lookup: one row per patient for their current/target
+  // authorization period, sourced entirely from trpc.visits.authAlerts (the
+  // same query Needs Attention uses). Full period-by-period history stays on
+  // /visits, reached via View Visits below.
 
   if (activeSection === 'authorizations-records') {
     return (
@@ -3368,7 +3361,7 @@ export default function Dashboard() {
         topbarSubtitle="Review patient authorization status and records."
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
-          <AuthorizationsRoutePlaceholder message="Authorization records will appear here." />
+          <AuthorizationRecordsWorkspace onViewVisits={(id) => selectPatient(id, '/visits')} />
         </div>
         {bulkUploadDialog}
       </DashboardShell>
