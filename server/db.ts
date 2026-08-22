@@ -384,6 +384,7 @@ export async function getAuthAlertSummaries() {
         sessionsAuthorized: null, sessionsRemaining: null,
         authStatus: "none" as const, dateAshSubmitted: null, urgency: "ok" as const,
         authValidUntil: patient.authValidUntil ?? null,
+        authPeriod: null,
       };
     }
 
@@ -420,6 +421,7 @@ export async function getAuthAlertSummaries() {
       urgency,
       authValidUntil,
       authExpiryWarning,
+      authPeriod: targetPeriod,
     };
   });
 }
