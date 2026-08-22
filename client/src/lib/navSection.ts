@@ -7,7 +7,9 @@ export function routeToNavSection(location: string): NavSection {
     case '/patients': return 'patients-overview';
     case '/patients/records': return 'patients-records';
     case '/patients/discharged': return 'patients-discharged';
-    case '/authorizations': return 'authorizations';
+    case '/authorizations': return 'authorizations-overview';
+    case '/authorizations/attention': return 'authorizations-attention';
+    case '/authorizations/records': return 'authorizations-records';
     case '/visits': return 'visits';
     case '/claims': return 'claims';
     default: return 'dashboard';
@@ -23,7 +25,9 @@ export function navSectionToRoute(section: NavSection): string | null {
     case 'patients-overview': return '/patients';
     case 'patients-records': return '/patients/records';
     case 'patients-discharged': return '/patients/discharged';
-    case 'authorizations': return '/authorizations';
+    case 'authorizations-overview': return '/authorizations';
+    case 'authorizations-attention': return '/authorizations/attention';
+    case 'authorizations-records': return '/authorizations/records';
     case 'visits': return '/visits';
     case 'claims': return '/claims';
     case 'bulk-upload': return null;
