@@ -46,7 +46,7 @@ export function PatientOverview({
       {/* ─── Population summary ─────────────────────────────────────────── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <MetricCard icon={<Users className="w-4 h-4 text-brand-blue" />} label="Total Patients" value={totalPatients} tone="navy" />
-        <MetricCard icon={<UserCheck className="w-4 h-4 text-green-600" />} label="Active Patients" value={activePatients} tone="navy" />
+        <MetricCard icon={<UserCheck className="w-4 h-4 text-green-600" />} label="Active Patients" value={activePatients} sub="Sessions remaining" tone="navy" />
         <MetricCard icon={<CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />} label="Completed Patients" value={completedPatients} sub="Sessions exhausted" tone="gold" />
         <MetricCard icon={<UserX className="w-4 h-4 text-gray-500" />} label="Discharged Patients" value={dischargedPatients} tone="navy" />
       </div>
