@@ -31,6 +31,7 @@ import { DischargedPatientsWorkspace } from '@/components/dashboard/DischargedPa
 import { DashboardShell } from '@/components/dashboard/DashboardShell';
 import type { NavSection } from '@/components/dashboard/DashboardSidebar';
 import { getPatientMetrics } from '@/lib/patientMetrics';
+import { getPatientOverviewMetrics } from '@/lib/patientOverviewMetrics';
 import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import type { AuthUrgency } from '@shared/authUrgency';
@@ -837,6 +838,15 @@ export default function Dashboard() {
   const overviewCompletedPatients = useMemo(
     () => activePatients.filter(p => completedSet.has(p.id)),
     [activePatients, completedSet]
+  );
+
+  // Patient Overview KPI row only: mutually-exclusive Total/Active/Completed/
+  // Discharged categories (Active here excludes Completed, unlike the shared
+  // `activePatients` variable above, which the Dashboard's C6F KPI and other
+  // workflows still rely on meaning "isActive !== false").
+  const patientOverviewMetrics = useMemo(
+    () => getPatientOverviewMetrics(patients, completedSet),
+    [patients, completedSet]
   );
   const recentPatients = useMemo(
     () => [...patients].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 8),
@@ -3154,10 +3164,10 @@ export default function Dashboard() {
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
           <PatientOverview
-            totalPatients={patients.length}
-            activePatients={activePatients.length}
-            completedPatients={overviewCompletedPatients.length}
-            dischargedPatients={dischargedPatientsRaw.length}
+            totalPatients={patientOverviewMetrics.totalPatients}
+            activePatients={patientOverviewMetrics.activePatients}
+            completedPatients={patientOverviewMetrics.completedPatients}
+            dischargedPatients={patientOverviewMetrics.dischargedPatients}
             insuranceCounts={insuranceCounts}
             recentPatients={recentPatients}
             onSelectPatient={(id) => selectPatient(id, '/patients/records')}
