@@ -21,6 +21,14 @@ import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 
 const URGENCY_CONFIG = {
+  denied: {
+    label: 'Authorization Denied',
+    sublabel: 'Authorization requires attention',
+    icon: <AlertCircle className="w-4 h-4" />,
+    cardClass: 'border-l-4 border-red-600 bg-red-50',
+    badgeClass: 'bg-red-100 text-red-700',
+    iconClass: 'text-red-700',
+  },
   exhausted: {
     label: 'Sessions Exhausted',
     sublabel: 'Request authorization ASAP',
@@ -150,7 +158,7 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
   const urgent = alerts
     .filter(a => a.urgency !== 'ok')
     .sort((a, b) => {
-      const order = { exhausted: 0, critical: 1, warning: 2, pending: 3, ok: 4 };
+      const order = { denied: 0, exhausted: 1, critical: 2, warning: 3, pending: 4, ok: 5 };
       return order[a.urgency] - order[b.urgency];
     });
 

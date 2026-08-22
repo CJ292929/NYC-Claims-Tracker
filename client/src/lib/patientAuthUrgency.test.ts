@@ -52,11 +52,13 @@ describe('derivePatientAlertPresentation: core matrix', () => {
     expect(result.label).toBe('Authorization Pending');
   });
 
-  it('CASE F: remaining 8, denied => exhausted', () => {
+  it('CASE F: remaining 8, denied => denied', () => {
     const visits = [visit(1, 10, '2026-01-01', 'denied')];
     const result = derivePatientAlertPresentation(visits, 8, null, NOW);
-    expect(result.urgency).toBe('exhausted');
-    expect(result.label).toBe('Sessions Exhausted');
+    expect(result.urgency).toBe('denied');
+    expect(result.label).toBe('Authorization Denied');
+    // Regression: denied with sessions remaining must never render as exhausted.
+    expect(result.label).not.toBe('Sessions Exhausted');
   });
 
   it('CASE G: remaining 8, approved, expiry in 3 days => warning + expiry presentation', () => {
@@ -136,7 +138,7 @@ describe('derivePatientAlertPresentation: multi-period authStatus lookup', () =>
     ];
     const result = derivePatientAlertPresentation(visits, 8, null, NOW);
     // If period 1 ("pending") were used instead, this would be "pending".
-    expect(result.urgency).toBe('exhausted');
+    expect(result.urgency).toBe('denied');
   });
 
   it('CASE M: stored sessionsRemaining is irrelevant — urgency depends only on the passed-in derived remaining', () => {
