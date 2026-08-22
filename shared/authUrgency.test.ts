@@ -39,9 +39,9 @@ describe("deriveAuthorizationUrgency: core matrix", () => {
     expect(result).toEqual({ urgency: "pending", authExpiryWarning: false });
   });
 
-  it("CASE F: remaining 8, denied => exhausted", () => {
+  it("CASE F: remaining 8, denied => denied", () => {
     const result = deriveAuthorizationUrgency({ remaining: 8, authStatus: "denied", now: NOW });
-    expect(result).toEqual({ urgency: "exhausted", authExpiryWarning: false });
+    expect(result).toEqual({ urgency: "denied", authExpiryWarning: false });
   });
 
   it("CASE G: remaining 8, approved, expires in 3 days => warning, authExpiryWarning true", () => {
@@ -96,19 +96,51 @@ describe("deriveAuthorizationUrgency: precedence (denied > remaining tier > pend
     expect(result).toEqual({ urgency: "pending", authExpiryWarning: false });
   });
 
-  it("remaining 1 + denied => exhausted (denied beats remaining tier)", () => {
-    const result = deriveAuthorizationUrgency({ remaining: 1, authStatus: "denied", now: NOW });
-    expect(result.urgency).toBe("exhausted");
+  it("remaining 3 + denied => denied (denied beats remaining tier)", () => {
+    const result = deriveAuthorizationUrgency({ remaining: 3, authStatus: "denied", now: NOW });
+    expect(result.urgency).toBe("denied");
   });
 
-  it("remaining 8 + denied + expiring soon => exhausted, authExpiryWarning false (denied beats expiry)", () => {
+  it("remaining 1 + denied => denied (denied beats remaining tier)", () => {
+    const result = deriveAuthorizationUrgency({ remaining: 1, authStatus: "denied", now: NOW });
+    expect(result.urgency).toBe("denied");
+  });
+
+  it("remaining 0 + denied => denied (denied beats remaining tier, including exhaustion)", () => {
+    const result = deriveAuthorizationUrgency({ remaining: 0, authStatus: "denied", now: NOW });
+    expect(result.urgency).toBe("denied");
+  });
+
+  it("remaining 8 + denied + expiring soon => denied, authExpiryWarning false (denied beats expiry)", () => {
     const result = deriveAuthorizationUrgency({
       remaining: 8,
       authStatus: "denied",
       authValidUntil: ms(3),
       now: NOW,
     });
-    expect(result).toEqual({ urgency: "exhausted", authExpiryWarning: false });
+    expect(result).toEqual({ urgency: "denied", authExpiryWarning: false });
+  });
+
+  it("remaining 8 + denied + already expired => denied, authExpiryWarning false (denied beats expiry)", () => {
+    const result = deriveAuthorizationUrgency({
+      remaining: 8,
+      authStatus: "denied",
+      authValidUntil: ms(-3),
+      now: NOW,
+    });
+    expect(result).toEqual({ urgency: "denied", authExpiryWarning: false });
+  });
+});
+
+describe("deriveAuthorizationUrgency: exhausted semantics preserved for genuine exhaustion", () => {
+  it("remaining 0 + approved => exhausted (not denied)", () => {
+    const result = deriveAuthorizationUrgency({ remaining: 0, authStatus: "approved", now: NOW });
+    expect(result.urgency).toBe("exhausted");
+  });
+
+  it("remaining 0 + none => exhausted (not denied)", () => {
+    const result = deriveAuthorizationUrgency({ remaining: 0, authStatus: "none", now: NOW });
+    expect(result.urgency).toBe("exhausted");
   });
 });
 
@@ -225,9 +257,11 @@ describe("deriveAuthorizationUrgency: input edge cases", () => {
 });
 
 describe("deriveAuthorizationUrgency: parity with server/db.ts getAuthAlertSummaries", () => {
-  // Inline reproduction of the current server urgency block, kept
+  // Frozen reproduction of the pre-C5 server urgency block, kept
   // deliberately duplicated (not imported) so this test fails if the shared
-  // helper ever drifts from the server's inline logic.
+  // helper ever drifts unintentionally from the server's original inline
+  // logic. Left untouched by C5 on purpose: the "denied" fixtures below now
+  // deliberately diverge from this frozen function rather than matching it.
   function serverUrgency(
     sessionsRemaining: number,
     authStatus: string | null,
@@ -260,11 +294,9 @@ describe("deriveAuthorizationUrgency: parity with server/db.ts getAuthAlertSumma
     { name: "critical low, pending", remaining: 1, authStatus: "pending", authValidUntil: null },
     { name: "warning tier, approved", remaining: 3, authStatus: "approved", authValidUntil: null },
     { name: "ok tier, pending", remaining: 8, authStatus: "pending", authValidUntil: null },
-    { name: "denied overrides high remaining", remaining: 8, authStatus: "denied", authValidUntil: null },
     { name: "ok tier, expiring in 3 days", remaining: 8, authStatus: "approved", authValidUntil: ms(3) },
     { name: "ok tier, already expired", remaining: 8, authStatus: "approved", authValidUntil: ms(-3) },
     { name: "pending suppresses expiry warning", remaining: 8, authStatus: "pending", authValidUntil: ms(3) },
-    { name: "denied suppresses expiry warning", remaining: 8, authStatus: "denied", authValidUntil: ms(3) },
   ];
 
   for (const fixture of fixtures) {
@@ -277,6 +309,34 @@ describe("deriveAuthorizationUrgency: parity with server/db.ts getAuthAlertSumma
       };
       const expected = serverUrgency(fixture.remaining, fixture.authStatus, fixture.authValidUntil, NOW.getTime());
       expect(deriveAuthorizationUrgency(input)).toEqual(expected);
+    });
+  }
+
+  // C5: denied is now a first-class urgency. The frozen serverUrgency()
+  // above still reproduces the pre-C5 denied -> exhausted mapping on
+  // purpose — these cases prove the shared helper has intentionally
+  // diverged from it for denied, rather than silently drifting.
+  const deniedFixtures: Array<{
+    name: string;
+    remaining: number;
+    authValidUntil: number | null;
+  }> = [
+    { name: "denied overrides high remaining", remaining: 8, authValidUntil: null },
+    { name: "denied suppresses expiry warning", remaining: 8, authValidUntil: ms(3) },
+  ];
+
+  for (const fixture of deniedFixtures) {
+    it(`intentionally diverges from frozen pre-C5 server urgency: ${fixture.name}`, () => {
+      const frozenPreC5 = serverUrgency(fixture.remaining, "denied", fixture.authValidUntil, NOW.getTime());
+      const current = deriveAuthorizationUrgency({
+        remaining: fixture.remaining,
+        authStatus: "denied",
+        authValidUntil: fixture.authValidUntil,
+        now: NOW,
+      });
+
+      expect(frozenPreC5).toEqual({ urgency: "exhausted", authExpiryWarning: false });
+      expect(current).toEqual({ urgency: "denied", authExpiryWarning: false });
     });
   }
 });

@@ -66,10 +66,6 @@ const fixtures: Array<{
     expected: { urgency: 'warning', authExpiryWarning: true } },
   { name: 'remaining >3 + approved + expired', remaining: 8, authStatus: 'approved', authValidUntil: ms(-3),
     expected: { urgency: 'warning', authExpiryWarning: true } },
-  { name: 'remaining >3 + denied', remaining: 8, authStatus: 'denied', authValidUntil: null,
-    expected: { urgency: 'exhausted', authExpiryWarning: false } },
-  { name: 'remaining 1 + denied', remaining: 1, authStatus: 'denied', authValidUntil: null,
-    expected: { urgency: 'exhausted', authExpiryWarning: false } },
   { name: 'pending + expiring soon', remaining: 8, authStatus: 'pending', authValidUntil: ms(3),
     expected: { urgency: 'pending', authExpiryWarning: false } },
 ];
@@ -88,6 +84,41 @@ describe('getAuthAlertSummaries urgency (post-C4B): shared helper matches pre-mi
       expect(old).toEqual(fixture.expected);
       expect(shared).toEqual(fixture.expected);
       expect(shared).toEqual(old);
+    });
+  }
+});
+
+// C5: denied is now a first-class urgency ('denied'), distinct from
+// 'exhausted'. oldServerUrgency() above is left untouched — it stays a
+// frozen record of the pre-C5 (and pre-C4B) inline behavior — so these
+// cases assert the intentional divergence explicitly instead of silently
+// breaking the parity assertions above.
+const deniedFixtures: Array<{
+  name: string;
+  remaining: number;
+  authValidUntil: number | null;
+}> = [
+  { name: 'remaining >3 + denied', remaining: 8, authValidUntil: null },
+  { name: 'remaining 1 + denied', remaining: 1, authValidUntil: null },
+  { name: 'remaining 0 + denied', remaining: 0, authValidUntil: null },
+  { name: 'remaining 3 + denied', remaining: 3, authValidUntil: null },
+  { name: 'denied + expiring soon', remaining: 8, authValidUntil: ms(3) },
+  { name: 'denied + already expired', remaining: 8, authValidUntil: ms(-3) },
+];
+
+describe('getAuthAlertSummaries urgency (post-C5): denied intentionally diverges from frozen pre-C5 output', () => {
+  for (const fixture of deniedFixtures) {
+    it(fixture.name, () => {
+      const frozenPreC5 = oldServerUrgency(fixture.remaining, 'denied', fixture.authValidUntil, NOW.getTime());
+      const current = deriveAuthorizationUrgency({
+        remaining: fixture.remaining,
+        authStatus: 'denied',
+        authValidUntil: fixture.authValidUntil,
+        now: NOW,
+      });
+
+      expect(frozenPreC5).toEqual({ urgency: 'exhausted', authExpiryWarning: false });
+      expect(current).toEqual({ urgency: 'denied', authExpiryWarning: false });
     });
   }
 });

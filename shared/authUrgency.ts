@@ -3,15 +3,15 @@
 // client/server boundary. Mirrors the urgency derivation currently inlined
 // in server/db.ts getAuthAlertSummaries.
 //
-// This is a parity port: it reproduces current server behavior exactly,
-// including the "denied" -> "exhausted" mapping regardless of remaining
-// session count. That mapping looks like it may be accidental (a patient
-// with sessions remaining and a denied claim reads identically to one who
-// is fully exhausted), but changing it is out of scope here — this helper
-// exists to establish a shared source of truth before any call sites move
-// over to it. See PHASE 6 of the C4A task for context.
+// C5: "denied" is a first-class urgency, distinct from "exhausted". A denied
+// authorization is factually different from one that ran out of sessions,
+// even though both are top-priority alerts. Denied still overrides every
+// other tier exactly as the old "denied" -> "exhausted" mapping did — only
+// the label changed, not the precedence. See
+// server/getAuthAlertSummaries.urgencyParity.test.ts for the frozen pre-C5
+// reference behavior this intentionally diverges from.
 
-export type AuthUrgency = "exhausted" | "critical" | "warning" | "pending" | "ok";
+export type AuthUrgency = "exhausted" | "critical" | "warning" | "pending" | "ok" | "denied";
 
 export interface AuthorizationUrgencyInput {
   remaining: number;
@@ -40,14 +40,15 @@ function toMillis(value: number | string | Date): number {
   return new Date(value).getTime();
 }
 
-// Mirrors server/db.ts getAuthAlertSummaries exactly:
+// Mirrors server/db.ts getAuthAlertSummaries, with the C5 denied-urgency
+// change applied:
 //
 //   let urgency = "ok";
 //   if (sessionsRemaining === 0) urgency = "exhausted";
 //   else if (sessionsRemaining <= 2) urgency = "critical";
 //   else if (sessionsRemaining <= 3) urgency = "warning";
 //   if (authStatus === "pending" && urgency === "ok") urgency = "pending";
-//   if (authStatus === "denied") urgency = "exhausted";
+//   if (authStatus === "denied") urgency = "denied";
 //
 //   const expiresWithin7Days = authValidUntil !== null && authValidUntil > now && authValidUntil - now <= sevenDaysMs;
 //   const alreadyExpired = authValidUntil !== null && authValidUntil < now;
@@ -64,7 +65,9 @@ export function deriveAuthorizationUrgency(
   else if (remaining <= 3) urgency = "warning";
 
   if (authStatus === "pending" && urgency === "ok") urgency = "pending";
-  if (authStatus === "denied") urgency = "exhausted";
+  // Denied is top priority: it overrides every remaining-session tier above,
+  // exactly as the old denied -> exhausted mapping did.
+  if (authStatus === "denied") urgency = "denied";
 
   const nowMs = now.getTime();
   const authValidUntilMs = authValidUntil !== null ? toMillis(authValidUntil) : null;
