@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Clock, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
@@ -25,7 +25,6 @@ import { AuthAlertPanel } from '@/components/dashboard/AuthAlertPanel';
 import { AuthorizationOverview } from '@/components/dashboard/AuthorizationOverview';
 import { AuthorizationRecordsWorkspace } from '@/components/dashboard/AuthorizationRecordsWorkspace';
 import { ClaimsFollowUpPanel } from '@/components/dashboard/ClaimsFollowUpPanel';
-import { PatientAnalytics } from '@/components/dashboard/PatientAnalytics';
 import { PatientOverview } from '@/components/dashboard/PatientOverview';
 import { PatientRecordsWorkspace } from '@/components/dashboard/PatientRecordsWorkspace';
 import { DischargedPatientsWorkspace } from '@/components/dashboard/DischargedPatientsWorkspace';
@@ -33,6 +32,7 @@ import { DashboardShell } from '@/components/dashboard/DashboardShell';
 import type { NavSection } from '@/components/dashboard/DashboardSidebar';
 import { getPatientMetrics } from '@/lib/patientMetrics';
 import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
+import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import type { AuthUrgency } from '@shared/authUrgency';
 
 /**
@@ -843,33 +843,20 @@ export default function Dashboard() {
     [patients]
   );
 
-  // Clinic-wide metrics (approximate — based on active patient visits + patient count)
-  const clinicMetrics = useMemo(() => {
-    const totalPatients = filteredPatients.length;
-    // We only have full visit data for the active patient; show what we can
-    return {
-      totalPatients,
-      totalAuthorized: activeMetrics.totalAuthorized,
-      totalRemaining: activeMetrics.remaining,
-      totalCompleted: activeMetrics.completed,
-      utilizationRate: activeMetrics.totalAuthorized > 0
-        ? Math.round((activeMetrics.completed / activeMetrics.totalAuthorized) * 100)
-        : 0,
-    };
-  }, [filteredPatients, activeMetrics]);
-
-  const patientProgressData = useMemo(() =>
-    visits
-      .filter(v => v.sessionNumber && v.sessionsRemaining != null)
-      .map(v => ({ session: v.sessionNumber, remaining: v.sessionsRemaining }))
-      .slice(0, 12),
-    [visits]
-  );
-
-  const clinicStatusData = [
-    { name: 'Completed', value: clinicMetrics.totalCompleted, color: '#E8A93C' },
-    { name: 'Remaining', value: clinicMetrics.totalRemaining, color: '#1E3A5F' },
-  ];
+  // Dashboard KPI row — clinic-wide only, independent of selectedPatientId /
+  // activePatient / the Insurance & Claims Status UI filters. authAlerts and
+  // getFollowUpClaims are the same tRPC procedures Needs Attention already
+  // uses (queried here unfiltered, i.e. no insurance scope, for a true
+  // clinic-wide count); react-query dedupes the authAlerts call against
+  // AuthAlertPanel's own identical query below.
+  const { data: dashboardAuthAlerts = [] } = trpc.visits.authAlerts.useQuery();
+  const { data: dashboardFollowUpClaims = [] } = trpc.claims.getFollowUpClaims.useQuery({});
+  const dashboardKpis = useMemo(() => deriveDashboardKpis({
+    activePatientCount: activePatients.length,
+    authAlerts: dashboardAuthAlerts,
+    followUpClaimCount: dashboardFollowUpClaims.length,
+    completedPatientCount: overviewCompletedPatients.length,
+  }), [activePatients, dashboardAuthAlerts, dashboardFollowUpClaims, overviewCompletedPatients]);
 
   // ── Handlers ───────────────────────────────────────────────────────────────
 
@@ -3370,13 +3357,13 @@ export default function Dashboard() {
       {/* Main Content */}
       <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6 xl:space-y-8">
 
-        {/* KPI Cards */}
+        {/* KPI Cards — clinic-wide only; see dashboardKpis above */}
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           {[
-            { icon: <Users className="w-4 h-4 text-brand-blue" />, label: 'Total Patients', value: clinicMetrics.totalPatients, sub: 'Active patients', tone: 'navy' as const },
-            { icon: <CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />, label: 'Authorized Sessions', value: clinicMetrics.totalAuthorized, sub: 'Selected patient', tone: 'gold' as const },
-            { icon: <Clock className="w-4 h-4 text-brand-blue" />, label: 'Sessions Remaining', value: clinicMetrics.totalRemaining, sub: 'Selected patient', tone: 'navy' as const },
-            { icon: <AlertCircle className="w-4 h-4 text-destructive" />, label: 'Utilization Rate', value: `${clinicMetrics.utilizationRate}%`, sub: 'Selected patient', tone: 'destructive' as const },
+            { icon: <Users className="w-4 h-4 text-brand-blue" />, label: 'Active Patients', value: dashboardKpis.activePatients, sub: 'Currently active, all insurances', tone: 'navy' as const },
+            { icon: <AlertTriangle className="w-4 h-4 text-destructive" />, label: 'Authorization Attention', value: dashboardKpis.authorizationAttention, sub: 'Needs authorization action', tone: 'destructive' as const },
+            { icon: <AlertCircle className="w-4 h-4 text-brand-gold-dark" />, label: 'Claims Follow-Up', value: dashboardKpis.claimsFollowUp, sub: 'Unresolved, all insurances', tone: 'gold' as const },
+            { icon: <CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />, label: 'Completed Patients', value: dashboardKpis.completedPatients, sub: 'Sessions exhausted', tone: 'gold' as const },
           ].map(({ icon, label, value, sub, tone }) => (
             <MetricCard key={label} icon={icon} label={label} value={value} sub={sub} tone={tone} />
           ))}
@@ -3397,12 +3384,6 @@ export default function Dashboard() {
             </div>
           </div>
         </section>
-
-        {/* ─── Patient Analytics ──────────────────────────────────────────── */}
-        <div>
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-3">Patient Analytics</h2>
-          <PatientAnalytics patientProgressData={patientProgressData} clinicStatusData={clinicStatusData} />
-        </div>
       </div>
 
       {bulkUploadDialog}
