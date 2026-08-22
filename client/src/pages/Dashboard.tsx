@@ -22,6 +22,7 @@ import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { MetricCard } from '@/components/dashboard/MetricCard';
 import { FilterChips } from '@/components/dashboard/FilterChips';
 import { AuthAlertPanel } from '@/components/dashboard/AuthAlertPanel';
+import { AuthorizationOverview } from '@/components/dashboard/AuthorizationOverview';
 import { AuthorizationRecordsWorkspace } from '@/components/dashboard/AuthorizationRecordsWorkspace';
 import { ClaimsFollowUpPanel } from '@/components/dashboard/ClaimsFollowUpPanel';
 import { PatientAnalytics } from '@/components/dashboard/PatientAnalytics';
@@ -3276,10 +3277,10 @@ export default function Dashboard() {
   }
 
   // ── /authorizations (Overview) ──────────────────────────────────────────
-  // Landing route for the future overview (KPIs land in a later phase).
-  // C6B keeps this to a minimal foundation: brief explanation + links to the
-  // two child routes. The actionable AuthAlertPanel queue now lives only at
-  // /authorizations/attention.
+  // Read-only clinic-wide snapshot built on trpc.visits.authAlerts (C6E) —
+  // KPIs, a Needs Attention summary, and status distribution. Operational
+  // actions stay on /authorizations/attention; full lookup stays on
+  // /authorizations/records.
 
   if (activeSection === 'authorizations-overview') {
     return (
@@ -3292,29 +3293,7 @@ export default function Dashboard() {
         topbarSubtitle="Monitor authorization status and patient authorization needs."
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
-          <Card className="border-border shadow-sm rounded-xl">
-            <CardHeader>
-              <CardTitle className="text-brand-blue">Overview</CardTitle>
-              <CardDescription>
-                Track patients who need authorization follow-up and review past authorization records
-                from the sections below.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-wrap gap-3">
-              <Button
-                onClick={() => navigate('/authorizations/attention')}
-                className="bg-brand-blue text-white hover:bg-brand-blue-dark"
-              >
-                Needs Attention
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => navigate('/authorizations/records')}
-              >
-                Records
-              </Button>
-            </CardContent>
-          </Card>
+          <AuthorizationOverview onNavigate={navigate} />
         </div>
         {bulkUploadDialog}
       </DashboardShell>
