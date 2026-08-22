@@ -3286,8 +3286,10 @@ export default function Dashboard() {
   }
 
   // ── /authorizations (Overview) ──────────────────────────────────────────
-  // Still hosts the existing AuthAlertPanel queue for C6A — C6B relocates it
-  // to /authorizations/attention and replaces this with real overview content.
+  // Landing route for the future overview (KPIs land in a later phase).
+  // C6B keeps this to a minimal foundation: brief explanation + links to the
+  // two child routes. The actionable AuthAlertPanel queue now lives only at
+  // /authorizations/attention.
 
   if (activeSection === 'authorizations-overview') {
     return (
@@ -3297,10 +3299,32 @@ export default function Dashboard() {
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
         topbarTitle="Authorizations"
-        topbarSubtitle="Clinic-wide authorization alerts"
+        topbarSubtitle="Monitor authorization status and patient authorization needs."
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
-          <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
+          <Card className="border-border shadow-sm rounded-xl">
+            <CardHeader>
+              <CardTitle className="text-brand-blue">Overview</CardTitle>
+              <CardDescription>
+                Track patients who need authorization follow-up and review past authorization records
+                from the sections below.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-3">
+              <Button
+                onClick={() => navigate('/authorizations/attention')}
+                className="bg-brand-blue text-white hover:bg-brand-blue-dark"
+              >
+                Needs Attention
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => navigate('/authorizations/records')}
+              >
+                Records
+              </Button>
+            </CardContent>
+          </Card>
         </div>
         {bulkUploadDialog}
       </DashboardShell>
@@ -3308,7 +3332,9 @@ export default function Dashboard() {
   }
 
   // ── /authorizations/attention ───────────────────────────────────────────
-  // Placeholder only — C6B moves the AuthAlertPanel queue here.
+  // Dedicated full-width operational queue — the real AuthAlertPanel, moved
+  // here from /authorizations in C6B. Same component, same query, same
+  // callback as the Dashboard's own Needs Attention widget below.
 
   if (activeSection === 'authorizations-attention') {
     return (
@@ -3318,10 +3344,10 @@ export default function Dashboard() {
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
         topbarTitle="Needs Attention"
-        topbarSubtitle="Authorizations that require follow-up"
+        topbarSubtitle="Review patients requiring authorization action."
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
-          <AuthorizationsRoutePlaceholder message="Authorizations needing attention will appear here." />
+          <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
         </div>
         {bulkUploadDialog}
       </DashboardShell>
