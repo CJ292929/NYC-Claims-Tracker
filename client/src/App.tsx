@@ -36,20 +36,32 @@ function ProtectedRoute({ component: Component }: { component: React.ComponentTy
   return <Component />;
 }
 
-function Router() {
+/** Every path backed by the same Dashboard instance. Extracted so tests can
+ * verify route/component wiring without rendering the app. */
+export const DASHBOARD_ROUTE_PATHS = [
+  "/dashboard",
+  "/patients",
+  "/patients/records",
+  "/patients/discharged",
+  "/authorizations",
+  "/authorizations/attention",
+  "/authorizations/records",
+  "/visits",
+  "/claims",
+] as const;
+
+/** Stable component reference shared by every Dashboard-backed route, so cross-route
+ * navigation does not unmount/remount the Dashboard subtree. */
+const ProtectedDashboard = () => <ProtectedRoute component={Dashboard} />;
+
+export function Router() {
   return (
     <Switch>
       <Route path="/login" component={Login} />
       <Route path="/" component={() => <Redirect to="/dashboard" />} />
-      <Route path="/dashboard" component={() => <ProtectedRoute component={Dashboard} />} />
-      <Route path="/patients" component={() => <ProtectedRoute component={Dashboard} />} />
-      <Route path="/patients/records" component={() => <ProtectedRoute component={Dashboard} />} />
-      <Route path="/patients/discharged" component={() => <ProtectedRoute component={Dashboard} />} />
-      <Route path="/authorizations" component={() => <ProtectedRoute component={Dashboard} />} />
-      <Route path="/authorizations/attention" component={() => <ProtectedRoute component={Dashboard} />} />
-      <Route path="/authorizations/records" component={() => <ProtectedRoute component={Dashboard} />} />
-      <Route path="/visits" component={() => <ProtectedRoute component={Dashboard} />} />
-      <Route path="/claims" component={() => <ProtectedRoute component={Dashboard} />} />
+      {DASHBOARD_ROUTE_PATHS.map((path) => (
+        <Route key={path} path={path} component={ProtectedDashboard} />
+      ))}
       <Route path="/404" component={NotFound} />
       {/* Final fallback route */}
       <Route component={NotFound} />
