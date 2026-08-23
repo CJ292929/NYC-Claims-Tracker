@@ -14,3 +14,20 @@ export function formatCalendarDate(
   if (isNaN(dt.getTime())) return '—';
   return dt.toLocaleDateString('en-US', { ...options, timeZone: 'UTC' });
 }
+
+const TIMESTAMP_OPTIONS: Intl.DateTimeFormatOptions = {
+  month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+};
+
+/**
+ * Formats a true point-in-time value (e.g. last_login_at) in the viewer's
+ * local timezone — unlike formatCalendarDate, which is only for
+ * UTC-midnight-anchored calendar dates. Do not use this for authDate/
+ * dateOfService/etc; use formatCalendarDate for those instead.
+ */
+export function formatTimestamp(value: Date | string | number | null | undefined): string {
+  if (value === null || value === undefined || value === '') return '—';
+  const dt = value instanceof Date ? value : new Date(value);
+  if (isNaN(dt.getTime())) return '—';
+  return dt.toLocaleString('en-US', TIMESTAMP_OPTIONS);
+}

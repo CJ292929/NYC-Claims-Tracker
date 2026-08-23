@@ -95,13 +95,17 @@ describe("server/routers.ts", () => {
   // S2 added a second read site (clinic.changePassword's current-password
   // check) and a write site (the new-password hash passed into
   // changeClinicUserPassword), so the legitimate count grew from S1's single
-  // login-time bcrypt.compare. What must still hold is the property this test
-  // guards: passwordHash never appears inside a value returned to a client —
-  // see clinicSession.security.test.ts for a runtime check of that.
-  it("E: passwordHash is referenced only in bcrypt comparisons and the rehash write, never returned to a client", () => {
+  // login-time bcrypt.compare. S3 added toSafeStaff, which destructures
+  // passwordHash out of every staff.* response (create/update/resetPassword/
+  // archive/reactivate/list/get) precisely so it's never returned — each of
+  // those call sites references the identifier once. What must still hold is
+  // the property this test guards: passwordHash never appears inside a value
+  // returned to a client — see clinicSession.security.test.ts for a runtime
+  // check of that.
+  it("E: passwordHash is referenced only in bcrypt comparisons, the rehash write, and toSafeStaff's discard destructuring — never returned to a client", () => {
     const routersSrc = readFileSync(join(__dirname, "routers.ts"), "utf-8");
     const occurrences = routersSrc.match(/passwordHash/g) ?? [];
-    expect(occurrences.length).toBe(4);
+    expect(occurrences.length).toBe(11);
     expect(routersSrc).not.toMatch(/return\s*\{[^}]*passwordHash/s);
   });
 });

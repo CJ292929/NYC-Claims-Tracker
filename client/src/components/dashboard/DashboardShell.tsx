@@ -8,6 +8,7 @@ export function DashboardShell({
   onNavigate,
   onSignOut,
   signingOut,
+  canManageStaff = false,
   topbarTitle,
   topbarSubtitle,
   topbarActions,
@@ -17,6 +18,7 @@ export function DashboardShell({
   onNavigate: (section: NavSection) => void;
   onSignOut: () => void;
   signingOut?: boolean;
+  canManageStaff?: boolean;
   topbarTitle: string;
   topbarSubtitle?: string;
   topbarActions?: ReactNode;
@@ -38,6 +40,7 @@ export function DashboardShell({
           onNavigate={handleNavigate}
           onSignOut={onSignOut}
           signingOut={signingOut}
+          canManageStaff={canManageStaff}
         />
       </aside>
 

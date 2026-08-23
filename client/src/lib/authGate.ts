@@ -3,7 +3,7 @@
  * client bundle. See server/routers.ts auth.me for the authoritative shape. */
 export type AuthMeUser =
   | { authType: "owner"; role: "user" | "admin" }
-  | { authType: "clinic"; mustChangePassword: boolean };
+  | { authType: "clinic"; role: "admin" | "staff"; mustChangePassword: boolean };
 
 /**
  * True only for a clinic staff session with must_change_password=true.
@@ -12,4 +12,15 @@ export type AuthMeUser =
  */
 export function isForcedPasswordChange(user: AuthMeUser | null | undefined): boolean {
   return !!user && user.authType === "clinic" && user.mustChangePassword;
+}
+
+/**
+ * True for owner OAuth admins and clinic admins alike — mirrors the server's
+ * adminOrOwnerProcedure gate (see server/_core/trpc.ts) so the Staff
+ * Management nav item/route only ever shows for sessions that can actually
+ * reach the staff.* endpoints. Client-side gating is UX only; the real
+ * enforcement is server-side.
+ */
+export function canManageStaff(user: AuthMeUser | null | undefined): boolean {
+  return !!user && user.role === "admin";
 }
