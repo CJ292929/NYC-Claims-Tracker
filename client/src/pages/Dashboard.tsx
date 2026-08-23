@@ -18,6 +18,7 @@ import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch } from '@/lib/nameMatch';
 import { matchesPatientFilters } from '@/lib/patientFilters';
 import { routeToNavSection, navSectionToRoute } from '@/lib/navSection';
+import { canManageStaff as canManageStaffAuthGate } from '@/lib/authGate';
 import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { MetricCard } from '@/components/dashboard/MetricCard';
 import { FilterChips } from '@/components/dashboard/FilterChips';
@@ -677,6 +678,11 @@ export default function Dashboard() {
   });
 
   const logoutMutation = trpc.auth.logout.useMutation();
+
+  // Gates the sidebar's Management/Staff Management group — mirrors the
+  // server's adminOrOwnerProcedure (owner OAuth admins + clinic admins).
+  const { data: authUser } = trpc.auth.me.useQuery();
+  const canManageStaff = canManageStaffAuthGate(authUser);
 
   const handleSignOut = () => {
     logoutMutation.mutate(undefined, {
@@ -1608,6 +1614,7 @@ export default function Dashboard() {
           onNavigate={handleNavigate}
           onSignOut={handleSignOut}
           signingOut={logoutMutation.isPending}
+          canManageStaff={canManageStaff}
           topbarTitle={activeSection === 'visits' ? 'Visits' : 'Claims'}
           topbarSubtitle="No patient selected"
         >
@@ -1635,6 +1642,7 @@ export default function Dashboard() {
         onNavigate={handleNavigate}
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
+        canManageStaff={canManageStaff}
         topbarTitle={activePatient.name}
         topbarSubtitle={`Insurance: ${activePatient.insurance}`}
         topbarActions={
@@ -3179,6 +3187,7 @@ export default function Dashboard() {
         onNavigate={handleNavigate}
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
+        canManageStaff={canManageStaff}
         topbarTitle="Patients"
         topbarSubtitle="Current state of the patient population"
       >
@@ -3208,6 +3217,7 @@ export default function Dashboard() {
         onNavigate={handleNavigate}
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
+        canManageStaff={canManageStaff}
         topbarTitle="Patient Records"
         topbarSubtitle="Find and select a patient to view their information"
         topbarActions={addPatientAction}
@@ -3257,6 +3267,7 @@ export default function Dashboard() {
         onNavigate={handleNavigate}
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
+        canManageStaff={canManageStaff}
         topbarTitle="Discharged Patients"
         topbarSubtitle="Review patients no longer in active care"
       >
@@ -3306,6 +3317,7 @@ export default function Dashboard() {
         onNavigate={handleNavigate}
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
+        canManageStaff={canManageStaff}
         topbarTitle="Authorizations"
         topbarSubtitle="Monitor authorization status and patient authorization needs."
       >
@@ -3329,6 +3341,7 @@ export default function Dashboard() {
         onNavigate={handleNavigate}
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
+        canManageStaff={canManageStaff}
         topbarTitle="Needs Attention"
         topbarSubtitle="Review patients requiring authorization action."
       >
@@ -3353,6 +3366,7 @@ export default function Dashboard() {
         onNavigate={handleNavigate}
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
+        canManageStaff={canManageStaff}
         topbarTitle="Authorization Records"
         topbarSubtitle="Review patient authorization status and records."
       >
@@ -3372,6 +3386,7 @@ export default function Dashboard() {
       onNavigate={handleNavigate}
       onSignOut={handleSignOut}
       signingOut={logoutMutation.isPending}
+      canManageStaff={canManageStaff}
       topbarTitle="Dashboard"
       topbarSubtitle="Authorization & Claims Overview"
       topbarActions={

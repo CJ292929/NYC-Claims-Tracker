@@ -713,6 +713,182 @@ export async function changeClinicUserPassword(params: {
   return data ? toClinicUser(data) : undefined;
 }
 
+// ─── Staff management (S3) ─────────────────────────────────────────────────
+// CRUD for clinic_users driven by the owner/admin Staff Management UI. Every
+// mutation that affects auth (password, role, archive status) bumps
+// token_version so already-issued sessions for that account are invalidated
+// on their next request (see sdk.authenticateClinicSession) — profile-only
+// fields (name/email/department) don't touch it.
+
+export async function listClinicUsers(): Promise<ClinicUser[]> {
+  const { data, error } = await supabase
+    .from("clinic_users")
+    .select("*")
+    .order("name", { ascending: true });
+
+  if (error) {
+    console.error("[Supabase] listClinicUsers:", error);
+    return [];
+  }
+  return (data ?? []).map(toClinicUser);
+}
+
+export async function createClinicUser(data: {
+  username: string;
+  passwordHash: string;
+  name: string;
+  email: string | null;
+  department: string | null;
+  role: "admin" | "staff";
+  status: "active" | "archived";
+}): Promise<ClinicUser> {
+  const { data: row, error } = await supabase
+    .from("clinic_users")
+    .insert({
+      username: data.username,
+      password_hash: data.passwordHash,
+      name: data.name,
+      email: data.email,
+      department: data.department,
+      role: data.role,
+      status: data.status,
+      must_change_password: true,
+      token_version: 0,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error("[Supabase] createClinicUser:", error);
+    throw error;
+  }
+  return toClinicUser(row);
+}
+
+/** Name/email/department only — these never affect auth, so no token_version
+ * bump and no optimistic-concurrency guard is needed. */
+export async function updateClinicUserProfile(
+  id: string,
+  data: { name?: string; email?: string | null; department?: string | null }
+): Promise<ClinicUser | undefined> {
+  const update: Record<string, unknown> = {};
+  if (data.name !== undefined) update.name = data.name;
+  if (data.email !== undefined) update.email = data.email;
+  if (data.department !== undefined) update.department = data.department;
+
+  if (Object.keys(update).length === 0) {
+    return getClinicUserById(id);
+  }
+
+  const { data: row, error } = await supabase
+    .from("clinic_users")
+    .update(update)
+    .eq("id", id)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] updateClinicUserProfile:", error);
+    throw error;
+  }
+  return row ? toClinicUser(row) : undefined;
+}
+
+/** Role changes a session's effective permissions, so token_version is bumped
+ * (CAS-guarded, same pattern as changeClinicUserPassword) to invalidate any
+ * already-issued session carrying the stale role. */
+export async function updateClinicUserRole(params: {
+  id: string;
+  role: "admin" | "staff";
+  expectedTokenVersion: number;
+}): Promise<ClinicUser | undefined> {
+  const { data, error } = await supabase
+    .from("clinic_users")
+    .update({ role: params.role, token_version: params.expectedTokenVersion + 1 })
+    .eq("id", params.id)
+    .eq("token_version", params.expectedTokenVersion)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] updateClinicUserRole:", error);
+    throw error;
+  }
+  return data ? toClinicUser(data) : undefined;
+}
+
+/** Admin-initiated "Reset Login": unlike changeClinicUserPassword (self-service,
+ * clears must_change_password), this always sets must_change_password=true so
+ * the temporary password forces a change on next login. */
+export async function adminResetClinicUserPassword(params: {
+  id: string;
+  passwordHash: string;
+  expectedTokenVersion: number;
+}): Promise<ClinicUser | undefined> {
+  const { data, error } = await supabase
+    .from("clinic_users")
+    .update({
+      password_hash: params.passwordHash,
+      must_change_password: true,
+      token_version: params.expectedTokenVersion + 1,
+    })
+    .eq("id", params.id)
+    .eq("token_version", params.expectedTokenVersion)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] adminResetClinicUserPassword:", error);
+    throw error;
+  }
+  return data ? toClinicUser(data) : undefined;
+}
+
+/** Soft-delete: status -> archived, stamps archived_at, and bumps
+ * token_version so any session already issued for this account is rejected
+ * on its very next request. The row itself is never removed. */
+export async function archiveClinicUser(params: {
+  id: string;
+  expectedTokenVersion: number;
+}): Promise<ClinicUser | undefined> {
+  const { data, error } = await supabase
+    .from("clinic_users")
+    .update({
+      status: "archived",
+      archived_at: new Date().toISOString(),
+      token_version: params.expectedTokenVersion + 1,
+    })
+    .eq("id", params.id)
+    .eq("token_version", params.expectedTokenVersion)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] archiveClinicUser:", error);
+    throw error;
+  }
+  return data ? toClinicUser(data) : undefined;
+}
+
+/** Reverses archive. No token_version bump — an archived account has no
+ * valid session left to invalidate (archiving already bumped it), and no
+ * password reset — a reactivated account's existing password stays in
+ * effect unless an admin explicitly runs Reset Login afterward. */
+export async function reactivateClinicUser(id: string): Promise<ClinicUser | undefined> {
+  const { data, error } = await supabase
+    .from("clinic_users")
+    .update({ status: "active", archived_at: null })
+    .eq("id", id)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] reactivateClinicUser:", error);
+    throw error;
+  }
+  return data ? toClinicUser(data) : undefined;
+}
+
 // ─── Claims follow-up classification ──────────────────────────────────────────
 // A claim needing staff attention falls into one of 7 mutually-exclusive
 // urgency buckets. Ranked 1 (most urgent) → 7 (least urgent) per product spec.

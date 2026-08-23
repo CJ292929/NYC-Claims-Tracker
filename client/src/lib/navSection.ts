@@ -12,6 +12,7 @@ export function routeToNavSection(location: string): NavSection {
     case '/authorizations/records': return 'authorizations-records';
     case '/visits': return 'visits';
     case '/claims': return 'claims';
+    case '/staff': return 'staff';
     default: return 'dashboard';
   }
 }
@@ -31,5 +32,6 @@ export function navSectionToRoute(section: NavSection): string | null {
     case 'visits': return '/visits';
     case 'claims': return '/claims';
     case 'bulk-upload': return null;
+    case 'staff': return '/staff';
   }
 }
