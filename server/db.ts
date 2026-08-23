@@ -650,6 +650,69 @@ export async function getClinicUserByUsername(username: string): Promise<ClinicU
   return data ? toClinicUser(data) : undefined;
 }
 
+/** Looked up on every clinic-authenticated request (see sdk.authenticateClinicSession)
+ * so archived status and stale token_version reject already-issued sessions. */
+export async function getClinicUserById(id: string): Promise<ClinicUser | undefined> {
+  const { data, error } = await supabase
+    .from("clinic_users")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] getClinicUserById:", error);
+    return undefined;
+  }
+  return data ? toClinicUser(data) : undefined;
+}
+
+/** Best-effort audit column — a failed write here must not block a successful login. */
+export async function touchClinicUserLastLogin(id: string): Promise<void> {
+  const { error } = await supabase
+    .from("clinic_users")
+    .update({ last_login_at: new Date().toISOString() })
+    .eq("id", id);
+
+  if (error) {
+    console.error("[Supabase] touchClinicUserLastLogin:", error);
+  }
+}
+
+/**
+ * Rehashes the password, clears must_change_password, and increments
+ * token_version (invalidating every previously issued session for this
+ * staff account) in a single UPDATE — atomic for that one row.
+ *
+ * The token_version bump is optimistic-concurrency guarded: the WHERE clause
+ * requires token_version to still equal `expectedTokenVersion`, so a
+ * concurrent password change for the same account can't silently clobber
+ * this one (PostgREST has no multi-statement transaction here, so this
+ * compare-and-swap is the atomicity boundary — see S2 report).
+ */
+export async function changeClinicUserPassword(params: {
+  id: string;
+  passwordHash: string;
+  expectedTokenVersion: number;
+}): Promise<ClinicUser | undefined> {
+  const { data, error } = await supabase
+    .from("clinic_users")
+    .update({
+      password_hash: params.passwordHash,
+      must_change_password: false,
+      token_version: params.expectedTokenVersion + 1,
+    })
+    .eq("id", params.id)
+    .eq("token_version", params.expectedTokenVersion)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] changeClinicUserPassword:", error);
+    throw error;
+  }
+  return data ? toClinicUser(data) : undefined;
+}
+
 // ─── Claims follow-up classification ──────────────────────────────────────────
 // A claim needing staff attention falls into one of 7 mutually-exclusive
 // urgency buckets. Ranked 1 (most urgent) → 7 (least urgent) per product spec.
