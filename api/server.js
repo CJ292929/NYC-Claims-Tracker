@@ -157,6 +157,7 @@ __export(db_exports, {
   aggregateClaimStatusCounts: () => aggregateClaimStatusCounts,
   approveAndCreateNewBatch: () => approveAndCreateNewBatch,
   bulkCreateVisitRecords: () => bulkCreateVisitRecords,
+  changeClinicUserPassword: () => changeClinicUserPassword,
   classifyClaimFollowUp: () => classifyClaimFollowUp,
   createClaimRecord: () => createClaimRecord,
   createPatient: () => createPatient,
@@ -168,6 +169,7 @@ __export(db_exports, {
   getAllPatients: () => getAllPatients,
   getAuthAlertSummaries: () => getAuthAlertSummaries,
   getClaimsByPatientAndPeriod: () => getClaimsByPatientAndPeriod,
+  getClinicUserById: () => getClinicUserById,
   getClinicUserByUsername: () => getClinicUserByUsername,
   getCompletedPatients: () => getCompletedPatients,
   getLatestVisitIdForPatient: () => getLatestVisitIdForPatient,
@@ -177,6 +179,7 @@ __export(db_exports, {
   getVisitsByPatientId: () => getVisitsByPatientId,
   setPatientActive: () => setPatientActive,
   sortByFollowUpUrgency: () => sortByFollowUpUrgency,
+  touchClinicUserLastLogin: () => touchClinicUserLastLogin,
   updateClaimRecord: () => updateClaimRecord,
   updatePatient: () => updatePatient,
   updateVisitRecord: () => updateVisitRecord,
@@ -597,6 +600,32 @@ async function getClinicUserByUsername(username) {
   }
   return data ? toClinicUser(data) : void 0;
 }
+async function getClinicUserById(id) {
+  const { data, error } = await supabase.from("clinic_users").select("*").eq("id", id).maybeSingle();
+  if (error) {
+    console.error("[Supabase] getClinicUserById:", error);
+    return void 0;
+  }
+  return data ? toClinicUser(data) : void 0;
+}
+async function touchClinicUserLastLogin(id) {
+  const { error } = await supabase.from("clinic_users").update({ last_login_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", id);
+  if (error) {
+    console.error("[Supabase] touchClinicUserLastLogin:", error);
+  }
+}
+async function changeClinicUserPassword(params) {
+  const { data, error } = await supabase.from("clinic_users").update({
+    password_hash: params.passwordHash,
+    must_change_password: false,
+    token_version: params.expectedTokenVersion + 1
+  }).eq("id", params.id).eq("token_version", params.expectedTokenVersion).select().maybeSingle();
+  if (error) {
+    console.error("[Supabase] changeClinicUserPassword:", error);
+    throw error;
+  }
+  return data ? toClinicUser(data) : void 0;
+}
 function daysSince(dateStr, now) {
   if (!dateStr) return null;
   const d = new Date(dateStr);
@@ -914,6 +943,8 @@ var ONE_YEAR_MS = 1e3 * 60 * 60 * 24 * 365;
 var AXIOS_TIMEOUT_MS = 3e4;
 var UNAUTHED_ERR_MSG = "Please login (10001)";
 var NOT_ADMIN_ERR_MSG = "You do not have required permission (10002)";
+var PASSWORD_CHANGE_REQUIRED_ERR_MSG = "Password change required (10003)";
+var MIN_CLINIC_PASSWORD_LENGTH = 8;
 
 // server/_core/oauth.ts
 init_db();
@@ -1080,11 +1111,32 @@ var SDKServer = class {
     const expiresInMs = options.expiresInMs ?? ONE_YEAR_MS;
     const expirationSeconds = Math.floor((issuedAt + expiresInMs) / 1e3);
     const secretKey = this.getSessionSecret();
-    return new SignJWT({
+    const claims = {
       openId: payload.openId,
       appId: payload.appId,
       name: payload.name
-    }).setProtectedHeader({ alg: "HS256", typ: "JWT" }).setExpirationTime(expirationSeconds).sign(secretKey);
+    };
+    if (payload.authType === "clinic") {
+      claims.authType = payload.authType;
+      claims.clinicUserId = payload.clinicUserId;
+      claims.tokenVersion = payload.tokenVersion;
+    }
+    return new SignJWT(claims).setProtectedHeader({ alg: "HS256", typ: "JWT" }).setExpirationTime(expirationSeconds).sign(secretKey);
+  }
+  /** Create a clinic staff session carrying the staff identity + token_version
+   * needed to enforce archived/stale-session checks on every request. */
+  async createClinicSessionToken(params, options = {}) {
+    return this.signSession(
+      {
+        openId: `clinic_${params.username}`,
+        appId: ENV.appId,
+        name: params.username,
+        authType: "clinic",
+        clinicUserId: params.clinicUserId,
+        tokenVersion: params.tokenVersion
+      },
+      options
+    );
   }
   async verifySession(cookieValue) {
     if (!cookieValue) {
@@ -1096,16 +1148,19 @@ var SDKServer = class {
       const { payload } = await jwtVerify(cookieValue, secretKey, {
         algorithms: ["HS256"]
       });
-      const { openId, appId, name } = payload;
+      const { openId, appId, name, authType, clinicUserId, tokenVersion } = payload;
       if (!isNonEmptyString(openId) || !isNonEmptyString(appId) || !isNonEmptyString(name)) {
         console.warn("[Auth] Session payload missing required fields");
         return null;
       }
-      return {
-        openId,
-        appId,
-        name
-      };
+      if (authType === "clinic") {
+        if (!isNonEmptyString(clinicUserId) || typeof tokenVersion !== "number") {
+          console.warn("[Auth] Clinic session payload missing required fields");
+          return null;
+        }
+        return { openId, appId, name, authType: "clinic", clinicUserId, tokenVersion };
+      }
+      return { openId, appId, name };
     } catch (error) {
       console.warn("[Auth] Session verification failed", String(error));
       return null;
@@ -1136,6 +1191,9 @@ var SDKServer = class {
     const session = await this.verifySession(sessionCookie);
     if (!session) {
       throw ForbiddenError("Invalid session cookie");
+    }
+    if (session.authType === "clinic") {
+      return this.authenticateClinicSession(session);
     }
     if (session.openId.startsWith(CRON_OPEN_ID_PREFIX)) {
       const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
@@ -1172,6 +1230,51 @@ var SDKServer = class {
       lastSignedIn: signedInAt
     });
     return user;
+  }
+  /** Resolves a clinic staff session against the current clinic_users row on
+   * every request — this is what makes archived accounts and stale
+   * token_version reject already-issued sessions, not just new logins. */
+  async authenticateClinicSession(session) {
+    const clinicUser = await getClinicUserById(session.clinicUserId);
+    if (!clinicUser) {
+      throw ForbiddenError("Clinic session invalid");
+    }
+    if (clinicUser.status !== "active") {
+      throw ForbiddenError("Account is not active");
+    }
+    if (clinicUser.tokenVersion !== session.tokenVersion) {
+      throw ForbiddenError("Session expired, please sign in again");
+    }
+    const signedInAt = /* @__PURE__ */ new Date();
+    const syntheticOpenId = session.openId;
+    let user = await getUserByOpenId(syntheticOpenId);
+    if (!user) {
+      await upsertUser({
+        openId: syntheticOpenId,
+        name: clinicUser.username,
+        email: null,
+        loginMethod: "password",
+        lastSignedIn: signedInAt
+      });
+      user = await getUserByOpenId(syntheticOpenId);
+    }
+    if (!user) {
+      throw ForbiddenError("User not found");
+    }
+    await upsertUser({
+      openId: user.openId,
+      lastSignedIn: signedInAt
+    });
+    const clinicStaffInfo = {
+      clinicUserId: clinicUser.id,
+      username: clinicUser.username,
+      name: clinicUser.name,
+      email: clinicUser.email,
+      department: clinicUser.department,
+      role: clinicUser.role,
+      mustChangePassword: clinicUser.mustChangePassword
+    };
+    return { ...user, clinicUser: clinicStaffInfo };
   }
 };
 var CRON_OPEN_ID_PREFIX = "cron_";
@@ -3237,20 +3340,20 @@ var requireUser = t.middleware(async (opts) => {
   });
 });
 var protectedProcedure = t.procedure.use(requireUser);
-var adminProcedure = t.procedure.use(
-  t.middleware(async (opts) => {
-    const { ctx, next } = opts;
-    if (!ctx.user || ctx.user.role !== "admin") {
-      throw new TRPCError2({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
-    }
-    return next({
-      ctx: {
-        ...ctx,
-        user: ctx.user
-      }
-    });
-  })
-);
+var normalProtectedProcedure = protectedProcedure.use(async (opts) => {
+  const { ctx, next } = opts;
+  if (ctx.user.clinicUser?.mustChangePassword) {
+    throw new TRPCError2({ code: "FORBIDDEN", message: PASSWORD_CHANGE_REQUIRED_ERR_MSG });
+  }
+  return next({ ctx });
+});
+var adminProcedure = normalProtectedProcedure.use(async (opts) => {
+  const { ctx, next } = opts;
+  if (ctx.user.role !== "admin") {
+    throw new TRPCError2({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
+  }
+  return next({ ctx });
+});
 
 // server/_core/systemRouter.ts
 var systemRouter = router({
@@ -3359,7 +3462,33 @@ function parseDate2(s) {
 var appRouter = router({
   system: systemRouter,
   auth: router({
-    me: publicProcedure.query((opts) => opts.ctx.user),
+    // Discriminated on authType so the client can gate on clinic-only concerns
+    // (mustChangePassword) without ever seeing passwordHash or token_version.
+    me: publicProcedure.query(({ ctx }) => {
+      const user = ctx.user;
+      if (!user) return null;
+      if (user.clinicUser) {
+        const staff = user.clinicUser;
+        return {
+          authType: "clinic",
+          id: user.id,
+          clinicUserId: staff.clinicUserId,
+          username: staff.username,
+          name: staff.name,
+          email: staff.email,
+          department: staff.department,
+          role: staff.role,
+          mustChangePassword: staff.mustChangePassword
+        };
+      }
+      return {
+        authType: "owner",
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+      };
+    }),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
@@ -3388,14 +3517,18 @@ var appRouter = router({
         throw new TRPCError3({ code: "UNAUTHORIZED", message: "Invalid username or password" });
       }
       clearFailedAttempts(rateLimitKey, ip);
-      const syntheticOpenId = `clinic_${clinicUser.username}`;
-      const token = await sdk.createSessionToken(syntheticOpenId, {
-        name: clinicUser.username,
-        expiresInMs: ONE_YEAR_MS
+      if (clinicUser.status !== "active") {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "This account has been archived. Contact your administrator." });
+      }
+      await touchClinicUserLastLogin(clinicUser.id);
+      const token = await sdk.createClinicSessionToken({
+        clinicUserId: clinicUser.id,
+        username: clinicUser.username,
+        tokenVersion: clinicUser.tokenVersion
       });
       const { upsertUser: upsertUser2 } = await Promise.resolve().then(() => (init_db(), db_exports));
       await upsertUser2({
-        openId: syntheticOpenId,
+        openId: `clinic_${clinicUser.username}`,
         name: clinicUser.username,
         email: null,
         loginMethod: "password",
@@ -3407,19 +3540,81 @@ var appRouter = router({
         maxAge: ONE_YEAR_MS
       });
       return { success: true, username: clinicUser.username };
+    }),
+    // Operates only on the currently authenticated clinic user — identity is
+    // derived from the session, never accepted from the client.
+    // Stays on protectedProcedure (not normalProtectedProcedure) — a clinic
+    // user with mustChangePassword=true must still be able to change it.
+    changePassword: protectedProcedure.input(
+      z2.object({
+        currentPassword: z2.string().min(1),
+        newPassword: z2.string().min(MIN_CLINIC_PASSWORD_LENGTH)
+      })
+    ).mutation(async ({ ctx, input }) => {
+      const staff = ctx.user.clinicUser;
+      if (!staff) {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "Not a clinic staff session" });
+      }
+      const ip = getClientIp(ctx.req);
+      const rateLimitKey = normalizeUsername(staff.username);
+      if (isRateLimited(rateLimitKey, ip)) {
+        throw new TRPCError3({
+          code: "TOO_MANY_REQUESTS",
+          message: "Too many attempts. Please try again later."
+        });
+      }
+      const clinicUser = await getClinicUserById(staff.clinicUserId);
+      if (!clinicUser || clinicUser.status !== "active") {
+        throw new TRPCError3({ code: "UNAUTHORIZED", message: "Session is no longer valid" });
+      }
+      const validCurrent = await bcrypt.compare(input.currentPassword, clinicUser.passwordHash);
+      if (!validCurrent) {
+        recordFailedAttempt(rateLimitKey, ip);
+        throw new TRPCError3({ code: "UNAUTHORIZED", message: "Current password is incorrect" });
+      }
+      clearFailedAttempts(rateLimitKey, ip);
+      if (input.newPassword === input.currentPassword) {
+        throw new TRPCError3({
+          code: "BAD_REQUEST",
+          message: "New password must be different from your current password"
+        });
+      }
+      const newPasswordHash = await bcrypt.hash(input.newPassword, 10);
+      const updated = await changeClinicUserPassword({
+        id: clinicUser.id,
+        passwordHash: newPasswordHash,
+        expectedTokenVersion: clinicUser.tokenVersion
+      });
+      if (!updated) {
+        throw new TRPCError3({
+          code: "CONFLICT",
+          message: "Your session changed during this request. Please sign in again."
+        });
+      }
+      const token = await sdk.createClinicSessionToken({
+        clinicUserId: updated.id,
+        username: updated.username,
+        tokenVersion: updated.tokenVersion
+      });
+      const cookieOptions = getSessionCookieOptions(ctx.req);
+      ctx.res.cookie(COOKIE_NAME, token, {
+        ...cookieOptions,
+        maxAge: ONE_YEAR_MS
+      });
+      return { success: true };
     })
   }),
   // ── Patients ────────────────────────────────────────────────────────────────
   patients: router({
-    list: protectedProcedure.query(async () => {
+    list: normalProtectedProcedure.query(async () => {
       return getAllPatients();
     }),
-    get: protectedProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
+    get: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
       const patient = await getPatientById(input.id);
       if (!patient) throw new TRPCError3({ code: "NOT_FOUND", message: "Patient not found" });
       return patient;
     }),
-    create: protectedProcedure.input(
+    create: normalProtectedProcedure.input(
       z2.object({
         name: z2.string().min(1),
         insurance: z2.string().default(""),
@@ -3436,7 +3631,7 @@ var appRouter = router({
       });
       return { id };
     }),
-    update: protectedProcedure.input(
+    update: normalProtectedProcedure.input(
       z2.object({
         id: z2.string().uuid(),
         name: z2.string().min(1).optional(),
@@ -3455,11 +3650,11 @@ var appRouter = router({
       });
       return { success: true };
     }),
-    delete: protectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
+    delete: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
       await deletePatient(input.id);
       return { success: true };
     }),
-    setActive: protectedProcedure.input(z2.object({
+    setActive: normalProtectedProcedure.input(z2.object({
       id: z2.string().uuid(),
       isActive: z2.boolean(),
       dischargeDate: z2.number().nullable().optional(),
@@ -3471,10 +3666,10 @@ var appRouter = router({
   }),
   // ── Visit Records ────────────────────────────────────────────────────────────
   visits: router({
-    listByPatient: protectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).query(async ({ input }) => {
+    listByPatient: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).query(async ({ input }) => {
       return getVisitsByPatientId(input.patientId);
     }),
-    create: protectedProcedure.input(visitRecordInput.extend({ patientId: z2.string().uuid() })).mutation(async ({ input }) => {
+    create: normalProtectedProcedure.input(visitRecordInput.extend({ patientId: z2.string().uuid() })).mutation(async ({ input }) => {
       const { patientId, dateOfService, dateAshSubmitted, ...rest } = input;
       const id = await createVisitRecord({
         patientId,
@@ -3484,7 +3679,7 @@ var appRouter = router({
       });
       return { id };
     }),
-    update: protectedProcedure.input(visitRecordInput.extend({ id: z2.string().uuid() })).mutation(async ({ input }) => {
+    update: normalProtectedProcedure.input(visitRecordInput.extend({ id: z2.string().uuid() })).mutation(async ({ input }) => {
       const { id, dateOfService, dateAshSubmitted, ...rest } = input;
       await updateVisitRecord(id, {
         ...rest,
@@ -3493,7 +3688,7 @@ var appRouter = router({
       });
       return { success: true };
     }),
-    bulkCreate: protectedProcedure.input(
+    bulkCreate: normalProtectedProcedure.input(
       z2.object({
         patientId: z2.string().uuid(),
         records: z2.array(visitRecordInput)
@@ -3514,11 +3709,11 @@ var appRouter = router({
       return { success: true };
     }),
     // Returns urgency summaries for ALL patients — used by the homepage alert panel
-    authAlerts: protectedProcedure.query(async () => {
+    authAlerts: normalProtectedProcedure.query(async () => {
       return getAuthAlertSummaries();
     }),
     // Approves a pending authorization and creates a new batch of visit records
-    approveAuthorization: protectedProcedure.input(z2.object({
+    approveAuthorization: normalProtectedProcedure.input(z2.object({
       patientId: z2.string().uuid(),
       sessionsAuthorized: z2.number().min(1).max(200),
       authDate: z2.string().nullable().optional(),
@@ -3539,12 +3734,12 @@ var appRouter = router({
       return { success: true, newVisitCount: newVisitIds.length };
     }),
     // Returns IDs of patients whose sessions are fully completed (0 remaining + all dated)
-    completedPatientIds: protectedProcedure.query(async () => {
+    completedPatientIds: normalProtectedProcedure.query(async () => {
       return getCompletedPatients();
     }),
     // Sets the active-period visit row (same period getAuthAlertSummaries is
     // showing) to authStatus=pending + today's dateAshSubmitted
-    markAsRequested: protectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).mutation(async ({ input }) => {
+    markAsRequested: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).mutation(async ({ input }) => {
       const visitId = await getMarkAsRequestedTargetVisitId(input.patientId);
       if (!visitId) throw new TRPCError3({ code: "NOT_FOUND", message: "No visit records found for this patient" });
       const today = /* @__PURE__ */ new Date();
@@ -3557,10 +3752,10 @@ var appRouter = router({
     })
   }),
   claims: router({
-    getByPatientAndPeriod: protectedProcedure.input(z2.object({ patientId: z2.string().uuid(), authPeriod: z2.number() })).query(async ({ input }) => {
+    getByPatientAndPeriod: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid(), authPeriod: z2.number() })).query(async ({ input }) => {
       return await getClaimsByPatientAndPeriod(input.patientId, input.authPeriod);
     }),
-    create: protectedProcedure.input(z2.object({
+    create: normalProtectedProcedure.input(z2.object({
       patientId: z2.string().uuid(),
       authPeriod: z2.number(),
       placeOfService: z2.string().nullable().optional(),
@@ -3616,7 +3811,7 @@ var appRouter = router({
       });
       return { success: true, claimId };
     }),
-    update: protectedProcedure.input(z2.object({
+    update: normalProtectedProcedure.input(z2.object({
       id: z2.string().uuid(),
       placeOfService: z2.string().nullable().optional(),
       dateOfService: z2.string().nullable().optional(),
@@ -3674,11 +3869,11 @@ var appRouter = router({
       });
       return { success: true };
     }),
-    delete: protectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
+    delete: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
       await deleteClaimRecord(input.id);
       return { success: true };
     }),
-    upsert: protectedProcedure.input(z2.object({
+    upsert: normalProtectedProcedure.input(z2.object({
       patientId: z2.string().uuid(),
       authPeriod: z2.number(),
       placeOfService: z2.string().nullable().optional(),
@@ -3739,7 +3934,7 @@ var appRouter = router({
      * Matches patient names (case-insensitive) against dashboard patients,
      * finds each patient's latest auth period, and saves all their claims.
      */
-    bulkImportFromEOB: protectedProcedure.input(z2.object({
+    bulkImportFromEOB: normalProtectedProcedure.input(z2.object({
       uploadType: z2.enum(["reimbursement", "cms1500"]).default("reimbursement"),
       patientGroups: z2.array(z2.object({
         patientName: z2.string(),
@@ -3895,13 +4090,13 @@ var appRouter = router({
       }
       return { results };
     }),
-    markResolved: protectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
+    markResolved: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
       const { error } = await supabase2.from("claims_records").update({ is_resolved: true, claim_status: "pending" }).eq("id", input.id);
       if (error) throw new TRPCError3({ code: "INTERNAL_SERVER_ERROR", message: error.message });
       return { success: true };
     }),
-    getFollowUpClaims: protectedProcedure.input(z2.object({ insurance: z2.string().optional() }).optional()).query(async ({ input }) => {
+    getFollowUpClaims: normalProtectedProcedure.input(z2.object({ insurance: z2.string().optional() }).optional()).query(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
       let query = supabase2.from("claims_records").select(`
             id,
@@ -3947,7 +4142,7 @@ var appRouter = router({
       });
       return sortByFollowUpUrgency(classified);
     }),
-    getStatusCounts: protectedProcedure.input(z2.object({ insurance: z2.string().optional() }).optional()).query(async ({ input }) => {
+    getStatusCounts: normalProtectedProcedure.input(z2.object({ insurance: z2.string().optional() }).optional()).query(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
       let query = supabase2.from("claims_records").select("claim_status, patient_id, patients!inner(insurance)");
       if (input?.insurance) {
