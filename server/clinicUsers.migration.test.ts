@@ -92,9 +92,16 @@ describe("references/local-setup-schema.sql", () => {
 });
 
 describe("server/routers.ts", () => {
-  it("E: passwordHash is referenced only in the bcrypt comparison, never returned to a client", () => {
+  // S2 added a second read site (clinic.changePassword's current-password
+  // check) and a write site (the new-password hash passed into
+  // changeClinicUserPassword), so the legitimate count grew from S1's single
+  // login-time bcrypt.compare. What must still hold is the property this test
+  // guards: passwordHash never appears inside a value returned to a client —
+  // see clinicSession.security.test.ts for a runtime check of that.
+  it("E: passwordHash is referenced only in bcrypt comparisons and the rehash write, never returned to a client", () => {
     const routersSrc = readFileSync(join(__dirname, "routers.ts"), "utf-8");
     const occurrences = routersSrc.match(/passwordHash/g) ?? [];
-    expect(occurrences.length).toBe(1);
+    expect(occurrences.length).toBe(4);
+    expect(routersSrc).not.toMatch(/return\s*\{[^}]*passwordHash/s);
   });
 });
