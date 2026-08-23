@@ -115,3 +115,6 @@ client/public/__manus__/version.json
 .project-config.json
 .vercel
 .env*
+
+# Supabase CLI local link/session state (machine-specific, not source)
+supabase/.temp/

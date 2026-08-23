@@ -10,6 +10,8 @@
 export type UserRole = "user" | "admin";
 export type AuthStatus = "none" | "pending" | "approved" | "denied";
 export type ClaimsStatus = "submitted" | "approved" | "pending" | "denied" | "pended" | "rejected" | "resubmitted";
+export type ClinicUserRole = "admin" | "staff";
+export type ClinicUserStatus = "active" | "archived";
 
 // ─── Row types (what SELECT returns) ─────────────────────────────────────────
 
@@ -29,7 +31,17 @@ export interface ClinicUserRow {
   id: string;               // uuid
   username: string;
   password_hash: string;
+  name: string | null;
+  email: string | null;
+  department: string | null;
+  role: ClinicUserRole;
+  status: ClinicUserStatus;
+  must_change_password: boolean;
+  token_version: number;
   created_at: string;
+  updated_at: string;
+  last_login_at: string | null;
+  archived_at: string | null;
 }
 
 export interface PatientRow {
@@ -168,8 +180,8 @@ export interface Database {
       };
       clinic_users: {
         Row: ClinicUserRow;
-        Insert: Omit<ClinicUserRow, "id" | "created_at">;
-        Update: Partial<Omit<ClinicUserRow, "id" | "created_at">>;
+        Insert: Omit<ClinicUserRow, "id" | "created_at" | "updated_at">;
+        Update: Partial<Omit<ClinicUserRow, "id" | "created_at" | "updated_at">>;
       };
       patients: {
         Row: PatientRow;
