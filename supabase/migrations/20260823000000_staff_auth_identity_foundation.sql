@@ -5,13 +5,12 @@
 -- identities (name/email/department/role/status/must_change_password/
 -- token_version), while preserving the current single-account clinic login
 -- exactly as-is. No staff CRUD, no first-login flow, no session/token
--- revocation enforcement — those are later stages.
+-- revocation enforcement — those are later stages (see S2).
 --
--- REVIEW ONLY. Do not run this against production until the owner approves
--- the migration safety report. Written idempotently (IF NOT EXISTS / DO
--- blocks) so it is safe to re-run, matching the style of
+-- APPLIED TO PRODUCTION. Written idempotently (IF NOT EXISTS / DO blocks) so
+-- it remains safe to re-run, matching the style of
 -- references/local-setup-schema.sql, the repo's authoritative schema
--- snapshot (kept in sync with this migration once applied).
+-- snapshot (kept in sync with this migration).
 -- ============================================================================
 
 BEGIN;

@@ -24,6 +24,37 @@ export type SessionPayload = {
   name: string;
 };
 
+/** Extra claims present only on clinic staff sessions — owner OAuth sessions
+ * never carry these, so `signSession` omits them entirely unless passed. */
+export type ClinicSessionClaims = {
+  authType: "clinic";
+  clinicUserId: string;
+  tokenVersion: number;
+};
+
+export type VerifiedOwnerSession = { openId: string; appId: string; name: string; authType?: undefined };
+export type VerifiedClinicSession = {
+  openId: string;
+  appId: string;
+  name: string;
+  authType: "clinic";
+  clinicUserId: string;
+  tokenVersion: number;
+};
+export type VerifiedSession = VerifiedOwnerSession | VerifiedClinicSession;
+
+/** Safe, client-facing subset of a clinic_users row — never includes
+ * passwordHash or tokenVersion (see auth.me / S2 session architecture notes). */
+export type ClinicStaffInfo = {
+  clinicUserId: string;
+  username: string;
+  name: string | null;
+  email: string | null;
+  department: string | null;
+  role: "admin" | "staff";
+  mustChangePassword: boolean;
+};
+
 const EXCHANGE_TOKEN_PATH = `/webdev.v1.WebDevAuthPublicService/ExchangeToken`;
 const GET_USER_INFO_PATH = `/webdev.v1.WebDevAuthPublicService/GetUserInfo`;
 const GET_USER_INFO_WITH_JWT_PATH = `/webdev.v1.WebDevAuthPublicService/GetUserInfoWithJwt`;
@@ -179,7 +210,7 @@ class SDKServer {
   }
 
   async signSession(
-    payload: SessionPayload,
+    payload: SessionPayload & Partial<ClinicSessionClaims>,
     options: { expiresInMs?: number } = {}
   ): Promise<string> {
     const issuedAt = Date.now();
@@ -187,19 +218,47 @@ class SDKServer {
     const expirationSeconds = Math.floor((issuedAt + expiresInMs) / 1000);
     const secretKey = this.getSessionSecret();
 
-    return new SignJWT({
+    // Owner OAuth sessions pass no clinic claims, so their JWT payload stays
+    // byte-for-byte identical to pre-S2 tokens ({openId, appId, name} only).
+    const claims: Record<string, unknown> = {
       openId: payload.openId,
       appId: payload.appId,
       name: payload.name,
-    })
+    };
+    if (payload.authType === "clinic") {
+      claims.authType = payload.authType;
+      claims.clinicUserId = payload.clinicUserId;
+      claims.tokenVersion = payload.tokenVersion;
+    }
+
+    return new SignJWT(claims)
       .setProtectedHeader({ alg: "HS256", typ: "JWT" })
       .setExpirationTime(expirationSeconds)
       .sign(secretKey);
   }
 
+  /** Create a clinic staff session carrying the staff identity + token_version
+   * needed to enforce archived/stale-session checks on every request. */
+  async createClinicSessionToken(
+    params: { clinicUserId: string; username: string; tokenVersion: number },
+    options: { expiresInMs?: number } = {}
+  ): Promise<string> {
+    return this.signSession(
+      {
+        openId: `clinic_${params.username}`,
+        appId: ENV.appId,
+        name: params.username,
+        authType: "clinic",
+        clinicUserId: params.clinicUserId,
+        tokenVersion: params.tokenVersion,
+      },
+      options
+    );
+  }
+
   async verifySession(
     cookieValue: string | undefined | null
-  ): Promise<{ openId: string; appId: string; name: string } | null> {
+  ): Promise<VerifiedSession | null> {
     if (!cookieValue) {
       console.warn("[Auth] Missing session cookie");
       return null;
@@ -210,7 +269,8 @@ class SDKServer {
       const { payload } = await jwtVerify(cookieValue, secretKey, {
         algorithms: ["HS256"],
       });
-      const { openId, appId, name } = payload as Record<string, unknown>;
+      const { openId, appId, name, authType, clinicUserId, tokenVersion } =
+        payload as Record<string, unknown>;
 
       if (
         !isNonEmptyString(openId) ||
@@ -221,11 +281,15 @@ class SDKServer {
         return null;
       }
 
-      return {
-        openId,
-        appId,
-        name,
-      };
+      if (authType === "clinic") {
+        if (!isNonEmptyString(clinicUserId) || typeof tokenVersion !== "number") {
+          console.warn("[Auth] Clinic session payload missing required fields");
+          return null;
+        }
+        return { openId, appId, name, authType: "clinic", clinicUserId, tokenVersion };
+      }
+
+      return { openId, appId, name };
     } catch (error) {
       console.warn("[Auth] Session verification failed", String(error));
       return null;
@@ -264,6 +328,10 @@ class SDKServer {
 
     if (!session) {
       throw ForbiddenError("Invalid session cookie");
+    }
+
+    if (session.authType === "clinic") {
+      return this.authenticateClinicSession(session);
     }
 
     if (session.openId.startsWith(CRON_OPEN_ID_PREFIX)) {
@@ -308,14 +376,73 @@ class SDKServer {
 
     return user;
   }
+
+  /** Resolves a clinic staff session against the current clinic_users row on
+   * every request — this is what makes archived accounts and stale
+   * token_version reject already-issued sessions, not just new logins. */
+  private async authenticateClinicSession(
+    session: VerifiedClinicSession
+  ): Promise<AuthenticatedUser> {
+    const clinicUser = await db.getClinicUserById(session.clinicUserId);
+    if (!clinicUser) {
+      throw ForbiddenError("Clinic session invalid");
+    }
+    if (clinicUser.status !== "active") {
+      throw ForbiddenError("Account is not active");
+    }
+    if (clinicUser.tokenVersion !== session.tokenVersion) {
+      throw ForbiddenError("Session expired, please sign in again");
+    }
+
+    // Preserve the existing clinic_${username} -> public.users bridge so the
+    // rest of the app (which resolves ctx.user from public.users) keeps
+    // working unchanged. clinic_users remains the authority for identity,
+    // status, role, must_change_password, and token_version.
+    const signedInAt = new Date();
+    const syntheticOpenId = session.openId;
+    let user = await db.getUserByOpenId(syntheticOpenId);
+    if (!user) {
+      await db.upsertUser({
+        openId: syntheticOpenId,
+        name: clinicUser.username,
+        email: null,
+        loginMethod: "password",
+        lastSignedIn: signedInAt,
+      });
+      user = await db.getUserByOpenId(syntheticOpenId);
+    }
+    if (!user) {
+      throw ForbiddenError("User not found");
+    }
+
+    await db.upsertUser({
+      openId: user.openId,
+      lastSignedIn: signedInAt,
+    });
+
+    const clinicStaffInfo: ClinicStaffInfo = {
+      clinicUserId: clinicUser.id,
+      username: clinicUser.username,
+      name: clinicUser.name,
+      email: clinicUser.email,
+      department: clinicUser.department,
+      role: clinicUser.role,
+      mustChangePassword: clinicUser.mustChangePassword,
+    };
+
+    return { ...user, clinicUser: clinicStaffInfo };
+  }
 }
 
 const CRON_OPEN_ID_PREFIX = "cron_";
 
-/** Result of `sdk.authenticateRequest`. Cron callbacks set `isCron=true` and `taskUid`; see `references/periodic-updates.md`. */
+/** Result of `sdk.authenticateRequest`. Cron callbacks set `isCron=true` and `taskUid`;
+ * see `references/periodic-updates.md`. Clinic staff sessions set `clinicUser` — its
+ * presence is how the rest of the app distinguishes clinic staff from owner OAuth. */
 export type AuthenticatedUser = User & {
   taskUid?: string;
   isCron?: boolean;
+  clinicUser?: ClinicStaffInfo;
 };
 
 function buildCronUser(
