@@ -154,12 +154,15 @@ var init_authUrgency = __esm({
 var db_exports = {};
 __export(db_exports, {
   FOLLOW_UP_STALE_DAYS: () => FOLLOW_UP_STALE_DAYS,
+  adminResetClinicUserPassword: () => adminResetClinicUserPassword,
   aggregateClaimStatusCounts: () => aggregateClaimStatusCounts,
   approveAndCreateNewBatch: () => approveAndCreateNewBatch,
+  archiveClinicUser: () => archiveClinicUser,
   bulkCreateVisitRecords: () => bulkCreateVisitRecords,
   changeClinicUserPassword: () => changeClinicUserPassword,
   classifyClaimFollowUp: () => classifyClaimFollowUp,
   createClaimRecord: () => createClaimRecord,
+  createClinicUser: () => createClinicUser,
   createPatient: () => createPatient,
   createVisitRecord: () => createVisitRecord,
   deleteClaimRecord: () => deleteClaimRecord,
@@ -177,10 +180,14 @@ __export(db_exports, {
   getPatientById: () => getPatientById,
   getUserByOpenId: () => getUserByOpenId,
   getVisitsByPatientId: () => getVisitsByPatientId,
+  listClinicUsers: () => listClinicUsers,
+  reactivateClinicUser: () => reactivateClinicUser,
   setPatientActive: () => setPatientActive,
   sortByFollowUpUrgency: () => sortByFollowUpUrgency,
   touchClinicUserLastLogin: () => touchClinicUserLastLogin,
   updateClaimRecord: () => updateClaimRecord,
+  updateClinicUserProfile: () => updateClinicUserProfile,
+  updateClinicUserRole: () => updateClinicUserRole,
   updatePatient: () => updatePatient,
   updateVisitRecord: () => updateVisitRecord,
   upsertClaimRecord: () => upsertClaimRecord,
@@ -622,6 +629,87 @@ async function changeClinicUserPassword(params) {
   }).eq("id", params.id).eq("token_version", params.expectedTokenVersion).select().maybeSingle();
   if (error) {
     console.error("[Supabase] changeClinicUserPassword:", error);
+    throw error;
+  }
+  return data ? toClinicUser(data) : void 0;
+}
+async function listClinicUsers() {
+  const { data, error } = await supabase.from("clinic_users").select("*").order("name", { ascending: true });
+  if (error) {
+    console.error("[Supabase] listClinicUsers:", error);
+    return [];
+  }
+  return (data ?? []).map(toClinicUser);
+}
+async function createClinicUser(data) {
+  const { data: row, error } = await supabase.from("clinic_users").insert({
+    username: data.username,
+    password_hash: data.passwordHash,
+    name: data.name,
+    email: data.email,
+    department: data.department,
+    role: data.role,
+    status: data.status,
+    must_change_password: true,
+    token_version: 0
+  }).select().single();
+  if (error) {
+    console.error("[Supabase] createClinicUser:", error);
+    throw error;
+  }
+  return toClinicUser(row);
+}
+async function updateClinicUserProfile(id, data) {
+  const update = {};
+  if (data.name !== void 0) update.name = data.name;
+  if (data.email !== void 0) update.email = data.email;
+  if (data.department !== void 0) update.department = data.department;
+  if (Object.keys(update).length === 0) {
+    return getClinicUserById(id);
+  }
+  const { data: row, error } = await supabase.from("clinic_users").update(update).eq("id", id).select().maybeSingle();
+  if (error) {
+    console.error("[Supabase] updateClinicUserProfile:", error);
+    throw error;
+  }
+  return row ? toClinicUser(row) : void 0;
+}
+async function updateClinicUserRole(params) {
+  const { data, error } = await supabase.from("clinic_users").update({ role: params.role, token_version: params.expectedTokenVersion + 1 }).eq("id", params.id).eq("token_version", params.expectedTokenVersion).select().maybeSingle();
+  if (error) {
+    console.error("[Supabase] updateClinicUserRole:", error);
+    throw error;
+  }
+  return data ? toClinicUser(data) : void 0;
+}
+async function adminResetClinicUserPassword(params) {
+  const { data, error } = await supabase.from("clinic_users").update({
+    password_hash: params.passwordHash,
+    must_change_password: true,
+    token_version: params.expectedTokenVersion + 1
+  }).eq("id", params.id).eq("token_version", params.expectedTokenVersion).select().maybeSingle();
+  if (error) {
+    console.error("[Supabase] adminResetClinicUserPassword:", error);
+    throw error;
+  }
+  return data ? toClinicUser(data) : void 0;
+}
+async function archiveClinicUser(params) {
+  const { data, error } = await supabase.from("clinic_users").update({
+    status: "archived",
+    archived_at: (/* @__PURE__ */ new Date()).toISOString(),
+    token_version: params.expectedTokenVersion + 1
+  }).eq("id", params.id).eq("token_version", params.expectedTokenVersion).select().maybeSingle();
+  if (error) {
+    console.error("[Supabase] archiveClinicUser:", error);
+    throw error;
+  }
+  return data ? toClinicUser(data) : void 0;
+}
+async function reactivateClinicUser(id) {
+  const { data, error } = await supabase.from("clinic_users").update({ status: "active", archived_at: null }).eq("id", id).select().maybeSingle();
+  if (error) {
+    console.error("[Supabase] reactivateClinicUser:", error);
     throw error;
   }
   return data ? toClinicUser(data) : void 0;
@@ -3354,6 +3442,15 @@ var adminProcedure = normalProtectedProcedure.use(async (opts) => {
   }
   return next({ ctx });
 });
+var adminOrOwnerProcedure = normalProtectedProcedure.use(async (opts) => {
+  const { ctx, next } = opts;
+  const isClinicAdmin = ctx.user.clinicUser?.role === "admin";
+  const isOwnerAdmin = !ctx.user.clinicUser && ctx.user.role === "admin";
+  if (!isClinicAdmin && !isOwnerAdmin) {
+    throw new TRPCError2({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
+  }
+  return next({ ctx });
+});
 
 // server/_core/systemRouter.ts
 var systemRouter = router({
@@ -3458,6 +3555,10 @@ function parseDate2(s) {
   }
   const d = /* @__PURE__ */ new Date(trimmed + "T00:00:00Z");
   return isNaN(d.getTime()) ? null : d;
+}
+function toSafeStaff(user) {
+  const { passwordHash: _passwordHash, tokenVersion: _tokenVersion, ...safe } = user;
+  return safe;
 }
 var appRouter = router({
   system: systemRouter,
@@ -3602,6 +3703,133 @@ var appRouter = router({
         maxAge: ONE_YEAR_MS
       });
       return { success: true };
+    })
+  }),
+  // ── Staff management (S3) ────────────────────────────────────────────────────
+  // Every mutation here is owner/admin only — see adminOrOwnerProcedure in
+  // _core/trpc.ts for why this can't reuse adminProcedure.
+  staff: router({
+    list: adminOrOwnerProcedure.query(async () => {
+      const rows = await listClinicUsers();
+      return rows.map(toSafeStaff);
+    }),
+    get: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
+      const row = await getClinicUserById(input.id);
+      if (!row) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
+      return toSafeStaff(row);
+    }),
+    create: adminOrOwnerProcedure.input(
+      z2.object({
+        name: z2.string().min(1, "Name is required"),
+        email: z2.string().trim().optional(),
+        department: z2.string().trim().optional(),
+        username: z2.string().trim().min(1, "Username is required"),
+        role: z2.enum(["admin", "staff"]).default("staff"),
+        status: z2.enum(["active", "archived"]).default("active"),
+        password: z2.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
+        confirmPassword: z2.string().min(1)
+      })
+    ).mutation(async ({ input }) => {
+      if (input.password !== input.confirmPassword) {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: "Passwords do not match" });
+      }
+      const username = input.username.trim();
+      const existing = await getClinicUserByUsername(username);
+      if (existing) {
+        throw new TRPCError3({ code: "CONFLICT", message: "That username is already taken" });
+      }
+      const passwordHash = await bcrypt.hash(input.password, 10);
+      try {
+        const created = await createClinicUser({
+          username,
+          passwordHash,
+          name: input.name,
+          email: input.email || null,
+          department: input.department || null,
+          role: input.role,
+          status: input.status
+        });
+        return toSafeStaff(created);
+      } catch (err) {
+        if (err?.code === "23505") {
+          throw new TRPCError3({ code: "CONFLICT", message: "That username is already taken" });
+        }
+        throw err;
+      }
+    }),
+    update: adminOrOwnerProcedure.input(
+      z2.object({
+        id: z2.string().uuid(),
+        name: z2.string().min(1, "Name is required").optional(),
+        email: z2.string().trim().optional(),
+        department: z2.string().trim().optional(),
+        role: z2.enum(["admin", "staff"]).optional()
+      })
+    ).mutation(async ({ ctx, input }) => {
+      const { id, role, ...profile } = input;
+      const current = await getClinicUserById(id);
+      if (!current) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
+      if (role !== void 0 && role !== current.role) {
+        const isSelf = ctx.user.clinicUser?.clinicUserId === id;
+        if (isSelf) {
+          throw new TRPCError3({ code: "FORBIDDEN", message: "You cannot change your own role." });
+        }
+        const updated = await updateClinicUserRole({ id, role, expectedTokenVersion: current.tokenVersion });
+        if (!updated) {
+          throw new TRPCError3({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+        }
+      }
+      const profileFields = {};
+      if (profile.name !== void 0) profileFields.name = profile.name;
+      if (profile.email !== void 0) profileFields.email = profile.email || null;
+      if (profile.department !== void 0) profileFields.department = profile.department || null;
+      if (Object.keys(profileFields).length > 0) {
+        await updateClinicUserProfile(id, profileFields);
+      }
+      const final = await getClinicUserById(id);
+      if (!final) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
+      return toSafeStaff(final);
+    }),
+    resetPassword: adminOrOwnerProcedure.input(
+      z2.object({
+        id: z2.string().uuid(),
+        password: z2.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
+        confirmPassword: z2.string().min(1)
+      })
+    ).mutation(async ({ input }) => {
+      if (input.password !== input.confirmPassword) {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: "Passwords do not match" });
+      }
+      const current = await getClinicUserById(input.id);
+      if (!current) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
+      const passwordHash = await bcrypt.hash(input.password, 10);
+      const updated = await adminResetClinicUserPassword({
+        id: input.id,
+        passwordHash,
+        expectedTokenVersion: current.tokenVersion
+      });
+      if (!updated) {
+        throw new TRPCError3({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+      }
+      return toSafeStaff(updated);
+    }),
+    archive: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ ctx, input }) => {
+      const isSelf = ctx.user.clinicUser?.clinicUserId === input.id;
+      if (isSelf) {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "You cannot archive your own account." });
+      }
+      const current = await getClinicUserById(input.id);
+      if (!current) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
+      const updated = await archiveClinicUser({ id: input.id, expectedTokenVersion: current.tokenVersion });
+      if (!updated) {
+        throw new TRPCError3({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+      }
+      return toSafeStaff(updated);
+    }),
+    reactivate: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
+      const updated = await reactivateClinicUser(input.id);
+      if (!updated) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
+      return toSafeStaff(updated);
     })
   }),
   // ── Patients ────────────────────────────────────────────────────────────────

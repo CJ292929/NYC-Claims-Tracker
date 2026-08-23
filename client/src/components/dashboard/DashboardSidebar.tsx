@@ -8,6 +8,7 @@ import {
   CalendarCheck,
   FileStack,
   UploadCloud,
+  UserCog,
   LogOut,
   Loader2,
   ChevronDown,
@@ -24,7 +25,8 @@ export type NavSection =
   | 'authorizations-records'
   | 'visits'
   | 'claims'
-  | 'bulk-upload';
+  | 'bulk-upload'
+  | 'staff';
 
 type IconType = React.ComponentType<{ className?: string }>;
 
@@ -90,7 +92,15 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
     label: 'Actions',
     items: [leaf('bulk-upload', 'Bulk Upload', UploadCloud)],
   },
+  {
+    label: 'Management',
+    items: [leaf('staff', 'Staff Management', UserCog)],
+  },
 ];
+
+/** Group label gated to owner/admin sessions only — see canManageStaff prop
+ * on SidebarNav, threaded down from DashboardShell. */
+const ADMIN_ONLY_GROUP_LABELS = new Set(['Management']);
 
 /** Group keys whose children include the given section. */
 function parentKeysContaining(activeSection: NavSection): string[] {
@@ -110,12 +120,21 @@ export function SidebarNav({
   onNavigate,
   onSignOut,
   signingOut = false,
+  canManageStaff = false,
 }: {
   activeSection?: NavSection;
   onNavigate: (section: NavSection) => void;
   onSignOut: () => void;
   signingOut?: boolean;
+  /** Owner OAuth admins and clinic admins only — hides the Management group
+   * (Staff Management) from normal staff. Mirrors the server's
+   * adminOrOwnerProcedure gate; see client/src/lib/authGate.ts. */
+  canManageStaff?: boolean;
 }) {
+  const visibleNavGroups = NAV_GROUPS.filter(
+    (group) => canManageStaff || !ADMIN_ONLY_GROUP_LABELS.has(group.label)
+  );
+
   // Which parent groups (e.g. "Patients") are expanded. Initialized open for
   // whichever group contains the current section, then kept in sync as the
   // user navigates — but a manual collapse click is respected until the next
@@ -158,7 +177,7 @@ export function SidebarNav({
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5">
-        {NAV_GROUPS.map((group) => (
+        {visibleNavGroups.map((group) => (
           <div key={group.label}>
             <p className="px-2.5 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-white/40">
               {group.label}
