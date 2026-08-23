@@ -34,6 +34,7 @@ import { getPatientMetrics } from '@/lib/patientMetrics';
 import { getPatientOverviewMetrics } from '@/lib/patientOverviewMetrics';
 import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
+import { formatCalendarDate } from '@/lib/date';
 import type { AuthUrgency } from '@shared/authUrgency';
 
 /**
@@ -115,9 +116,7 @@ const CLAIM_STATUS_FILTERS = [
 const formatDate = (d: Date | string | null | undefined): string => {
   if (!d) return '—';
   try {
-    const dt = typeof d === 'string' ? new Date(d) : d;
-    if (isNaN(dt.getTime())) return String(d);
-    return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    return formatCalendarDate(d);
   } catch {
     return String(d);
   }
@@ -1681,7 +1680,7 @@ export default function Dashboard() {
                 <h3 className="font-bold text-base mb-1 text-gray-700">Discharged Patient</h3>
                 <div className="flex flex-wrap gap-4 text-sm text-gray-600">
                   {activePatient.dischargeDate && (
-                    <span><span className="font-semibold">Date of Discharge:</span> {new Date(activePatient.dischargeDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                    <span><span className="font-semibold">Date of Discharge:</span> {formatCalendarDate(activePatient.dischargeDate)}</span>
                   )}
                   {activePatient.dischargeReason && (
                     <span><span className="font-semibold">Reason:</span> {activePatient.dischargeReason}</span>
@@ -2222,7 +2221,7 @@ export default function Dashboard() {
                             const editing = isEditingField(claimId, field);
                             const numVal = type === 'number' && value != null ? parseFloat(value as string) : null;
                             const rawDate = type === 'date' && value ? new Date(value as string).toISOString().split('T')[0] : '';
-                            const displayDate = type === 'date' && value ? new Date(value as string).toLocaleDateString() : null;
+                            const displayDate = type === 'date' && value ? formatCalendarDate(value as string) : null;
                             const startVal = type === 'number'
                               ? (numVal != null && !isNaN(numVal) ? numVal.toString() : '')
                               : type === 'date' ? rawDate : ((value as string) ?? '');
@@ -2270,7 +2269,7 @@ export default function Dashboard() {
                                   <div className="flex items-start justify-between gap-3">
                                     <div className="min-w-0">
                                       <p className="text-sm font-semibold text-brand-blue">
-                                        {claim.date_of_service ? new Date(claim.date_of_service).toLocaleDateString() : <span className="text-gray-300">No date</span>}
+                                        {claim.date_of_service ? formatCalendarDate(claim.date_of_service) : <span className="text-gray-300">No date</span>}
                                       </p>
                                       <p className="text-xs text-gray-500 mt-0.5 truncate">
                                         {(claim.expire_bcbs_claim_number || claim.oa_claim_number)
@@ -2443,7 +2442,7 @@ export default function Dashboard() {
                                     };
 
                                     const EditableDate = ({ field, value }: { field: string; value: string | null }) => {
-                                      const displayDate = value ? new Date(value).toLocaleDateString() : null;
+                                      const displayDate = value ? formatCalendarDate(value) : null;
                                       const rawDate = value ? new Date(value).toISOString().split('T')[0] : '';
                                       return (
                                         <td className={cellClass} onClick={() => !isEditing(field) && startEdit(field, rawDate)}>
@@ -2896,7 +2895,7 @@ export default function Dashboard() {
                                       <td className="px-3 py-1 whitespace-nowrap text-gray-700">
                                         {lIdx === 0 ? (
                                           claim.dateOfService
-                                            ? new Date(claim.dateOfService).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
+                                            ? formatCalendarDate(claim.dateOfService, { month: 'numeric', day: 'numeric', year: 'numeric' })
                                             : '—'
                                         ) : null}
                                       </td>
@@ -3001,7 +3000,7 @@ export default function Dashboard() {
                           <td className="px-3 py-1.5 border-r border-gray-200 whitespace-nowrap font-medium text-gray-800">
                             {lIdx === 0 ? (
                               group.dateOfService
-                                ? new Date(group.dateOfService).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
+                                ? formatCalendarDate(group.dateOfService, { month: 'numeric', day: 'numeric', year: 'numeric' })
                                 : <span className="text-gray-300">—</span>
                             ) : null}
                           </td>
@@ -3038,7 +3037,7 @@ export default function Dashboard() {
                           <td className="px-3 py-1.5 border-r border-gray-200 text-gray-700 whitespace-nowrap">
                             {lIdx === 0 && (
                               group.checkDate
-                                ? new Date(group.checkDate).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
+                                ? formatCalendarDate(group.checkDate, { month: 'numeric', day: 'numeric', year: 'numeric' })
                                 : <span className="text-gray-300">—</span>
                             )}
                           </td>

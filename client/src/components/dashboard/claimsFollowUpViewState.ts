@@ -1,3 +1,5 @@
+import { formatCalendarDate } from '@/lib/date';
+
 // Card color per claim_status, per product spec:
 // Rejected=Black, Denied=Red, Pending=Yellow, Pended=Orange, Approved=Green,
 // Resubmitted=Violet, Submitted=Blue.
@@ -24,7 +26,7 @@ export function formatReimbursement(value: unknown): string {
 }
 
 export function formatDateOrDash(value: unknown): string {
-  return value ? new Date(value as string).toLocaleDateString() : '—';
+  return formatCalendarDate(value as string | number | Date | null | undefined, {});
 }
 
 export type ClaimsFollowUpViewState = 'loading' | 'error' | 'empty' | 'data';

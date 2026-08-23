@@ -3,6 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 import { Search, SlidersHorizontal, UserX, X } from 'lucide-react';
+import { formatCalendarDate } from '@/lib/date';
 import { PatientFilters, type ClaimStatusFilterDef } from './PatientFilters';
 import { PatientListItem } from './PatientListItem';
 import { PatientSnapshotPane } from './PatientSnapshotPane';
@@ -160,7 +161,7 @@ export function DischargedPatientsWorkspace({
                       <>
                         {patient.dischargeDate && (
                           <p className="text-xs text-gray-400 mt-0.5">
-                            Discharged: {new Date(patient.dischargeDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                            Discharged: {formatCalendarDate(patient.dischargeDate)}
                           </p>
                         )}
                         {patient.dischargeReason && (
