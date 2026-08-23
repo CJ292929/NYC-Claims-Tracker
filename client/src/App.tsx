@@ -54,14 +54,26 @@ export const DASHBOARD_ROUTE_PATHS = [
  * navigation does not unmount/remount the Dashboard subtree. */
 const ProtectedDashboard = () => <ProtectedRoute component={Dashboard} />;
 
+/** Matches every path in DASHBOARD_ROUTE_PATHS. Used as a *single* Route's `path`
+ * (instead of mapping DASHBOARD_ROUTE_PATHS to one <Route> per path) so the
+ * Dashboard-backed route is one static JSX element, not an array element with a
+ * per-path `key`. wouter's <Switch> clones whichever <Route> matches while
+ * preserving its original `key` — with a `key` derived from the path, navigating
+ * between two Dashboard-backed paths (e.g. /patients/records -> /visits) changes
+ * the key React sees on Switch's rendered output, which is enough on its own to
+ * make React unmount/remount the subtree even though `component` never changes.
+ * A single keyless element has nothing to change between routes, so identity
+ * (and all of Dashboard's local state) survives navigation. */
+export const DASHBOARD_ROUTE_PATTERN = new RegExp(
+  `^(?:${DASHBOARD_ROUTE_PATHS.map((path) => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})$`
+);
+
 export function Router() {
   return (
     <Switch>
       <Route path="/login" component={Login} />
       <Route path="/" component={() => <Redirect to="/dashboard" />} />
-      {DASHBOARD_ROUTE_PATHS.map((path) => (
-        <Route key={path} path={path} component={ProtectedDashboard} />
-      ))}
+      <Route path={DASHBOARD_ROUTE_PATTERN} component={ProtectedDashboard} />
       <Route path="/404" component={NotFound} />
       {/* Final fallback route */}
       <Route component={NotFound} />
