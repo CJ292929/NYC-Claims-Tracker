@@ -27,7 +27,17 @@ const FAKE_USER: ClinicUser = {
   id: "11111111-1111-1111-1111-111111111111",
   username: "nurse.jane",
   passwordHash: "$2a$10$fakefakefakefakefakefakefakefakefakefakefakefakefak",
+  name: null,
+  email: null,
+  department: null,
+  role: "staff",
+  status: "active",
+  mustChangePassword: true,
+  tokenVersion: 0,
   createdAt: new Date("2026-01-01T00:00:00Z"),
+  updatedAt: new Date("2026-01-01T00:00:00Z"),
+  lastLoginAt: null,
+  archivedAt: null,
 };
 
 function makeCaller(ip = "203.0.113.10") {

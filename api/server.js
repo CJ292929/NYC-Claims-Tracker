@@ -73,6 +73,19 @@ var init_env = __esm({
   }
 });
 
+// server/_core/username.ts
+function normalizeUsername(username) {
+  return username.trim().toLowerCase();
+}
+function escapeLikePattern(value) {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+var init_username = __esm({
+  "server/_core/username.ts"() {
+    "use strict";
+  }
+});
+
 // shared/authPeriodMetrics.ts
 function normalizePeriod(visit) {
   return visit.authPeriod ?? 1;
@@ -221,7 +234,17 @@ function toClinicUser(row) {
     id: row.id,
     username: row.username,
     passwordHash: row.password_hash,
-    createdAt: new Date(row.created_at)
+    name: row.name ?? null,
+    email: row.email ?? null,
+    department: row.department ?? null,
+    role: row.role ?? "staff",
+    status: row.status ?? "active",
+    mustChangePassword: row.must_change_password ?? true,
+    tokenVersion: row.token_version ?? 0,
+    createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at ?? row.created_at),
+    lastLoginAt: row.last_login_at ? new Date(row.last_login_at) : null,
+    archivedAt: row.archived_at ? new Date(row.archived_at) : null
   };
 }
 async function upsertUser(user) {
@@ -566,7 +589,8 @@ async function getCompletedPatients() {
   }).map((p) => p.id);
 }
 async function getClinicUserByUsername(username) {
-  const { data, error } = await supabase.from("clinic_users").select("*").eq("username", username).maybeSingle();
+  const normalized = normalizeUsername(username);
+  const { data, error } = await supabase.from("clinic_users").select("*").ilike("username", escapeLikePattern(normalized)).maybeSingle();
   if (error) {
     console.error("[Supabase] getClinicUserByUsername:", error);
     return void 0;
@@ -759,6 +783,7 @@ var init_db = __esm({
     "use strict";
     init_supabase();
     init_env();
+    init_username();
     init_authPeriodMetrics();
     init_authUrgency();
     FOLLOW_UP_STALE_DAYS = 30;
@@ -3253,6 +3278,7 @@ var systemRouter = router({
 init_db();
 
 // server/_core/loginRateLimit.ts
+init_username();
 var WINDOW_MS = 15 * 60 * 1e3;
 var MAX_FAILED_ATTEMPTS = 5;
 var attemptsByKey = /* @__PURE__ */ new Map();
@@ -3267,9 +3293,6 @@ function sweepExpired(now) {
 }
 function keyFor(normalizedUsername, ip) {
   return `${normalizedUsername}|${ip}`;
-}
-function normalizeUsername(username) {
-  return username.trim().toLowerCase();
 }
 function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
