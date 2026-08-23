@@ -2969,17 +2969,32 @@ export default function Dashboard() {
                     <tr className="bg-brand-cream border-b border-brand-cream-dark">
                       <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Date of Service</th>
                       <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">CPT Code</th>
+                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Diagnosis</th>
+                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Modifier</th>
+                      <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Units</th>
                       <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Charge</th>
                       <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Ins. Reimb.</th>
                       <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Pt. Paid</th>
+                      <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Pt. Due</th>
                       <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Status</th>
                       <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Payment Date</th>
-                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap">Ins. Billed / Claim #</th>
+                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Claim #</th>
+                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap">Ins. Billed</th>
                     </tr>
                   </thead>
                   <tbody>
                     {editingExtractedClaims.map((group: any, gIdx: number) => {
-                      const lines: any[] = group.cptLines?.length > 0 ? group.cptLines : [{ _key: group._key, cptCodes: group.cptCodes, chargeAmount: group.chargeAmount, insuranceReimbursement: group.insuranceReimbursement, patientAmountPaid: group.patientAmountPaid }];
+                      const lines: any[] = group.cptLines?.length > 0 ? group.cptLines : [{
+                        _key: group._key,
+                        cptCodes: group.cptCodes,
+                        chargeAmount: group.chargeAmount,
+                        insuranceReimbursement: group.insuranceReimbursement,
+                        patientAmountPaid: group.patientAmountPaid,
+                        patientAmountDue: group.patientAmountDue,
+                        unitsBilled: group.unitsBilled,
+                        modifier: group.modifier,
+                        diagnosisCodes: group.diagnosisCodes,
+                      }];
                       return lines.map((line: any, lIdx: number) => (
                         <tr key={`${gIdx}-${lIdx}`} className={`border-b ${lIdx === lines.length - 1 ? 'border-gray-300' : 'border-gray-100'} hover:bg-brand-cream/50`}>
                           {/* Date — show only on first CPT line of each group */}
@@ -3002,9 +3017,13 @@ export default function Dashboard() {
                               ) : null}
                             </span>
                           </td>
+                          <td className="px-3 py-1.5 border-r border-gray-200 text-gray-700">{line.diagnosisCodes || <span className="text-gray-300">—</span>}</td>
+                          <td className="px-3 py-1.5 border-r border-gray-200 text-gray-700">{line.modifier || <span className="text-gray-300">—</span>}</td>
+                          <td className="px-3 py-1.5 border-r border-gray-200 text-right text-gray-700">{line.unitsBilled != null && line.unitsBilled !== '' ? line.unitsBilled : <span className="text-gray-300">—</span>}</td>
                           <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.chargeAmount != null && line.chargeAmount !== '' ? `$${parseFloat(line.chargeAmount).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
                           <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.insuranceReimbursement != null && line.insuranceReimbursement !== '' ? `$${parseFloat(line.insuranceReimbursement).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
                           <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.patientAmountPaid != null && line.patientAmountPaid !== '' ? `$${parseFloat(line.patientAmountPaid).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
+                          <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.patientAmountDue != null && line.patientAmountDue !== '' ? `$${parseFloat(line.patientAmountDue).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
                           {/* Status — show only on first line */}
                           <td className="px-3 py-1.5 border-r border-gray-200">
                             {lIdx === 0 && (
@@ -3023,11 +3042,13 @@ export default function Dashboard() {
                                 : <span className="text-gray-300">—</span>
                             )}
                           </td>
-                          {/* Ins. Billed / Claim # — show only on first line */}
+                          {/* Claim # — show only on first line */}
+                          <td className="px-3 py-1.5 border-r border-gray-200 text-gray-600">
+                            {lIdx === 0 && (group.oaClaimNumber || <span className="text-gray-300">—</span>)}
+                          </td>
+                          {/* Ins. Billed — show only on first line */}
                           <td className="px-3 py-1.5 text-gray-600">
-                            {lIdx === 0 && (
-                              <span>{group.insuranceBilled || group.oaClaimNumber || <span className="text-gray-300">—</span>}</span>
-                            )}
+                            {lIdx === 0 && (group.insuranceBilled || <span className="text-gray-300">—</span>)}
                           </td>
                         </tr>
                       ));

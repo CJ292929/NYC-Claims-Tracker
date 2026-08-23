@@ -33,13 +33,15 @@ import { extractClaimsWithAI, detectInsuranceType, type ExtractionSource } from 
 // dollar amounts and claim numbers stay sourced from the regex parser, which
 // is more precise for those than an LLM.
 //
-// Each upload type has its own backfill list, scoped to only that document
-// type's valid fields (see the field-boundary rules enforced by
-// enforceFieldBoundary below) — backfilling a CMS1500-only field like
-// diagnosisCodes onto a reimbursement claim would both waste an AI call
-// (those fields are always null on an EOB, so hasMissingFields would fire on
-// every single reimbursement upload) and populate a value that
-// enforceFieldBoundary would strip right back out before saving.
+// Each upload type has its own backfill list. Payment-only fields
+// (insuranceReimbursement, oaClaimNumber, checkDate, ...) and CMS-1500-only
+// form fields (placeOfService, claimSubmittedDate, visitNumber) stay scoped
+// to the upload type that can actually carry them — backfilling those across
+// the boundary would waste an AI call for a value enforceFieldBoundary would
+// strip right back out before saving. Billing-detail fields (chargeAmount,
+// diagnosisCodes, modifier, unitsBilled) appear in BOTH lists since both a
+// CMS-1500 form and an EOB's own line-item table can legitimately print them
+// — see the comment on CMS1500_ONLY_FIELDS below.
 //
 // Each list is further split into claim-level vs. line-level fields.
 // parseCMS1500/parseMeritainEOB group service lines under a shared date via
@@ -76,6 +78,14 @@ const REIMBURSEMENT_LINE_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
   'insuranceReimbursement',
   'patientAmountPaid',
   'patientAmountDue',
+  // Line-item billing detail (Billed Amount / DX / Modifier / Quantity) that
+  // many EOBs print alongside the payment columns in their own "Line Level
+  // Information" table — no longer CMS1500-exclusive, see the comment on
+  // CMS1500_ONLY_FIELDS below.
+  'chargeAmount',
+  'diagnosisCodes',
+  'modifier',
+  'unitsBilled',
 ];
 
 /** A partial ExtractedClaim that may carry a DateClaimGroup-style cptLines[] array. */
@@ -150,12 +160,16 @@ function backfillMissingFields(
 // (patient_id, auth_period, date_of_service, cpt_codes) used by
 // bulkImportFromEOB/upsertClaimRecord, so a Reimbursement upload must keep
 // them populated to attach its payment to the right existing CMS-1500 row.
+// diagnosisCodes/unitsBilled/modifier/chargeAmount are deliberately NOT in
+// this list — many Reimbursement/EOB documents print their own line-item
+// billing table (Billed Amount, DX, Modifier, Quantity) alongside the
+// payment columns, and that data is real, useful line-level detail for
+// review, not something that belongs only to CMS-1500. placeOfService,
+// claimSubmittedDate, and visitNumber remain CMS-1500-exclusive: they come
+// from specific numbered boxes on that form (24B, 31, 24) and are not
+// printed on payer-issued EOBs.
 const CMS1500_ONLY_FIELDS: (keyof ExtractedClaim)[] = [
   'placeOfService',
-  'diagnosisCodes',
-  'unitsBilled',
-  'modifier',
-  'chargeAmount',
   'claimSubmittedDate',
   // Matches the existing isCms gate in bulkImportFromEOB (server/routers.ts),
   // which already only ever writes visitNumber for CMS-1500 claims.
