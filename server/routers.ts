@@ -4,7 +4,7 @@ import { TRPCError } from "@trpc/server";
 import { COOKIE_NAME, MIN_CLINIC_PASSWORD_LENGTH } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { normalProtectedProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { adminOrOwnerProcedure, normalProtectedProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import {
   getAllPatients,
   getPatientById,
@@ -32,7 +32,15 @@ import {
   classifyClaimFollowUp,
   sortByFollowUpUrgency,
   aggregateClaimStatusCounts,
+  listClinicUsers,
+  createClinicUser,
+  updateClinicUserProfile,
+  updateClinicUserRole,
+  adminResetClinicUserPassword,
+  archiveClinicUser,
+  reactivateClinicUser,
 } from "./db";
+import type { ClinicUser } from "../drizzle/schema";
 import { sdk } from "./_core/sdk";
 import { ONE_YEAR_MS } from "@shared/const";
 import {
@@ -78,6 +86,13 @@ function parseDate(s: string | null | undefined): Date | null {
 
   const d = new Date(trimmed + "T00:00:00Z");
   return isNaN(d.getTime()) ? null : d;
+}
+
+// Client-facing staff shape — never includes passwordHash or tokenVersion
+// (see S3 report / adminOrOwnerProcedure notes in trpc.ts).
+function toSafeStaff(user: ClinicUser) {
+  const { passwordHash: _passwordHash, tokenVersion: _tokenVersion, ...safe } = user;
+  return safe;
 }
 
 // ─── Routers ──────────────────────────────────────────────────────────────────
@@ -250,6 +265,163 @@ export const appRouter = router({
         });
 
         return { success: true } as const;
+      }),
+  }),
+
+  // ── Staff management (S3) ────────────────────────────────────────────────────
+  // Every mutation here is owner/admin only — see adminOrOwnerProcedure in
+  // _core/trpc.ts for why this can't reuse adminProcedure.
+  staff: router({
+    list: adminOrOwnerProcedure.query(async () => {
+      const rows = await listClinicUsers();
+      return rows.map(toSafeStaff);
+    }),
+
+    get: adminOrOwnerProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .query(async ({ input }) => {
+        const row = await getClinicUserById(input.id);
+        if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Staff account not found" });
+        return toSafeStaff(row);
+      }),
+
+    create: adminOrOwnerProcedure
+      .input(
+        z.object({
+          name: z.string().min(1, "Name is required"),
+          email: z.string().trim().optional(),
+          department: z.string().trim().optional(),
+          username: z.string().trim().min(1, "Username is required"),
+          role: z.enum(["admin", "staff"]).default("staff"),
+          status: z.enum(["active", "archived"]).default("active"),
+          password: z.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
+          confirmPassword: z.string().min(1),
+        })
+      )
+      .mutation(async ({ input }) => {
+        if (input.password !== input.confirmPassword) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Passwords do not match" });
+        }
+
+        const username = input.username.trim();
+        const existing = await getClinicUserByUsername(username);
+        if (existing) {
+          throw new TRPCError({ code: "CONFLICT", message: "That username is already taken" });
+        }
+
+        const passwordHash = await bcrypt.hash(input.password, 10);
+        try {
+          const created = await createClinicUser({
+            username,
+            passwordHash,
+            name: input.name,
+            email: input.email || null,
+            department: input.department || null,
+            role: input.role,
+            status: input.status,
+          });
+          return toSafeStaff(created);
+        } catch (err: unknown) {
+          // Backstop against a race between the uniqueness check above and the
+          // insert — the DB's UNIQUE(lower(username)) index is the real guard.
+          if ((err as { code?: string })?.code === "23505") {
+            throw new TRPCError({ code: "CONFLICT", message: "That username is already taken" });
+          }
+          throw err;
+        }
+      }),
+
+    update: adminOrOwnerProcedure
+      .input(
+        z.object({
+          id: z.string().uuid(),
+          name: z.string().min(1, "Name is required").optional(),
+          email: z.string().trim().optional(),
+          department: z.string().trim().optional(),
+          role: z.enum(["admin", "staff"]).optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { id, role, ...profile } = input;
+        const current = await getClinicUserById(id);
+        if (!current) throw new TRPCError({ code: "NOT_FOUND", message: "Staff account not found" });
+
+        if (role !== undefined && role !== current.role) {
+          const isSelf = ctx.user.clinicUser?.clinicUserId === id;
+          if (isSelf) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "You cannot change your own role." });
+          }
+          const updated = await updateClinicUserRole({ id, role, expectedTokenVersion: current.tokenVersion });
+          if (!updated) {
+            throw new TRPCError({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+          }
+        }
+
+        const profileFields: { name?: string; email?: string | null; department?: string | null } = {};
+        if (profile.name !== undefined) profileFields.name = profile.name;
+        if (profile.email !== undefined) profileFields.email = profile.email || null;
+        if (profile.department !== undefined) profileFields.department = profile.department || null;
+        if (Object.keys(profileFields).length > 0) {
+          await updateClinicUserProfile(id, profileFields);
+        }
+
+        const final = await getClinicUserById(id);
+        if (!final) throw new TRPCError({ code: "NOT_FOUND", message: "Staff account not found" });
+        return toSafeStaff(final);
+      }),
+
+    resetPassword: adminOrOwnerProcedure
+      .input(
+        z.object({
+          id: z.string().uuid(),
+          password: z.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
+          confirmPassword: z.string().min(1),
+        })
+      )
+      .mutation(async ({ input }) => {
+        if (input.password !== input.confirmPassword) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Passwords do not match" });
+        }
+
+        const current = await getClinicUserById(input.id);
+        if (!current) throw new TRPCError({ code: "NOT_FOUND", message: "Staff account not found" });
+
+        const passwordHash = await bcrypt.hash(input.password, 10);
+        const updated = await adminResetClinicUserPassword({
+          id: input.id,
+          passwordHash,
+          expectedTokenVersion: current.tokenVersion,
+        });
+        if (!updated) {
+          throw new TRPCError({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+        }
+        return toSafeStaff(updated);
+      }),
+
+    archive: adminOrOwnerProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        const isSelf = ctx.user.clinicUser?.clinicUserId === input.id;
+        if (isSelf) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "You cannot archive your own account." });
+        }
+
+        const current = await getClinicUserById(input.id);
+        if (!current) throw new TRPCError({ code: "NOT_FOUND", message: "Staff account not found" });
+
+        const updated = await archiveClinicUser({ id: input.id, expectedTokenVersion: current.tokenVersion });
+        if (!updated) {
+          throw new TRPCError({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+        }
+        return toSafeStaff(updated);
+      }),
+
+    reactivate: adminOrOwnerProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .mutation(async ({ input }) => {
+        const updated = await reactivateClinicUser(input.id);
+        if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Staff account not found" });
+        return toSafeStaff(updated);
       }),
   }),
 

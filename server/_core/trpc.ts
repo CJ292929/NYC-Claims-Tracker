@@ -54,10 +54,33 @@ export const normalProtectedProcedure = protectedProcedure.use(async opts => {
 // Built on normalProtectedProcedure so a clinic admin whose password must be
 // changed is blocked by the same gate as any other clinic staff, before the
 // role check ever runs — the forced-change rule can't be bypassed by role.
+//
+// NOTE: ctx.user.role is the owner-OAuth role field (public.users.role).
+// Every clinic session is bridged into public.users with role "user"
+// regardless of its actual clinic_users.role (see sdk.authenticateClinicSession),
+// so this procedure denies every clinic session — including clinic admins.
+// It is only safe to use for owner-only endpoints. For anything a clinic
+// admin should also reach, use adminOrOwnerProcedure below instead.
 export const adminProcedure = normalProtectedProcedure.use(async opts => {
   const { ctx, next } = opts;
 
   if (ctx.user.role !== 'admin') {
+    throw new TRPCError({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
+  }
+
+  return next({ ctx });
+});
+
+/** For endpoints owner OAuth *and* clinic admins should both reach (e.g. staff
+ * management) — checks clinic_users.role for a clinic session (ctx.user.role
+ * is always "user" for those, see adminProcedure's note above) and falls back
+ * to the owner-OAuth role check otherwise. */
+export const adminOrOwnerProcedure = normalProtectedProcedure.use(async opts => {
+  const { ctx, next } = opts;
+
+  const isClinicAdmin = ctx.user.clinicUser?.role === 'admin';
+  const isOwnerAdmin = !ctx.user.clinicUser && ctx.user.role === 'admin';
+  if (!isClinicAdmin && !isOwnerAdmin) {
     throw new TRPCError({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
   }
 

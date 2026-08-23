@@ -7,8 +7,9 @@ import { ThemeProvider } from "./contexts/ThemeContext";
 import Dashboard from "./pages/Dashboard";
 import Login from "./pages/Login";
 import ChangePassword from "./pages/ChangePassword";
+import StaffManagement from "./pages/StaffManagement";
 import { trpc } from "@/lib/trpc";
-import { isForcedPasswordChange } from "@/lib/authGate";
+import { canManageStaff, isForcedPasswordChange } from "@/lib/authGate";
 import { useEffect } from "react";
 
 function AuthLoadingScreen() {
@@ -67,6 +68,34 @@ function ChangePasswordRoute() {
   return <ChangePassword mustChangePassword={user.mustChangePassword} />;
 }
 
+/** /staff: owner OAuth admins and clinic admins only (mirrors the server's
+ * adminOrOwnerProcedure gate). Clinic staff are redirected to /dashboard —
+ * this is UX only, the real enforcement is server-side on every staff.*
+ * endpoint, so a direct API call from a staff session is still rejected
+ * even if this client-side check were somehow bypassed. */
+function StaffManagementRoute() {
+  const [, navigate] = useLocation();
+  const { data: user, isLoading } = trpc.auth.me.useQuery();
+  const forcedPasswordChange = isForcedPasswordChange(user);
+  const allowed = canManageStaff(user);
+
+  useEffect(() => {
+    if (isLoading) return;
+    if (!user) {
+      navigate("/login");
+    } else if (forcedPasswordChange) {
+      navigate("/change-password");
+    } else if (!allowed) {
+      navigate("/dashboard");
+    }
+  }, [isLoading, user, forcedPasswordChange, allowed, navigate]);
+
+  if (isLoading) return <AuthLoadingScreen />;
+  if (!user || forcedPasswordChange || !allowed) return null;
+
+  return <StaffManagement />;
+}
+
 /** Every path backed by the same Dashboard instance. Extracted so tests can
  * verify route/component wiring without rendering the app. */
 export const DASHBOARD_ROUTE_PATHS = [
@@ -104,6 +133,7 @@ export function Router() {
     <Switch>
       <Route path="/login" component={Login} />
       <Route path="/change-password" component={ChangePasswordRoute} />
+      <Route path="/staff" component={StaffManagementRoute} />
       <Route path="/" component={() => <Redirect to="/dashboard" />} />
       <Route path={DASHBOARD_ROUTE_PATTERN} component={ProtectedDashboard} />
       <Route path="/404" component={NotFound} />
