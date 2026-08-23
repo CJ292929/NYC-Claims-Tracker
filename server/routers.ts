@@ -625,9 +625,12 @@ export const appRouter = router({
                   }];
 
               for (const line of lines) {
-                // Build the record with only the fields relevant to the upload type.
-                // Reimbursement: fills insurance payment fields only.
-                // CMS1500: fills clinical/billing fields only.
+                // Payment fields (Ins. Reimb., Pt Paid, Pt Due, Claim #, Check
+                // Date/EFT) only ever come from a Reimbursement upload; a few
+                // CMS-1500 form fields (place of service, visit #, date
+                // submitted) only ever come from a CMS1500 upload. Line-item
+                // billing detail (units/diagnosis/modifier/charge) can come
+                // from either, so it's saved unconditionally below.
                 const isReimb = uploadType === 'reimbursement';
                 const isCms = uploadType === 'cms1500';
 
@@ -657,17 +660,26 @@ export const appRouter = router({
                   referenceNo: isReimb ? (claim.referenceNo ?? null) : null,
                   insuranceBilled: isReimb ? (claim.insuranceBilled ?? null) : null,
                   paymentReceived: isReimb ? (line.insuranceReimbursement ?? null) : null,
-                  // ── CMS1500 upload fields ─────────────────────────────────────
-                  // Saves: Date of Service, Place of Service, Diagnosis Codes,
-                  //        Units Billed, Modifier, CPT Code, Units, Charge, Date Submitted
+                  // ── CMS1500-exclusive form fields ──────────────────────────────
+                  // Place of service, visit #, date submitted, and the BCBS
+                  // reference number come from specific CMS-1500 boxes and are
+                  // never printed on a payer-issued EOB.
                   placeOfService: isCms ? (claim.placeOfService ?? null) : null,
                   visitNumber: isCms ? (claim.visitNumber ?? null) : null,
-                  unitsBilled: isCms ? (line.unitsBilled ?? null) : null,
-                  diagnosisCodes: isCms ? (line.diagnosisCodes ?? null) : null,
-                  modifier: isCms ? (line.modifier ?? null) : null,
-                  chargeAmount: isCms ? (line.chargeAmount ?? null) : null,
                   claimSubmittedDate: isCms ? parseDate(claim.claimSubmittedDate) : null,
                   expireBcbsClaimNumber: isCms ? (claim.expireBcbsClaimNumber ?? null) : null,
+                  // ── Line-item billing detail (both upload types) ───────────────
+                  // Units, Diagnosis, Modifier, and Charge come from CMS-1500
+                  // Box 24 on a CMS1500 upload, but many EOBs also print their
+                  // own per-line "Line Level Information" table with the same
+                  // data (Quantity, DX Codes, Modifier, Billed Amount) — carry
+                  // it through regardless of upload type; upsertClaimRecord only
+                  // patches non-null fields, so a reimbursement upload can't
+                  // blank out a value a prior CMS1500 upload already saved.
+                  unitsBilled: line.unitsBilled ?? null,
+                  diagnosisCodes: line.diagnosisCodes ?? null,
+                  modifier: line.modifier ?? null,
+                  chargeAmount: line.chargeAmount ?? null,
                   // ── Shared optional fields ────────────────────────────────────
                   dateReceived: parseDate(claim.dateReceived),
                   dateOfAppeal: parseDate(claim.dateOfAppeal),
