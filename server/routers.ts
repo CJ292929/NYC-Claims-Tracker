@@ -1,7 +1,7 @@
 import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { TRPCError } from "@trpc/server";
-import { COOKIE_NAME } from "@shared/const";
+import { COOKIE_NAME, MIN_CLINIC_PASSWORD_LENGTH } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
@@ -17,6 +17,9 @@ import {
   updateVisitRecord,
   bulkCreateVisitRecords,
   getClinicUserByUsername,
+  getClinicUserById,
+  touchClinicUserLastLogin,
+  changeClinicUserPassword,
   getAuthAlertSummaries,
   getMarkAsRequestedTargetVisitId,
   approveAndCreateNewBatch,
@@ -82,7 +85,35 @@ function parseDate(s: string | null | undefined): Date | null {
 export const appRouter = router({
   system: systemRouter,
   auth: router({
-    me: publicProcedure.query(opts => opts.ctx.user),
+    // Discriminated on authType so the client can gate on clinic-only concerns
+    // (mustChangePassword) without ever seeing passwordHash or token_version.
+    me: publicProcedure.query(({ ctx }) => {
+      const user = ctx.user;
+      if (!user) return null;
+
+      if (user.clinicUser) {
+        const staff = user.clinicUser;
+        return {
+          authType: "clinic" as const,
+          id: user.id,
+          clinicUserId: staff.clinicUserId,
+          username: staff.username,
+          name: staff.name,
+          email: staff.email,
+          department: staff.department,
+          role: staff.role,
+          mustChangePassword: staff.mustChangePassword,
+        };
+      }
+
+      return {
+        authType: "owner" as const,
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      };
+    }),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
@@ -116,16 +147,26 @@ export const appRouter = router({
           throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid username or password" });
         }
         clearFailedAttempts(rateLimitKey, ip);
-        // Create a session token using the existing JWT mechanism.
-        const syntheticOpenId = `clinic_${clinicUser.username}`;
-        const token = await sdk.createSessionToken(syntheticOpenId, {
-          name: clinicUser.username,
-          expiresInMs: ONE_YEAR_MS,
+
+        // Only checked after a correct password, so an unauthenticated caller
+        // can never use this to discover whether an archived account exists.
+        if (clinicUser.status !== "active") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "This account has been archived. Contact your administrator." });
+        }
+
+        await touchClinicUserLastLogin(clinicUser.id);
+
+        const token = await sdk.createClinicSessionToken({
+          clinicUserId: clinicUser.id,
+          username: clinicUser.username,
+          tokenVersion: clinicUser.tokenVersion,
         });
         // Upsert a users row so protectedProcedure can resolve ctx.user
+        // (clinic_users remains the authority for identity/status/role/
+        // must_change_password/token_version — this is a compatibility bridge).
         const { upsertUser } = await import("./db");
         await upsertUser({
-          openId: syntheticOpenId,
+          openId: `clinic_${clinicUser.username}`,
           name: clinicUser.username,
           email: null,
           loginMethod: "password",
@@ -137,6 +178,76 @@ export const appRouter = router({
           maxAge: ONE_YEAR_MS,
         });
         return { success: true, username: clinicUser.username };
+      }),
+
+    // Operates only on the currently authenticated clinic user — identity is
+    // derived from the session, never accepted from the client.
+    changePassword: protectedProcedure
+      .input(
+        z.object({
+          currentPassword: z.string().min(1),
+          newPassword: z.string().min(MIN_CLINIC_PASSWORD_LENGTH),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const staff = ctx.user.clinicUser;
+        if (!staff) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Not a clinic staff session" });
+        }
+
+        const ip = getClientIp(ctx.req);
+        const rateLimitKey = normalizeUsername(staff.username);
+        if (isRateLimited(rateLimitKey, ip)) {
+          throw new TRPCError({
+            code: "TOO_MANY_REQUESTS",
+            message: "Too many attempts. Please try again later.",
+          });
+        }
+
+        const clinicUser = await getClinicUserById(staff.clinicUserId);
+        if (!clinicUser || clinicUser.status !== "active") {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "Session is no longer valid" });
+        }
+
+        const validCurrent = await bcrypt.compare(input.currentPassword, clinicUser.passwordHash);
+        if (!validCurrent) {
+          recordFailedAttempt(rateLimitKey, ip);
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "Current password is incorrect" });
+        }
+        clearFailedAttempts(rateLimitKey, ip);
+
+        if (input.newPassword === input.currentPassword) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "New password must be different from your current password",
+          });
+        }
+
+        const newPasswordHash = await bcrypt.hash(input.newPassword, 10);
+        const updated = await changeClinicUserPassword({
+          id: clinicUser.id,
+          passwordHash: newPasswordHash,
+          expectedTokenVersion: clinicUser.tokenVersion,
+        });
+        if (!updated) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "Your session changed during this request. Please sign in again.",
+          });
+        }
+
+        const token = await sdk.createClinicSessionToken({
+          clinicUserId: updated.id,
+          username: updated.username,
+          tokenVersion: updated.tokenVersion,
+        });
+        const cookieOptions = getSessionCookieOptions(ctx.req);
+        ctx.res.cookie(COOKIE_NAME, token, {
+          ...cookieOptions,
+          maxAge: ONE_YEAR_MS,
+        });
+
+        return { success: true } as const;
       }),
   }),
 

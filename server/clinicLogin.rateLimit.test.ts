@@ -7,18 +7,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClinicUser } from "../drizzle/schema";
 import type { TrpcContext } from "./_core/context";
 
-const { bcryptMock, dbMock, createSessionToken } = vi.hoisted(() => ({
+const { bcryptMock, dbMock, createClinicSessionToken } = vi.hoisted(() => ({
   bcryptMock: { compare: vi.fn() },
   dbMock: {
     getClinicUserByUsername: vi.fn(),
+    getClinicUserById: vi.fn(),
+    touchClinicUserLastLogin: vi.fn(),
+    changeClinicUserPassword: vi.fn(),
     upsertUser: vi.fn(),
   },
-  createSessionToken: vi.fn(),
+  createClinicSessionToken: vi.fn(),
 }));
 
 vi.mock("bcryptjs", () => ({ default: bcryptMock, ...bcryptMock }));
 vi.mock("./db", () => dbMock);
-vi.mock("./_core/sdk", () => ({ sdk: { createSessionToken } }));
+vi.mock("./_core/sdk", () => ({ sdk: { createClinicSessionToken } }));
 
 import { appRouter } from "./routers";
 import { __resetLoginRateLimitForTests } from "./_core/loginRateLimit";
@@ -70,7 +73,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   dbMock.getClinicUserByUsername.mockResolvedValue(FAKE_USER);
   dbMock.upsertUser.mockResolvedValue(undefined);
-  createSessionToken.mockResolvedValue("fake-session-token");
+  dbMock.touchClinicUserLastLogin.mockResolvedValue(undefined);
+  createClinicSessionToken.mockResolvedValue("fake-session-token");
 });
 
 afterEach(() => {
@@ -184,5 +188,61 @@ describe("clinic.login rate limiting", () => {
       code: "UNAUTHORIZED",
       message: "Invalid username or password",
     });
+  });
+});
+
+describe("clinic.login staff identity (S2)", () => {
+  it("A: active staff + correct password succeeds", async () => {
+    bcryptMock.compare.mockResolvedValue(true);
+    const { caller } = makeCaller();
+
+    await expect(login(caller)).resolves.toEqual({ success: true, username: "nurse.jane" });
+  });
+
+  it("D: an archived account is rejected only after the password has already been verified correct", async () => {
+    bcryptMock.compare.mockResolvedValue(true);
+    dbMock.getClinicUserByUsername.mockResolvedValue({ ...FAKE_USER, status: "archived" });
+    const { caller, setCookies } = makeCaller();
+
+    await expect(login(caller)).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    expect(bcryptMock.compare).toHaveBeenCalled(); // password WAS checked before the status gate
+    expect(createClinicSessionToken).not.toHaveBeenCalled();
+    expect(setCookies).toHaveLength(0);
+  });
+
+  it("F: a successful login updates last_login_at", async () => {
+    bcryptMock.compare.mockResolvedValue(true);
+    const { caller } = makeCaller();
+
+    await login(caller);
+
+    expect(dbMock.touchClinicUserLastLogin).toHaveBeenCalledWith(FAKE_USER.id);
+  });
+
+  it("G: the session created on login carries the clinic_users id and current token_version, not just the username", async () => {
+    bcryptMock.compare.mockResolvedValue(true);
+    dbMock.getClinicUserByUsername.mockResolvedValue({ ...FAKE_USER, tokenVersion: 7 });
+    const { caller } = makeCaller();
+
+    await login(caller);
+
+    expect(createClinicSessionToken).toHaveBeenCalledWith({
+      clinicUserId: FAKE_USER.id,
+      username: "nurse.jane",
+      tokenVersion: 7,
+    });
+  });
+
+  it("E: login is case-insensitive — the raw (mixed-case) username is forwarded to the case-insensitive lookup, not lowercased twice", async () => {
+    bcryptMock.compare.mockResolvedValue(true);
+    const { caller } = makeCaller();
+
+    await caller.clinic.login({ username: "Nurse.Jane", password: "correct-password" });
+
+    // getClinicUserByUsername (server/db.ts) owns the actual case-folding via
+    // ilike + normalizeUsername; this just confirms clinic.login doesn't
+    // normalize/mutate the username before handing it off.
+    expect(dbMock.getClinicUserByUsername).toHaveBeenCalledWith("Nurse.Jane");
   });
 });
