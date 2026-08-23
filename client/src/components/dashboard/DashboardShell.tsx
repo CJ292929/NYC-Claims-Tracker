@@ -63,6 +63,7 @@ export function DashboardShell({
             onNavigate={handleNavigate}
             onSignOut={onSignOut}
             signingOut={signingOut}
+            canManageStaff={canManageStaff}
           />
         </SheetContent>
       </Sheet>
