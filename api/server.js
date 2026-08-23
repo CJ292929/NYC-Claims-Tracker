@@ -1810,6 +1810,7 @@ function parseMeritainEOBWithGroups(text) {
     while ((lineMatch = serviceLinePattern.exec(section)) !== null) {
       const rawDate = lineMatch[1];
       const cptCode = lineMatch[3];
+      const totalCharge = parseMoney(lineMatch[4]);
       const notPaymentAmount = parseMoney(lineMatch[5]);
       const coIns = parseMoney(lineMatch[9]) ?? 0;
       const coPay = parseMoney(lineMatch[10]) ?? 0;
@@ -1824,11 +1825,11 @@ function parseMeritainEOBWithGroups(text) {
       patientClaims.push({
         dateOfService: parsedDate,
         cptCodes: cptCode || null,
-        // Charge is a CMS-1500-only field. dateOfService/cptCodes above stay
-        // populated even on a Reimbursement/EOB upload — they're the upsert
-        // match key used to attach this payment to its existing CMS-1500
-        // row, not reimbursement "value" data.
-        chargeAmount: null,
+        // "total charge" is the provider's billed amount for this line,
+        // printed directly in Meritain's service-line table (group 4) —
+        // the same concept as a CMS-1500's Box 24F charge, safe to carry
+        // through on a Reimbursement/EOB upload too.
+        chargeAmount: totalCharge,
         insuranceReimbursement: notPaymentAmount,
         patientAmountPaid: coPayAmountFromLine,
         // groupName ("16404/137040261") is the Group Name/Check billing
@@ -1847,6 +1848,12 @@ function parseMeritainEOBWithGroups(text) {
         // upsert merge (see enforceFieldBoundary's CMS1500_ONLY_FIELDS).
         visitNumber: null,
         placeOfService: null,
+        // Meritain's service-line table (see the column list above this
+        // function) genuinely does not print per-line units, diagnosis
+        // codes, or modifiers — there's no source data to extract, unlike
+        // chargeAmount above. REIMBURSEMENT_LINE_FIELDS_TO_BACKFILL in
+        // claimUpload.ts will fill these from the AI backfill pass if a
+        // future Meritain layout variant does print them.
         unitsBilled: null,
         diagnosisCodes: null,
         modifier: null,
@@ -2241,14 +2248,18 @@ async function extractClaimsWithAI(source, uploadType) {
 
 *** CRITICAL: You MUST extract the PATIENT NAME for EACH claim, individually. This is required for matching against the clinic's patient database. ***
 
-*** DOCUMENT-TYPE BOUNDARY: This is a Reimbursement/EOB document. Only extract payment-side data \u2014 insuranceReimbursement, patientAmountPaid, patientAmountDue, oaClaimNumber (Claim #), checkDate (Check/Payment Date), and checkNumberVirtualCard (Check/EFT) \u2014 plus dateOfService and cptCodes, which you extract ONLY to identify which existing claim this payment applies to, never as billing data. NEVER extract placeOfService, diagnosisCodes, unitsBilled, modifier, or chargeAmount \u2014 those belong exclusively to CMS-1500 claim forms and must not appear on a Reimbursement/EOB record. ***
+*** DOCUMENT-TYPE BOUNDARY: This is a Reimbursement/EOB document. Extract payment-side data \u2014 insuranceReimbursement, patientAmountPaid, patientAmountDue, oaClaimNumber (Claim #), checkDate (Check/Payment Date), and checkNumberVirtualCard (Check/EFT) \u2014 plus dateOfService and cptCodes, which double as the key used to identify which existing claim this payment applies to. Many EOBs also print a per-line "Line Level Information" billing table (Billed Amount, DX/Diagnosis Codes, Modifier, Quantity/Units) alongside the payment columns \u2014 when that table is present, ALSO extract chargeAmount, diagnosisCodes, modifier, and unitsBilled from it (see field list below); leave any of those null only when the document genuinely does not print it. NEVER extract placeOfService \u2014 that comes exclusively from CMS-1500 claim forms (Box 24B) and is never printed on a Reimbursement/EOB. ***
 
 Payers lay these documents out very differently \u2014 a table of many patients on one page, a single-patient web-portal export, a per-claim narrative block, etc. Do not assume there is only one patient name at the top of the document: scan the ENTIRE document and re-identify the patient name at each claim/service-line block, since one EOB commonly covers many different patients (e.g. a check remitting payment for a whole clinic's batch of claims).
 
 For each claim/service line, extract EVERY one of these fields when it appears anywhere in the document \u2014 a payment line's reimbursement, patient-paid, patient-due, claim #, check date, and check/EFT number are often printed in different parts of the same claim block, not all in one place, so check the whole block before leaving any of them null:
 - patientName: REQUIRED - full name exactly as shown next to that specific claim (e.g., "JOHN SMITH" or "Smith, John" or "JOHN M SMITH"). Never reuse a different claim's patient name.
-- dateOfService: MM/DD/YYYY format \u2014 extracted only to match this payment to the correct existing claim record, not as reimbursement data
-- cptCodes: CPT/HCPCS code(s), comma-separated if multiple \u2014 extracted only to match this payment to the correct existing claim record, not as reimbursement data
+- dateOfService: MM/DD/YYYY format \u2014 doubles as part of the match key against the existing claim record
+- cptCodes: CPT/HCPCS code(s), comma-separated if multiple \u2014 doubles as part of the match key against the existing claim record
+- chargeAmount: the provider's BILLED charge for this specific line, when the EOB prints a line-item billing table (labeled "Billed Amount", "Charge", "Submitted Charges", "Amount Charged", etc.). This is the same concept as a CMS-1500's Box 24F charge \u2014 NOT the Allowed Amount (contracted/allowable rate) and NOT the Paid Amount. Null if the document only prints payment-side totals with no per-line billed figure.
+- diagnosisCodes: ICD-10 diagnosis code(s) for this line, comma-separated, when printed in the EOB's line-item table (labeled "DX", "Diagnosis Codes", "Dx Codes", etc.). Null if not printed.
+- modifier: CPT modifier code(s) for this line, when printed (e.g. "GP", "59"). If more than one modifier applies to the same line, join them in printed order separated by ", " (e.g. "59, GP") \u2014 never truncate to only the first one. Null if not printed.
+- unitsBilled: units/quantity billed for this line (labeled "Quantity", "Units", "Qty"), when printed. Normalize to a plain number (e.g. "1.000" \u2192 1). Null if not printed.
 - insuranceReimbursement: insurance reimbursement/allowed/paid amount (numeric only)
 - patientAmountPaid: patient co-pay amount already paid (numeric only)
 - patientAmountDue: patient balance/responsibility still due (numeric only)
@@ -2260,8 +2271,10 @@ For each claim/service line, extract EVERY one of these fields when it appears a
 - visitNumber: Always return null for EOB documents. Visit number comes only from CMS-1500 forms.
 
 FIELD NAME VARIATIONS \u2014 the same data point is labeled differently across payers; map by meaning, not by exact label. Some payers print several *different, non-interchangeable* dollar columns \u2014 read carefully, don't just grab the first similar-sounding label:
+- Charge (chargeAmount) = the provider's ORIGINAL BILLED charge for this line: "Billed Amount", "Charge", "Submitted Charges", "Amount Charged". This is NOT "Allowed Amount"/"Allowable"/"QPA" (the contracted rate) and NOT "Paid"/"Payable" (what insurance actually paid) \u2014 those are separate columns; do not substitute either of them into chargeAmount.
 - Insurance Reimbursement = the amount the payer actually PAID/will pay: "Paid Amount", "Payable Amount", "Plan Paid", "Claim Payment Amount". This is NOT the same as "Allowed Amount"/"Allowable"/"QPA" \u2014 that is only the contractually recognized rate the patient-responsibility math is based on, and is often larger than what was actually paid (especially out-of-network). If both an "Allowed" and a "Paid"/"Payable" column exist, use the "Paid"/"Payable" one.
-- Patient Due = the patient's owed balance under the plan: "Patient Responsibility", "Patient Resp", "Balance Due", or Copay + Deductible + Coinsurance summed. Some EOBs separately print a "Not Payable"/"Not Covered" column for amounts the plan simply doesn't cover \u2014 that is a different concept from Patient Responsibility (it's often only billable to the patient if a separate balance-billing agreement applies) \u2014 prefer the explicit "Patient Responsibility" figure when both are present.
+- Patient Due = the patient's owed balance under the plan: "Patient Responsibility", "Patient Resp", "Balance Due". Some EOBs instead print separate "Coinsurance Amount", "Copay Amount", and "Deductible Amount" columns without a single combined "Patient Responsibility" figure \u2014 do NOT sum those three yourself and do NOT write any one of them individually into patientAmountDue or patientAmountPaid; leave patientAmountDue null in that case rather than guessing which figure(s) apply, unless an explicit combined "Patient Responsibility"/"Balance Due" label is also present. Some EOBs separately print a "Not Payable"/"Not Covered" column for amounts the plan simply doesn't cover \u2014 that is a different concept from Patient Responsibility (it's often only billable to the patient if a separate balance-billing agreement applies) \u2014 prefer the explicit "Patient Responsibility" figure when both are present.
+- "Allowed Amount" and any per-line "Coinsurance Amount" / "Copay Amount" / "Deductible Amount" columns are not captured by any field in this schema \u2014 do not write them into chargeAmount, insuranceReimbursement, patientAmountPaid, or patientAmountDue.
 - Claim Number = "Claim ID", "ICN", "Reference #", "Claim #", "Transaction ID", "Control Number"
 - Check/Payment Date = "Payment Date", "Check Date", "Direct Deposit Date", "EFT Date"
 - Auto/PIP (e.g. GEICO) EOBs use their own labels: Date of Service = "DOS"; CPT Codes = "PROC CODE"; Charge = "CHARGE". These documents commonly print a "REDUCTION" column \u2014 this is the insurer's own fee-schedule/contractual reduction, NOT patientAmountDue. No-fault auto/PIP coverage typically has zero patient responsibility, so do not map REDUCTION to patientAmountDue just because it's a dollar amount near the charge/paid columns; if no explicit patient-responsibility label exists, patientAmountDue is null. insuranceReimbursement on these documents is usually labeled "PROVIDER REIMBURSE".
@@ -2316,6 +2329,10 @@ ${source.text}` : [
     // REQUIRED
     dateOfService: { type: ["string", "null"] },
     cptCodes: { type: ["string", "null"] },
+    chargeAmount: { type: ["number", "null"] },
+    diagnosisCodes: { type: ["string", "null"] },
+    modifier: { type: ["string", "null"] },
+    unitsBilled: { type: ["number", "null"] },
     insuranceReimbursement: { type: ["number", "null"] },
     patientAmountPaid: { type: ["number", "null"] },
     patientAmountDue: { type: ["number", "null"] },
@@ -2577,7 +2594,15 @@ var REIMBURSEMENT_CLAIM_FIELDS_TO_BACKFILL = [
 var REIMBURSEMENT_LINE_FIELDS_TO_BACKFILL = [
   "insuranceReimbursement",
   "patientAmountPaid",
-  "patientAmountDue"
+  "patientAmountDue",
+  // Line-item billing detail (Billed Amount / DX / Modifier / Quantity) that
+  // many EOBs print alongside the payment columns in their own "Line Level
+  // Information" table — no longer CMS1500-exclusive, see the comment on
+  // CMS1500_ONLY_FIELDS below.
+  "chargeAmount",
+  "diagnosisCodes",
+  "modifier",
+  "unitsBilled"
 ];
 function hasMissingFields(claims, claimFields, lineFields) {
   return claims.some((claim) => {
@@ -2622,10 +2647,6 @@ function backfillMissingFields(claims, aiClaims, claimFields, lineFields) {
 }
 var CMS1500_ONLY_FIELDS = [
   "placeOfService",
-  "diagnosisCodes",
-  "unitsBilled",
-  "modifier",
-  "chargeAmount",
   "claimSubmittedDate",
   // Matches the existing isCms gate in bulkImportFromEOB (server/routers.ts),
   // which already only ever writes visitNumber for CMS-1500 claims.
@@ -3801,17 +3822,26 @@ var appRouter = router({
                 referenceNo: isReimb ? claim.referenceNo ?? null : null,
                 insuranceBilled: isReimb ? claim.insuranceBilled ?? null : null,
                 paymentReceived: isReimb ? line.insuranceReimbursement ?? null : null,
-                // ── CMS1500 upload fields ─────────────────────────────────────
-                // Saves: Date of Service, Place of Service, Diagnosis Codes,
-                //        Units Billed, Modifier, CPT Code, Units, Charge, Date Submitted
+                // ── CMS1500-exclusive form fields ──────────────────────────────
+                // Place of service, visit #, date submitted, and the BCBS
+                // reference number come from specific CMS-1500 boxes and are
+                // never printed on a payer-issued EOB.
                 placeOfService: isCms ? claim.placeOfService ?? null : null,
                 visitNumber: isCms ? claim.visitNumber ?? null : null,
-                unitsBilled: isCms ? line.unitsBilled ?? null : null,
-                diagnosisCodes: isCms ? line.diagnosisCodes ?? null : null,
-                modifier: isCms ? line.modifier ?? null : null,
-                chargeAmount: isCms ? line.chargeAmount ?? null : null,
                 claimSubmittedDate: isCms ? parseDate2(claim.claimSubmittedDate) : null,
                 expireBcbsClaimNumber: isCms ? claim.expireBcbsClaimNumber ?? null : null,
+                // ── Line-item billing detail (both upload types) ───────────────
+                // Units, Diagnosis, Modifier, and Charge come from CMS-1500
+                // Box 24 on a CMS1500 upload, but many EOBs also print their
+                // own per-line "Line Level Information" table with the same
+                // data (Quantity, DX Codes, Modifier, Billed Amount) — carry
+                // it through regardless of upload type; upsertClaimRecord only
+                // patches non-null fields, so a reimbursement upload can't
+                // blank out a value a prior CMS1500 upload already saved.
+                unitsBilled: line.unitsBilled ?? null,
+                diagnosisCodes: line.diagnosisCodes ?? null,
+                modifier: line.modifier ?? null,
+                chargeAmount: line.chargeAmount ?? null,
                 // ── Shared optional fields ────────────────────────────────────
                 dateReceived: parseDate2(claim.dateReceived),
                 dateOfAppeal: parseDate2(claim.dateOfAppeal),

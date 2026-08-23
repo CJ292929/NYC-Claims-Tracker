@@ -219,14 +219,18 @@ export async function extractClaimsWithAI(
 
 *** CRITICAL: You MUST extract the PATIENT NAME for EACH claim, individually. This is required for matching against the clinic's patient database. ***
 
-*** DOCUMENT-TYPE BOUNDARY: This is a Reimbursement/EOB document. Only extract payment-side data — insuranceReimbursement, patientAmountPaid, patientAmountDue, oaClaimNumber (Claim #), checkDate (Check/Payment Date), and checkNumberVirtualCard (Check/EFT) — plus dateOfService and cptCodes, which you extract ONLY to identify which existing claim this payment applies to, never as billing data. NEVER extract placeOfService, diagnosisCodes, unitsBilled, modifier, or chargeAmount — those belong exclusively to CMS-1500 claim forms and must not appear on a Reimbursement/EOB record. ***
+*** DOCUMENT-TYPE BOUNDARY: This is a Reimbursement/EOB document. Extract payment-side data — insuranceReimbursement, patientAmountPaid, patientAmountDue, oaClaimNumber (Claim #), checkDate (Check/Payment Date), and checkNumberVirtualCard (Check/EFT) — plus dateOfService and cptCodes, which double as the key used to identify which existing claim this payment applies to. Many EOBs also print a per-line "Line Level Information" billing table (Billed Amount, DX/Diagnosis Codes, Modifier, Quantity/Units) alongside the payment columns — when that table is present, ALSO extract chargeAmount, diagnosisCodes, modifier, and unitsBilled from it (see field list below); leave any of those null only when the document genuinely does not print it. NEVER extract placeOfService — that comes exclusively from CMS-1500 claim forms (Box 24B) and is never printed on a Reimbursement/EOB. ***
 
 Payers lay these documents out very differently — a table of many patients on one page, a single-patient web-portal export, a per-claim narrative block, etc. Do not assume there is only one patient name at the top of the document: scan the ENTIRE document and re-identify the patient name at each claim/service-line block, since one EOB commonly covers many different patients (e.g. a check remitting payment for a whole clinic's batch of claims).
 
 For each claim/service line, extract EVERY one of these fields when it appears anywhere in the document — a payment line's reimbursement, patient-paid, patient-due, claim #, check date, and check/EFT number are often printed in different parts of the same claim block, not all in one place, so check the whole block before leaving any of them null:
 - patientName: REQUIRED - full name exactly as shown next to that specific claim (e.g., "JOHN SMITH" or "Smith, John" or "JOHN M SMITH"). Never reuse a different claim's patient name.
-- dateOfService: MM/DD/YYYY format — extracted only to match this payment to the correct existing claim record, not as reimbursement data
-- cptCodes: CPT/HCPCS code(s), comma-separated if multiple — extracted only to match this payment to the correct existing claim record, not as reimbursement data
+- dateOfService: MM/DD/YYYY format — doubles as part of the match key against the existing claim record
+- cptCodes: CPT/HCPCS code(s), comma-separated if multiple — doubles as part of the match key against the existing claim record
+- chargeAmount: the provider's BILLED charge for this specific line, when the EOB prints a line-item billing table (labeled "Billed Amount", "Charge", "Submitted Charges", "Amount Charged", etc.). This is the same concept as a CMS-1500's Box 24F charge — NOT the Allowed Amount (contracted/allowable rate) and NOT the Paid Amount. Null if the document only prints payment-side totals with no per-line billed figure.
+- diagnosisCodes: ICD-10 diagnosis code(s) for this line, comma-separated, when printed in the EOB's line-item table (labeled "DX", "Diagnosis Codes", "Dx Codes", etc.). Null if not printed.
+- modifier: CPT modifier code(s) for this line, when printed (e.g. "GP", "59"). If more than one modifier applies to the same line, join them in printed order separated by ", " (e.g. "59, GP") — never truncate to only the first one. Null if not printed.
+- unitsBilled: units/quantity billed for this line (labeled "Quantity", "Units", "Qty"), when printed. Normalize to a plain number (e.g. "1.000" → 1). Null if not printed.
 - insuranceReimbursement: insurance reimbursement/allowed/paid amount (numeric only)
 - patientAmountPaid: patient co-pay amount already paid (numeric only)
 - patientAmountDue: patient balance/responsibility still due (numeric only)
@@ -238,8 +242,10 @@ For each claim/service line, extract EVERY one of these fields when it appears a
 - visitNumber: Always return null for EOB documents. Visit number comes only from CMS-1500 forms.
 
 FIELD NAME VARIATIONS — the same data point is labeled differently across payers; map by meaning, not by exact label. Some payers print several *different, non-interchangeable* dollar columns — read carefully, don't just grab the first similar-sounding label:
+- Charge (chargeAmount) = the provider's ORIGINAL BILLED charge for this line: "Billed Amount", "Charge", "Submitted Charges", "Amount Charged". This is NOT "Allowed Amount"/"Allowable"/"QPA" (the contracted rate) and NOT "Paid"/"Payable" (what insurance actually paid) — those are separate columns; do not substitute either of them into chargeAmount.
 - Insurance Reimbursement = the amount the payer actually PAID/will pay: "Paid Amount", "Payable Amount", "Plan Paid", "Claim Payment Amount". This is NOT the same as "Allowed Amount"/"Allowable"/"QPA" — that is only the contractually recognized rate the patient-responsibility math is based on, and is often larger than what was actually paid (especially out-of-network). If both an "Allowed" and a "Paid"/"Payable" column exist, use the "Paid"/"Payable" one.
-- Patient Due = the patient's owed balance under the plan: "Patient Responsibility", "Patient Resp", "Balance Due", or Copay + Deductible + Coinsurance summed. Some EOBs separately print a "Not Payable"/"Not Covered" column for amounts the plan simply doesn't cover — that is a different concept from Patient Responsibility (it's often only billable to the patient if a separate balance-billing agreement applies) — prefer the explicit "Patient Responsibility" figure when both are present.
+- Patient Due = the patient's owed balance under the plan: "Patient Responsibility", "Patient Resp", "Balance Due". Some EOBs instead print separate "Coinsurance Amount", "Copay Amount", and "Deductible Amount" columns without a single combined "Patient Responsibility" figure — do NOT sum those three yourself and do NOT write any one of them individually into patientAmountDue or patientAmountPaid; leave patientAmountDue null in that case rather than guessing which figure(s) apply, unless an explicit combined "Patient Responsibility"/"Balance Due" label is also present. Some EOBs separately print a "Not Payable"/"Not Covered" column for amounts the plan simply doesn't cover — that is a different concept from Patient Responsibility (it's often only billable to the patient if a separate balance-billing agreement applies) — prefer the explicit "Patient Responsibility" figure when both are present.
+- "Allowed Amount" and any per-line "Coinsurance Amount" / "Copay Amount" / "Deductible Amount" columns are not captured by any field in this schema — do not write them into chargeAmount, insuranceReimbursement, patientAmountPaid, or patientAmountDue.
 - Claim Number = "Claim ID", "ICN", "Reference #", "Claim #", "Transaction ID", "Control Number"
 - Check/Payment Date = "Payment Date", "Check Date", "Direct Deposit Date", "EFT Date"
 - Auto/PIP (e.g. GEICO) EOBs use their own labels: Date of Service = "DOS"; CPT Codes = "PROC CODE"; Charge = "CHARGE". These documents commonly print a "REDUCTION" column — this is the insurer's own fee-schedule/contractual reduction, NOT patientAmountDue. No-fault auto/PIP coverage typically has zero patient responsibility, so do not map REDUCTION to patientAmountDue just because it's a dollar amount near the charge/paid columns; if no explicit patient-responsibility label exists, patientAmountDue is null. insuranceReimbursement on these documents is usually labeled "PROVIDER REIMBURSE".
@@ -316,6 +322,10 @@ IMPORTANT:
     patientName: { type: "string" }, // REQUIRED
     dateOfService: { type: ["string", "null"] },
     cptCodes: { type: ["string", "null"] },
+    chargeAmount: { type: ["number", "null"] },
+    diagnosisCodes: { type: ["string", "null"] },
+    modifier: { type: ["string", "null"] },
+    unitsBilled: { type: ["number", "null"] },
     insuranceReimbursement: { type: ["number", "null"] },
     patientAmountPaid: { type: ["number", "null"] },
     patientAmountDue: { type: ["number", "null"] },

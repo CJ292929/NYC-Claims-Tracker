@@ -206,6 +206,7 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
     while ((lineMatch = serviceLinePattern.exec(section)) !== null) {
       const rawDate = lineMatch[1];
       const cptCode = lineMatch[3];
+      const totalCharge = parseMoney(lineMatch[4]); // provider's billed charge for this line
       const notPaymentAmount = parseMoney(lineMatch[5]); // allowed/insurance reimbursement
       // Patient obligation = co-ins + co-pay + deductible + non-covered
       const coIns = parseMoney(lineMatch[9]) ?? 0;
@@ -223,11 +224,11 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
       patientClaims.push({
         dateOfService: parsedDate,
         cptCodes: cptCode || null,
-        // Charge is a CMS-1500-only field. dateOfService/cptCodes above stay
-        // populated even on a Reimbursement/EOB upload — they're the upsert
-        // match key used to attach this payment to its existing CMS-1500
-        // row, not reimbursement "value" data.
-        chargeAmount: null,
+        // "total charge" is the provider's billed amount for this line,
+        // printed directly in Meritain's service-line table (group 4) —
+        // the same concept as a CMS-1500's Box 24F charge, safe to carry
+        // through on a Reimbursement/EOB upload too.
+        chargeAmount: totalCharge,
         insuranceReimbursement: notPaymentAmount,
         patientAmountPaid: coPayAmountFromLine,
         // groupName ("16404/137040261") is the Group Name/Check billing
@@ -246,6 +247,12 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
         // upsert merge (see enforceFieldBoundary's CMS1500_ONLY_FIELDS).
         visitNumber: null,
         placeOfService: null,
+        // Meritain's service-line table (see the column list above this
+        // function) genuinely does not print per-line units, diagnosis
+        // codes, or modifiers — there's no source data to extract, unlike
+        // chargeAmount above. REIMBURSEMENT_LINE_FIELDS_TO_BACKFILL in
+        // claimUpload.ts will fill these from the AI backfill pass if a
+        // future Meritain layout variant does print them.
         unitsBilled: null,
         diagnosisCodes: null,
         modifier: null,
