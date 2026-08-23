@@ -10,6 +10,7 @@
  * (e.g. Redis/Upstash), which is out of scope here.
  */
 import type { IncomingHttpHeaders } from "http";
+export { normalizeUsername } from "./username";
 
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_FAILED_ATTEMPTS = 5;
@@ -36,10 +37,6 @@ function sweepExpired(now: number): void {
 
 function keyFor(normalizedUsername: string, ip: string): string {
   return `${normalizedUsername}|${ip}`;
-}
-
-export function normalizeUsername(username: string): string {
-  return username.trim().toLowerCase();
 }
 
 /** Best-effort client IP, read directly from headers (no `trust proxy` dependency). */

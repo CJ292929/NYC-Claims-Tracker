@@ -7,6 +7,7 @@
 
 import { supabase } from "./supabase";
 import { ENV } from "./_core/env";
+import { normalizeUsername, escapeLikePattern } from "./_core/username";
 import type { User, Patient, VisitRecord, ClinicUser, InsertVisitRecord } from "../drizzle/schema";
 import { determineActivePeriod, deriveAuthPeriodMetrics, getPeriodMetrics } from "@shared/authPeriodMetrics";
 import { deriveAuthorizationUrgency } from "@shared/authUrgency";
@@ -70,7 +71,17 @@ function toClinicUser(row: any): ClinicUser {
     id: row.id,
     username: row.username,
     passwordHash: row.password_hash,
+    name: row.name ?? null,
+    email: row.email ?? null,
+    department: row.department ?? null,
+    role: row.role ?? "staff",
+    status: row.status ?? "active",
+    mustChangePassword: row.must_change_password ?? true,
+    tokenVersion: row.token_version ?? 0,
     createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at ?? row.created_at),
+    lastLoginAt: row.last_login_at ? new Date(row.last_login_at) : null,
+    archivedAt: row.archived_at ? new Date(row.archived_at) : null,
   };
 }
 
@@ -624,10 +635,12 @@ export async function getCompletedPatients(): Promise<string[]> {
 // ─── Clinic user helpers ──────────────────────────────────────────────────────
 
 export async function getClinicUserByUsername(username: string): Promise<ClinicUser | undefined> {
+  // Case-insensitive lookup, consistent with the UNIQUE(lower(username)) index.
+  const normalized = normalizeUsername(username);
   const { data, error } = await supabase
     .from("clinic_users")
     .select("*")
-    .eq("username", username)
+    .ilike("username", escapeLikePattern(normalized))
     .maybeSingle();
 
   if (error) {

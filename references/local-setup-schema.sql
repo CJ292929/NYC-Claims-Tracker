@@ -41,13 +41,26 @@ CREATE TABLE IF NOT EXISTS public.users (
   last_signed_in timestamptz NOT NULL DEFAULT now()
 );
 
--- ─── clinic_users (username/password login) ────────────────────────────────
+-- ─── clinic_users (individual staff identities; username/password login) ──
 CREATE TABLE IF NOT EXISTS public.clinic_users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  username text NOT NULL UNIQUE,
+  username text NOT NULL,
   password_hash text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+  name text,
+  email text,
+  department text,
+  role text NOT NULL DEFAULT 'staff' CHECK (role IN ('admin', 'staff')),
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  must_change_password boolean NOT NULL DEFAULT true,
+  token_version integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  last_login_at timestamptz,
+  archived_at timestamptz
 );
+
+-- Case-insensitive uniqueness: jerome / Jerome / JEROME must collide.
+CREATE UNIQUE INDEX IF NOT EXISTS clinic_users_username_lower_key ON public.clinic_users (lower(username));
 
 -- ─── patients ────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.patients (
@@ -150,8 +163,11 @@ DROP TRIGGER IF EXISTS trg_claims_records_updated_at ON public.claims_records;
 CREATE TRIGGER trg_claims_records_updated_at BEFORE UPDATE ON public.claims_records
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
--- ─── seed the staff login account (jeromerivera123 / nychomerehab) ─────────
--- Password hash below is bcrypt("nychomerehab", 10 rounds).
+DROP TRIGGER IF EXISTS trg_clinic_users_updated_at ON public.clinic_users;
+CREATE TRIGGER trg_clinic_users_updated_at BEFORE UPDATE ON public.clinic_users
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- seed initial clinic login account
 INSERT INTO public.clinic_users (username, password_hash)
 VALUES ('jeromerivera123', '$2b$10$kuVrXRE2VoaLoS7UJY6OG.OHWULrOWxg6VCKPoMm6hiWmpSwyoeo6')
-ON CONFLICT (username) DO NOTHING;
+ON CONFLICT ((lower(username))) DO NOTHING;
