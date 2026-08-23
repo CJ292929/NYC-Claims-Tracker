@@ -4,7 +4,7 @@ import { TRPCError } from "@trpc/server";
 import { COOKIE_NAME, MIN_CLINIC_PASSWORD_LENGTH } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { normalProtectedProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import {
   getAllPatients,
   getPatientById,
@@ -161,7 +161,7 @@ export const appRouter = router({
           username: clinicUser.username,
           tokenVersion: clinicUser.tokenVersion,
         });
-        // Upsert a users row so protectedProcedure can resolve ctx.user
+        // Upsert a users row so normalProtectedProcedure can resolve ctx.user
         // (clinic_users remains the authority for identity/status/role/
         // must_change_password/token_version — this is a compatibility bridge).
         const { upsertUser } = await import("./db");
@@ -182,6 +182,8 @@ export const appRouter = router({
 
     // Operates only on the currently authenticated clinic user — identity is
     // derived from the session, never accepted from the client.
+    // Stays on protectedProcedure (not normalProtectedProcedure) — a clinic
+    // user with mustChangePassword=true must still be able to change it.
     changePassword: protectedProcedure
       .input(
         z.object({
@@ -253,11 +255,11 @@ export const appRouter = router({
 
   // ── Patients ────────────────────────────────────────────────────────────────
   patients: router({
-    list: protectedProcedure.query(async () => {
+    list: normalProtectedProcedure.query(async () => {
       return getAllPatients();
     }),
 
-    get: protectedProcedure
+    get: normalProtectedProcedure
       .input(z.object({ id: z.string().uuid() }))
       .query(async ({ input }) => {
         const patient = await getPatientById(input.id);
@@ -265,7 +267,7 @@ export const appRouter = router({
         return patient;
       }),
 
-    create: protectedProcedure
+    create: normalProtectedProcedure
       .input(
         z.object({
           name: z.string().min(1),
@@ -284,7 +286,7 @@ export const appRouter = router({
         return { id };
       }),
 
-    update: protectedProcedure
+    update: normalProtectedProcedure
       .input(
         z.object({
           id: z.string().uuid(),
@@ -306,14 +308,14 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    delete: protectedProcedure
+    delete: normalProtectedProcedure
       .input(z.object({ id: z.string().uuid() }))
       .mutation(async ({ input }) => {
         await deletePatient(input.id);
         return { success: true };
       }),
 
-    setActive: protectedProcedure
+    setActive: normalProtectedProcedure
       .input(z.object({
         id: z.string().uuid(),
         isActive: z.boolean(),
@@ -328,13 +330,13 @@ export const appRouter = router({
 
   // ── Visit Records ────────────────────────────────────────────────────────────
   visits: router({
-    listByPatient: protectedProcedure
+    listByPatient: normalProtectedProcedure
       .input(z.object({ patientId: z.string().uuid() }))
       .query(async ({ input }) => {
         return getVisitsByPatientId(input.patientId);
       }),
 
-    create: protectedProcedure
+    create: normalProtectedProcedure
       .input(visitRecordInput.extend({ patientId: z.string().uuid() }))
       .mutation(async ({ input }) => {
         const { patientId, dateOfService, dateAshSubmitted, ...rest } = input;
@@ -347,7 +349,7 @@ export const appRouter = router({
         return { id };
       }),
 
-    update: protectedProcedure
+    update: normalProtectedProcedure
       .input(visitRecordInput.extend({ id: z.string().uuid() }))
       .mutation(async ({ input }) => {
         const { id, dateOfService, dateAshSubmitted, ...rest } = input;
@@ -359,7 +361,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    bulkCreate: protectedProcedure
+    bulkCreate: normalProtectedProcedure
       .input(
         z.object({
           patientId: z.string().uuid(),
@@ -383,12 +385,12 @@ export const appRouter = router({
       }),
 
     // Returns urgency summaries for ALL patients — used by the homepage alert panel
-    authAlerts: protectedProcedure.query(async () => {
+    authAlerts: normalProtectedProcedure.query(async () => {
       return getAuthAlertSummaries();
     }),
 
     // Approves a pending authorization and creates a new batch of visit records
-    approveAuthorization: protectedProcedure
+    approveAuthorization: normalProtectedProcedure
       .input(z.object({
         patientId: z.string().uuid(),
         sessionsAuthorized: z.number().min(1).max(200),
@@ -409,13 +411,13 @@ export const appRouter = router({
       }),
 
     // Returns IDs of patients whose sessions are fully completed (0 remaining + all dated)
-    completedPatientIds: protectedProcedure.query(async () => {
+    completedPatientIds: normalProtectedProcedure.query(async () => {
       return getCompletedPatients();
     }),
 
     // Sets the active-period visit row (same period getAuthAlertSummaries is
     // showing) to authStatus=pending + today's dateAshSubmitted
-    markAsRequested: protectedProcedure
+    markAsRequested: normalProtectedProcedure
       .input(z.object({ patientId: z.string().uuid() }))
       .mutation(async ({ input }) => {
         const visitId = await getMarkAsRequestedTargetVisitId(input.patientId);
@@ -431,13 +433,13 @@ export const appRouter = router({
   }),
 
   claims: router({
-    getByPatientAndPeriod: protectedProcedure
+    getByPatientAndPeriod: normalProtectedProcedure
       .input(z.object({ patientId: z.string().uuid(), authPeriod: z.number() }))
       .query(async ({ input }) => {
         return await getClaimsByPatientAndPeriod(input.patientId, input.authPeriod);
       }),
 
-    create: protectedProcedure
+    create: normalProtectedProcedure
       .input(z.object({
         patientId: z.string().uuid(),
         authPeriod: z.number(),
@@ -496,7 +498,7 @@ export const appRouter = router({
         return { success: true, claimId };
       }),
 
-    update: protectedProcedure
+    update: normalProtectedProcedure
       .input(z.object({
         id: z.string().uuid(),
         placeOfService: z.string().nullable().optional(),
@@ -561,14 +563,14 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    delete: protectedProcedure
+    delete: normalProtectedProcedure
       .input(z.object({ id: z.string().uuid() }))
       .mutation(async ({ input }) => {
         await deleteClaimRecord(input.id);
         return { success: true };
       }),
 
-    upsert: protectedProcedure
+    upsert: normalProtectedProcedure
       .input(z.object({
         patientId: z.string().uuid(),
         authPeriod: z.number(),
@@ -632,7 +634,7 @@ export const appRouter = router({
      * Matches patient names (case-insensitive) against dashboard patients,
      * finds each patient's latest auth period, and saves all their claims.
      */
-    bulkImportFromEOB: protectedProcedure
+    bulkImportFromEOB: normalProtectedProcedure
       .input(z.object({
         uploadType: z.enum(['reimbursement', 'cms1500']).default('reimbursement'),
         patientGroups: z.array(z.object({
@@ -823,7 +825,7 @@ export const appRouter = router({
         return { results };
       }),
 
-    markResolved: protectedProcedure
+    markResolved: normalProtectedProcedure
       .input(z.object({ id: z.string().uuid() }))
       .mutation(async ({ input }) => {
         const { supabase } = await import('./supabase');
@@ -836,7 +838,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    getFollowUpClaims: protectedProcedure
+    getFollowUpClaims: normalProtectedProcedure
       .input(z.object({ insurance: z.string().optional() }).optional())
       .query(async ({ input }) => {
         // Fetch every unresolved claim in a status that can ever need follow-up,
@@ -901,7 +903,7 @@ export const appRouter = router({
         return sortByFollowUpUrgency(classified);
       }),
 
-    getStatusCounts: protectedProcedure
+    getStatusCounts: normalProtectedProcedure
       .input(z.object({ insurance: z.string().optional() }).optional())
       .query(async ({ input }) => {
         // Powers the "Claims Status" sidebar panel. Always counts claims_records
