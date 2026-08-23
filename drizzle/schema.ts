@@ -72,10 +72,20 @@ export interface ClinicUser {
   id: string;               // UUID
   username: string;
   passwordHash: string;
+  name: string | null;
+  email: string | null;
+  department: string | null;
+  role: "admin" | "staff";
+  status: "active" | "archived";
+  mustChangePassword: boolean;
+  tokenVersion: number;      // schema/type ready in S1; revocation enforcement deferred to S2
   createdAt: Date;
+  updatedAt: Date;
+  lastLoginAt: Date | null;
+  archivedAt: Date | null;
 }
 
-export type InsertClinicUser = Omit<ClinicUser, "id" | "createdAt">;
+export type InsertClinicUser = Omit<ClinicUser, "id" | "createdAt" | "updatedAt">;
 
 // ─── ClaimRecord ──────────────────────────────────────────────────────────────
 
