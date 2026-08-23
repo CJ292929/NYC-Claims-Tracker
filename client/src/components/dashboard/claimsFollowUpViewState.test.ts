@@ -41,7 +41,7 @@ describe('money and date formatting (shared by table and card views)', () => {
 
   it('formats a date or falls back to an em dash', () => {
     expect(formatDateOrDash(null)).toBe('—');
-    expect(formatDateOrDash('2026-01-05')).toBe(new Date('2026-01-05').toLocaleDateString());
+    expect(formatDateOrDash('2026-01-05')).toBe(new Date('2026-01-05').toLocaleDateString('en-US', { timeZone: 'UTC' }));
   });
 });
 

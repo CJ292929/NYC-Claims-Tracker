@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { AlertCircle, Search, ShieldCheck } from 'lucide-react';
 import { trpc } from '@/lib/trpc';
+import { formatCalendarDate } from '@/lib/date';
 import { StatusBadge } from './StatusBadge';
 import { FilterChips, type FilterChip } from './FilterChips';
 import { URGENCY_COLOR } from '@/lib/patientAuthUrgency';
@@ -49,10 +50,7 @@ const URGENCY_SHORT_LABEL: Record<string, string> = {
 };
 
 function formatDate(value: number | string | null | undefined): string {
-  if (value === null || value === undefined) return '—';
-  const dt = new Date(value);
-  if (isNaN(dt.getTime())) return '—';
-  return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return formatCalendarDate(value);
 }
 
 function UrgencyBadge({ urgency }: { urgency: string }) {
