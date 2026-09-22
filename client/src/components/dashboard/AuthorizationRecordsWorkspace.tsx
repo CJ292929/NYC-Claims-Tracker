@@ -288,7 +288,7 @@ export function AuthorizationRecordsWorkspace({ onViewVisits }: { onViewVisits: 
                           <p className="text-brand-blue">{formatDate(r.authValidUntil)}</p>
                         </div>
                         <div>
-                          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">ASH Submitted</p>
+                          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Auth Submitted</p>
                           <p className="text-brand-blue">{formatDate(r.dateAshSubmitted)}</p>
                         </div>
                       </div>
@@ -318,7 +318,7 @@ export function AuthorizationRecordsWorkspace({ onViewVisits }: { onViewVisits: 
                       <th scope="col" className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Remaining</th>
                       <th scope="col" className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Status</th>
                       <th scope="col" className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Valid Until</th>
-                      <th scope="col" className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">ASH Submitted</th>
+                      <th scope="col" className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Submitted</th>
                       <th scope="col" className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Urgency</th>
                       <th scope="col" className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Actions</th>
                     </tr>

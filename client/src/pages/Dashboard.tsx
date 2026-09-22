@@ -42,7 +42,7 @@ import type { AuthUrgency } from '@shared/authUrgency';
 /**
  * Dashboard Component — Database-backed
  * All data persists in MySQL via tRPC procedures.
- * "Date ASH Submitted" column is editable inline with a native date picker.
+ * "Date Authorization Submitted" column is editable inline with a native date picker.
  */
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -300,7 +300,7 @@ export default function Dashboard() {
   const [csvImportResult, setCsvImportResult] = useState<CsvImportSummary | null>(null);
   const [showLogSessionDialog, setShowLogSessionDialog] = useState(false);
   const [sessionDate, setSessionDate] = useState(new Date().toISOString().split('T')[0]);
-  /** Track which visit row is currently being edited for Date ASH Submitted */
+  /** Track which visit row is currently being edited for Date Authorization Submitted */
   const [editingAshId, setEditingAshId] = useState<string | null>(null);
   const [editingAshValue, setEditingAshValue] = useState<string>('');
   /** Delete confirmation dialog */
@@ -974,19 +974,19 @@ export default function Dashboard() {
     toast.success(`Auth status updated to ${mapped}`);
   };
 
-  /** Start editing Date ASH Submitted for a visit row */
+  /** Start editing Date Authorization Submitted for a visit row */
   const handleStartEditAsh = (visit: DbVisit) => {
     setEditingAshId(visit.id);
     setEditingAshValue(toInputDate(visit.dateAshSubmitted));
   };
 
-  /** Save the edited Date ASH Submitted value */
+  /** Save the edited Date Authorization Submitted value */
   const handleSaveAsh = (visitId: string) => {
     updateVisit.mutate(
       { id: visitId, dateAshSubmitted: editingAshValue || null },
       {
         onSuccess: () => {
-          toast.success('Date ASH Submitted saved');
+          toast.success('Date Authorization Submitted saved');
           setEditingAshId(null);
         },
       }
@@ -1472,7 +1472,7 @@ export default function Dashboard() {
   };
 
   const handleDownloadTemplate = () => {
-    const headers = ['Patient Name', 'Insurance', 'Authorized Sessions', 'Authorization Date', 'Date of Service', 'Session Number', 'Sessions Remaining', 'New Authorization?', 'Date ASH Submitted'];
+    const headers = ['Patient Name', 'Insurance', 'Authorized Sessions', 'Authorization Date', 'Date of Service', 'Session Number', 'Sessions Remaining', 'New Authorization?', 'Date Authorization Submitted'];
     const rows = [
       ['John Doe', 'Aetna', '12', '2026-04-21', '2026-04-01', '1', '11', 'NO', ''],
       ['Jane Smith', 'NYCE PPO Plan', '15', '2026-03-10', '2026-03-15', '1', '14', 'NO', ''],
@@ -1824,7 +1824,7 @@ export default function Dashboard() {
                               <span className="font-medium">{periodInsurance} · </span>
                             )}
                             {isActive
-                              ? 'Active period · Click the calendar icon in "Date ASH Submitted" to edit'
+                              ? 'Active period · Click the calendar icon in "Date Authorization Submitted" to edit'
                               : 'Completed authorization period — read-only history'}
                           </CardDescription>
                         </div>
@@ -1910,7 +1910,7 @@ export default function Dashboard() {
 
                               <div>
                                 <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">
-                                  Date ASH Submitted
+                                  Date Authorization Submitted
                                 </p>
                                 {editingAshId === visit.id ? (
                                   <div className="flex items-center gap-2 flex-wrap">
@@ -1942,8 +1942,8 @@ export default function Dashboard() {
                                   <button
                                     onClick={() => handleStartEditAsh(visit)}
                                     className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue cursor-pointer transition-colors min-h-[40px]"
-                                    title="Click to edit Date ASH Submitted"
-                                    aria-label={visit.dateAshSubmitted ? `Edit Date ASH Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date ASH Submitted'}
+                                    title="Click to edit Date Authorization Submitted"
+                                    aria-label={visit.dateAshSubmitted ? `Edit Date Authorization Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date Authorization Submitted'}
                                   >
                                     <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
                                     <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>
@@ -1966,7 +1966,7 @@ export default function Dashboard() {
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Session #</th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Date of Service</th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                                  Date ASH Submitted
+                                  Date Authorization Submitted
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
                                 </th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Status</th>
@@ -2001,7 +2001,7 @@ export default function Dashboard() {
                           <td className="px-4 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
                             {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
-                          {/* Date ASH Submitted — EDITABLE */}
+                          {/* Date Authorization Submitted — EDITABLE */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             {editingAshId === visit.id ? (
                               <div className="flex items-center gap-2">
@@ -2033,8 +2033,8 @@ export default function Dashboard() {
                               <button
                                 onClick={() => handleStartEditAsh(visit)}
                                 className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue cursor-pointer transition-colors"
-                                title="Click to edit Date ASH Submitted"
-                                aria-label={visit.dateAshSubmitted ? `Edit Date ASH Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date ASH Submitted'}
+                                title="Click to edit Date Authorization Submitted"
+                                aria-label={visit.dateAshSubmitted ? `Edit Date Authorization Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date Authorization Submitted'}
                               >
                                 <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
                                 <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>

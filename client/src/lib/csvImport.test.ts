@@ -52,4 +52,11 @@ describe('parseCsvRow', () => {
     const { row } = parseCsvRow({ 'Patient Name': 'John Doe', 'Date Authorization Submitted': '2026-02-20' }, 1);
     expect(row?.dateAshSubmitted).toBe('2026-02-20');
   });
+
+  it('maps both the legacy "Date ASH Submitted" and current "Date Authorization Submitted" headers to the same internal property', () => {
+    const legacy = parseCsvRow({ 'Patient Name': 'John Doe', 'Date ASH Submitted': '2026-01-15' }, 1);
+    const current = parseCsvRow({ 'Patient Name': 'Jane Doe', 'Date Authorization Submitted': '2026-01-15' }, 2);
+    expect(legacy.row).toHaveProperty('dateAshSubmitted', '2026-01-15');
+    expect(current.row).toHaveProperty('dateAshSubmitted', '2026-01-15');
+  });
 });
