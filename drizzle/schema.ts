@@ -123,3 +123,17 @@ export interface ClaimRecord {
 
 export type InsertClaimRecord = Omit<ClaimRecord, "id" | "createdAt" | "updatedAt">;
 export type UpdateClaimRecord = Partial<InsertClaimRecord>;
+
+// ─── AuditLog ─────────────────────────────────────────────────────────────────
+
+export interface AuditLog {
+  id: string;               // UUID
+  patientId: string;        // UUID → patients.id
+  actorId: string | null;   // UUID → clinic_users.id / users.id, if known
+  action: string;           // e.g. "PATIENT_NAME_UPDATE"
+  oldValue: string | null;
+  newValue: string | null;
+  createdAt: Date;
+}
+
+export type InsertAuditLog = Omit<AuditLog, "id" | "createdAt">;

@@ -214,6 +214,52 @@ export async function updatePatient(
   }
 }
 
+// ─── Audit log helpers ─────────────────────────────────────────────────────
+
+export type PatientAuditChange = {
+  action: "PATIENT_NAME_UPDATE";
+  oldValue: string;
+  newValue: string;
+};
+
+/**
+ * Compares a patient's current name against the fields being applied by
+ * patients.update and returns the audit-worthy changes (only fields that
+ * actually changed — an update payload that repeats the existing name
+ * produces no entries).
+ */
+export function diffPatientUpdate(
+  before: { name: string },
+  after: { name?: string }
+): PatientAuditChange[] {
+  const changes: PatientAuditChange[] = [];
+  if (after.name !== undefined && after.name !== before.name) {
+    changes.push({ action: "PATIENT_NAME_UPDATE", oldValue: before.name, newValue: after.name });
+  }
+  return changes;
+}
+
+export async function createAuditLog(entry: {
+  patientId: string;
+  actorId: string | null;
+  action: string;
+  oldValue: string | null;
+  newValue: string | null;
+}): Promise<void> {
+  const { error } = await supabase.from("audit_logs").insert({
+    patient_id: entry.patientId,
+    actor_id: entry.actorId,
+    action: entry.action,
+    old_value: entry.oldValue,
+    new_value: entry.newValue,
+  });
+
+  if (error) {
+    console.error("[Supabase] createAuditLog:", error);
+    throw error;
+  }
+}
+
 export async function setPatientActive(
   id: string,
   isActive: boolean,

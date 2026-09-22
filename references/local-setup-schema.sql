@@ -138,6 +138,19 @@ CREATE INDEX IF NOT EXISTS idx_claims_patient_period ON public.claims_records(pa
 CREATE INDEX IF NOT EXISTS idx_claims_status ON public.claims_records(claim_status);
 CREATE INDEX IF NOT EXISTS idx_claims_is_resolved ON public.claims_records(is_resolved);
 
+-- ─── audit_logs (immutable trail of patient field changes) ────────────────
+CREATE TABLE IF NOT EXISTS public.audit_logs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  patient_id uuid NOT NULL REFERENCES public.patients(id) ON DELETE CASCADE,
+  actor_id uuid,
+  action text NOT NULL, -- e.g. 'PATIENT_NAME_UPDATE'
+  old_value text,
+  new_value text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_patient ON public.audit_logs(patient_id, created_at DESC);
+
 -- ─── auto-update updated_at on row changes ─────────────────────────────────
 CREATE OR REPLACE FUNCTION public.set_updated_at()
 RETURNS trigger AS $$
