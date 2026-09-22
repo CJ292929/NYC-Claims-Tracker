@@ -10,6 +10,8 @@ import {
   getPatientById,
   createPatient,
   updatePatient,
+  diffPatientUpdate,
+  createAuditLog,
   deletePatient,
   setPatientActive,
   getVisitsByPatientId,
@@ -469,14 +471,27 @@ export const appRouter = router({
           claimsStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted']).optional(),
         })
       )
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const { id, authDate, authValidUntil, claimsStatus, ...rest } = input;
+
+        const before = await getPatientById(id);
+        if (!before) throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
+
         await updatePatient(id, {
           ...rest,
           ...(authDate !== undefined ? { authDate: parseDate(authDate) } : {}),
           ...(authValidUntil !== undefined ? { authValidUntil } : {}),
           ...(claimsStatus !== undefined ? { claimsStatus } : {}),
         });
+
+        const changes = diffPatientUpdate(before, rest);
+        if (changes.length > 0) {
+          const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+          for (const change of changes) {
+            await createAuditLog({ patientId: id, actorId, ...change });
+          }
+        }
+
         return { success: true };
       }),
 

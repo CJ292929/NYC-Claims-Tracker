@@ -53,7 +53,7 @@ export default function Login() {
             <Logo variant="icon" size="xl" className="w-20 h-20 drop-shadow-lg" />
           </div>
           <h1 className="text-2xl font-serif font-bold text-white">NYC Home Rehab</h1>
-          <p className="text-[#E8A93C] text-sm mt-1 uppercase tracking-wide">Physical Therapy · ASH Authorization Tracker</p>
+          <p className="text-[#E8A93C] text-sm mt-1 uppercase tracking-wide">Physical Therapy · Authorization Tracker</p>
         </div>
 
         <Card className="border-0 shadow-2xl bg-white/95 backdrop-blur-sm">

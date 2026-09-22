@@ -106,6 +106,16 @@ export interface ClaimRecordRow {
   updated_at: string;
 }
 
+export interface AuditLogRow {
+  id: string;                // uuid
+  patient_id: string;        // uuid → patients.id
+  actor_id: string | null;   // uuid → clinic_users.id / users.id, if known
+  action: string;            // e.g. "PATIENT_NAME_UPDATE"
+  old_value: string | null;
+  new_value: string | null;
+  created_at: string;
+}
+
 // ─── Insert types (what INSERT accepts) ──────────────────────────────────────
 
 export type InsertUser = Omit<UserRow, "id" | "created_at" | "updated_at"> & {
@@ -164,6 +174,14 @@ export type InsertClaimRecord = {
   is_resolved?: boolean;
 };
 
+export type InsertAuditLog = {
+  patient_id: string;
+  actor_id?: string | null;
+  action: string;
+  old_value?: string | null;
+  new_value?: string | null;
+};
+
 export type UpdatePatient = Partial<InsertPatient>;
 export type UpdateVisitRecord = Partial<InsertVisitRecord>;
 export type UpdateClaimRecord = Partial<InsertClaimRecord>;
@@ -197,6 +215,11 @@ export interface Database {
         Row: ClaimRecordRow;
         Insert: InsertClaimRecord;
         Update: UpdateClaimRecord;
+      };
+      audit_logs: {
+        Row: AuditLogRow;
+        Insert: InsertAuditLog;
+        Update: Partial<InsertAuditLog>;
       };
     };
     Views: {

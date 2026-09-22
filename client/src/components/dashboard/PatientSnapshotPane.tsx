@@ -91,7 +91,7 @@ export function PatientSnapshotPane({
         onClick={onViewFullRecords}
         className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
       >
-        View Full Records &amp; Edit Date ASH Submitted
+        View Full Records &amp; Edit Date Authorization Submitted
       </Button>
     </div>
   );

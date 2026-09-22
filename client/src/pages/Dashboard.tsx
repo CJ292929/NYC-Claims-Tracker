@@ -16,6 +16,7 @@ import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch } from '@/lib/nameMatch';
+import { parseCsvText, parseCsvRow, normalizePatientName, emptyCsvImportSummary, type CsvImportSummary } from '@/lib/csvImport';
 import { matchesPatientFilters } from '@/lib/patientFilters';
 import { routeToNavSection, navSectionToRoute } from '@/lib/navSection';
 import { canManageStaff as canManageStaffAuthGate } from '@/lib/authGate';
@@ -41,7 +42,7 @@ import type { AuthUrgency } from '@shared/authUrgency';
 /**
  * Dashboard Component — Database-backed
  * All data persists in MySQL via tRPC procedures.
- * "Date ASH Submitted" column is editable inline with a native date picker.
+ * "Date Authorization Submitted" column is editable inline with a native date picker.
  */
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -296,9 +297,10 @@ export default function Dashboard() {
   const [newPatientAuthValidUntil, setNewPatientAuthValidUntil] = useState('');
   const [showUploadDialog, setShowUploadDialog] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [csvImportResult, setCsvImportResult] = useState<CsvImportSummary | null>(null);
   const [showLogSessionDialog, setShowLogSessionDialog] = useState(false);
   const [sessionDate, setSessionDate] = useState(new Date().toISOString().split('T')[0]);
-  /** Track which visit row is currently being edited for Date ASH Submitted */
+  /** Track which visit row is currently being edited for Date Authorization Submitted */
   const [editingAshId, setEditingAshId] = useState<string | null>(null);
   const [editingAshValue, setEditingAshValue] = useState<string>('');
   /** Delete confirmation dialog */
@@ -972,19 +974,19 @@ export default function Dashboard() {
     toast.success(`Auth status updated to ${mapped}`);
   };
 
-  /** Start editing Date ASH Submitted for a visit row */
+  /** Start editing Date Authorization Submitted for a visit row */
   const handleStartEditAsh = (visit: DbVisit) => {
     setEditingAshId(visit.id);
     setEditingAshValue(toInputDate(visit.dateAshSubmitted));
   };
 
-  /** Save the edited Date ASH Submitted value */
+  /** Save the edited Date Authorization Submitted value */
   const handleSaveAsh = (visitId: string) => {
     updateVisit.mutate(
       { id: visitId, dateAshSubmitted: editingAshValue || null },
       {
         onSuccess: () => {
-          toast.success('Date ASH Submitted saved');
+          toast.success('Date Authorization Submitted saved');
           setEditingAshId(null);
         },
       }
@@ -1371,76 +1373,106 @@ export default function Dashboard() {
 
   // ── CSV Upload ─────────────────────────────────────────────────────────────
 
-  const parseCSV = (text: string): Array<Record<string, string>> => {
-    const lines = text.trim().split('\n');
-    if (lines.length < 2) return [];
-    const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
-    return lines.slice(1).map(line => {
-      const values = line.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
-      const row: Record<string, string> = {};
-      headers.forEach((h, i) => { row[h] = values[i] || ''; });
-      return row;
-    });
-  };
-
   const handleBulkUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    setCsvImportResult(null);
+
+    let text: string;
     try {
-      const text = await file.text();
-      const data = parseCSV(text);
-      if (data.length === 0) { toast.error('No data found in file'); return; }
-
-      let successCount = 0;
-      for (let i = 0; i < data.length; i++) {
-        const row = data[i];
-        const name = row['Patient Name'] || row['Name'] || row['Patient'];
-        const insurance = row['Insurance'] || row['Insurance Company'] || 'Aetna';
-        const authorized = parseInt(row['Authorized Sessions'] || row['Total Authorized'] || '0');
-        const authDate = row['Authorization Date'] || null;
-        const dateOfService = row['Date of Service'] || null;
-        const sessionNumber = parseInt(row['Session Number'] || '1');
-        const remaining = parseInt(row['Sessions Remaining'] || authorized.toString());
-        const newAuth = row['New Authorization?'] || 'NO';
-        const dateAshSubmitted = row['Date ASH Submitted'] || null;
-
-        if (name && authorized > 0) {
-          try {
-            const { id: patientId } = await createPatient.mutateAsync({
-              name: name.trim(),
-              insurance: insurance.trim(),
-              authDate: authDate || null,
-            });
-            await bulkCreateVisits.mutateAsync({
-              patientId,
-              records: [{
-                sessionsAuthorized: authorized,
-                sessionsRemaining: remaining,
-                sessionNumber,
-                dateOfService: dateOfService || null,
-                newAuth,
-                dateAshSubmitted: dateAshSubmitted || null,
-                authStatus: 'none',
-              }],
-            });
-            successCount++;
-          } catch {}
-        }
-        setUploadProgress(Math.round(((i + 1) / data.length) * 100));
-      }
-      toast.success(`Imported ${successCount} patients`);
-      setShowUploadDialog(false);
-      setUploadProgress(0);
-      event.target.value = '';
-      utils.patients.list.invalidate();
+      text = await file.text();
     } catch {
       toast.error('Error reading file. Please check the format.');
-      setUploadProgress(0);
+      return;
     }
+
+    const { data, errors: parseErrors } = parseCsvText(text);
+    if (data.length === 0) {
+      toast.error('No data found in file');
+      event.target.value = '';
+      return;
+    }
+
+    const summary: CsvImportSummary = emptyCsvImportSummary();
+    // Rows are parsed with `header: true`, so CSV row N (1 = header) is data[N-2].
+    for (const e of parseErrors) {
+      if (e.row !== undefined) summary.skipReasons.push(`Row ${e.row + 2}: ${e.message}`);
+    }
+
+    // Seeded from existing patients and updated as new ones are created, so
+    // repeated names within the SAME file are also treated as updates
+    // rather than creating multiple duplicate profiles.
+    const nameToId = new Map<string, string>();
+    for (const p of patients) nameToId.set(normalizePatientName(p.name), p.id);
+
+    for (let i = 0; i < data.length; i++) {
+      const rowNumber = i + 2;
+      const { row, skipReason } = parseCsvRow(data[i], rowNumber);
+      if (!row) {
+        summary.skippedCount++;
+        if (skipReason) summary.skipReasons.push(skipReason);
+        setUploadProgress(Math.round(((i + 1) / data.length) * 100));
+        continue;
+      }
+
+      try {
+        const key = normalizePatientName(row.name);
+        const existingId = nameToId.get(key);
+        let patientId: string;
+        if (existingId) {
+          await updatePatient.mutateAsync({
+            id: existingId,
+            name: row.name,
+            insurance: row.insurance,
+            authDate: row.authDate,
+          });
+          patientId = existingId;
+          summary.updatedCount++;
+        } else {
+          const created = await createPatient.mutateAsync({
+            name: row.name,
+            insurance: row.insurance,
+            authDate: row.authDate,
+          });
+          patientId = created.id;
+          nameToId.set(key, patientId);
+          summary.createdCount++;
+        }
+
+        await bulkCreateVisits.mutateAsync({
+          patientId,
+          records: [{
+            sessionsAuthorized: row.authorized,
+            sessionsRemaining: row.remaining,
+            sessionNumber: row.sessionNumber,
+            dateOfService: row.dateOfService,
+            newAuth: row.newAuth,
+            dateAshSubmitted: row.dateAshSubmitted,
+            authStatus: 'none',
+          }],
+        });
+      } catch (err) {
+        summary.skippedCount++;
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        summary.skipReasons.push(`Row ${rowNumber}: ${message}`);
+      }
+      setUploadProgress(Math.round(((i + 1) / data.length) * 100));
+    }
+
+    setCsvImportResult(summary);
+    if (summary.createdCount > 0 || summary.updatedCount > 0) {
+      toast.success(`Created ${summary.createdCount}, updated ${summary.updatedCount} patient${summary.createdCount + summary.updatedCount === 1 ? '' : 's'}.`);
+    }
+    if (summary.skippedCount > 0) {
+      toast.error(`${summary.skippedCount} row${summary.skippedCount === 1 ? '' : 's'} skipped — see details below.`);
+    }
+    setUploadProgress(0);
+    event.target.value = '';
+    utils.patients.list.invalidate();
   };
 
   const handleDownloadTemplate = () => {
-    const headers = ['Patient Name', 'Insurance', 'Authorized Sessions', 'Authorization Date', 'Date of Service', 'Session Number', 'Sessions Remaining', 'New Authorization?', 'Date ASH Submitted'];
+    const headers = ['Patient Name', 'Insurance', 'Authorized Sessions', 'Authorization Date', 'Date of Service', 'Session Number', 'Sessions Remaining', 'New Authorization?', 'Date Authorization Submitted'];
     const rows = [
       ['John Doe', 'Aetna', '12', '2026-04-21', '2026-04-01', '1', '11', 'NO', ''],
       ['Jane Smith', 'NYCE PPO Plan', '15', '2026-03-10', '2026-03-15', '1', '14', 'NO', ''],
@@ -1462,7 +1494,13 @@ export default function Dashboard() {
   // switch — always has somewhere to actually appear.
 
   const bulkUploadDialog = (
-    <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
+    <Dialog
+      open={showUploadDialog}
+      onOpenChange={(open) => {
+        setShowUploadDialog(open);
+        if (!open) setCsvImportResult(null);
+      }}
+    >
       <DialogContent className="bg-white sm:max-w-md max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-brand-blue">Bulk Upload Patient Data</DialogTitle>
@@ -1479,6 +1517,20 @@ export default function Dashboard() {
           {uploadProgress > 0 && uploadProgress < 100 && (
             <div className="w-full bg-brand-cream-dark rounded-full h-2">
               <div className="bg-brand-gold h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
+            </div>
+          )}
+          {csvImportResult && (
+            <div className="bg-brand-cream border border-brand-cream-dark rounded-lg p-3 text-xs space-y-2">
+              <p className="font-semibold text-brand-blue">
+                Import complete: {csvImportResult.createdCount} created, {csvImportResult.updatedCount} updated, {csvImportResult.skippedCount} skipped
+              </p>
+              {csvImportResult.skipReasons.length > 0 && (
+                <ul className="list-disc list-inside space-y-0.5 max-h-32 overflow-y-auto text-red-700">
+                  {csvImportResult.skipReasons.map((reason, idx) => (
+                    <li key={idx}>{reason}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
@@ -1772,7 +1824,7 @@ export default function Dashboard() {
                               <span className="font-medium">{periodInsurance} · </span>
                             )}
                             {isActive
-                              ? 'Active period · Click the calendar icon in "Date ASH Submitted" to edit'
+                              ? 'Active period · Click the calendar icon in "Date Authorization Submitted" to edit'
                               : 'Completed authorization period — read-only history'}
                           </CardDescription>
                         </div>
@@ -1858,7 +1910,7 @@ export default function Dashboard() {
 
                               <div>
                                 <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">
-                                  Date ASH Submitted
+                                  Date Authorization Submitted
                                 </p>
                                 {editingAshId === visit.id ? (
                                   <div className="flex items-center gap-2 flex-wrap">
@@ -1890,8 +1942,8 @@ export default function Dashboard() {
                                   <button
                                     onClick={() => handleStartEditAsh(visit)}
                                     className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue cursor-pointer transition-colors min-h-[40px]"
-                                    title="Click to edit Date ASH Submitted"
-                                    aria-label={visit.dateAshSubmitted ? `Edit Date ASH Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date ASH Submitted'}
+                                    title="Click to edit Date Authorization Submitted"
+                                    aria-label={visit.dateAshSubmitted ? `Edit Date Authorization Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date Authorization Submitted'}
                                   >
                                     <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
                                     <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>
@@ -1914,7 +1966,7 @@ export default function Dashboard() {
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Session #</th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Date of Service</th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                                  Date ASH Submitted
+                                  Date Authorization Submitted
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
                                 </th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Status</th>
@@ -1949,7 +2001,7 @@ export default function Dashboard() {
                           <td className="px-4 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
                             {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
-                          {/* Date ASH Submitted — EDITABLE */}
+                          {/* Date Authorization Submitted — EDITABLE */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             {editingAshId === visit.id ? (
                               <div className="flex items-center gap-2">
@@ -1981,8 +2033,8 @@ export default function Dashboard() {
                               <button
                                 onClick={() => handleStartEditAsh(visit)}
                                 className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue cursor-pointer transition-colors"
-                                title="Click to edit Date ASH Submitted"
-                                aria-label={visit.dateAshSubmitted ? `Edit Date ASH Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date ASH Submitted'}
+                                title="Click to edit Date Authorization Submitted"
+                                aria-label={visit.dateAshSubmitted ? `Edit Date Authorization Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date Authorization Submitted'}
                               >
                                 <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
                                 <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>

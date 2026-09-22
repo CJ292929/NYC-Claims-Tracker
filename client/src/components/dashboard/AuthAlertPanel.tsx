@@ -142,7 +142,7 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
   const markAsRequested = trpc.visits.markAsRequested.useMutation({
     onMutate: ({ patientId }) => setRequestingId(patientId as string),
     onSuccess: (_data, { patientId }) => {
-      toast.success('Authorization request marked — ASH date set to today');
+      toast.success('Authorization request marked — Authorization date set to today');
       // Optimistically remove the card if it was 'pending' urgency; otherwise refresh
       utils.visits.authAlerts.invalidate();
       // Also refresh the patient's visit list in case it's open
