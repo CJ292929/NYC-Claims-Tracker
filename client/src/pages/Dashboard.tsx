@@ -3,10 +3,10 @@ import { useLocation } from 'wouter';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
@@ -322,6 +322,9 @@ export default function Dashboard() {
   const [pendingDischargePatientId, setPendingDischargePatientId] = useState<string | null>(null);
   const [dischargeDate, setDischargeDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [dischargeReason, setDischargeReason] = useState('');
+  // Edit Patient dialog state
+  const [isEditPatientOpen, setIsEditPatientOpen] = useState(false);
+  const [editPatientName, setEditPatientName] = useState('');
   // Claims status filter for patient list
   const [selectedClaimsFilter, setSelectedClaimsFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -1608,6 +1611,57 @@ export default function Dashboard() {
         </DialogContent>
       </Dialog>
 
+      {/* ── Edit Patient Dialog ─────────────────────────────── */}
+      <Dialog open={isEditPatientOpen} onOpenChange={setIsEditPatientOpen}>
+        <DialogContent className="bg-white max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-brand-blue text-xl flex items-center gap-2">
+              <Pencil className="w-5 h-5" />
+              Edit Patient Details
+            </DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              Update this patient's name.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <Label htmlFor="edit-patient-name" className="text-brand-blue font-semibold">Patient Name</Label>
+              <Input
+                id="edit-patient-name"
+                value={editPatientName}
+                onChange={e => setEditPatientName(e.target.value)}
+                className="mt-1 border-brand-cream-dark focus:border-brand-blue"
+              />
+            </div>
+          </div>
+          <DialogFooter className="flex gap-3 pt-2 sm:justify-start">
+            <Button
+              variant="outline"
+              className="flex-1"
+              onClick={() => setIsEditPatientOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="flex-1 bg-brand-blue hover:bg-brand-blue/90 text-white font-semibold"
+              disabled={updatePatient.isPending || !editPatientName.trim()}
+              onClick={async () => {
+                if (!selectedPatient) return;
+                try {
+                  await updatePatient.mutateAsync({ id: selectedPatient.id, name: editPatientName.trim() });
+                  setIsEditPatientOpen(false);
+                } catch {
+                  // onError on the mutation already surfaces a toast
+                }
+              }}
+            >
+              {updatePatient.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+              Save Changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* ── Delete Patient Confirmation Dialog ─────────────────────────────── */}
       <AlertDialog open={deletePatientId !== null} onOpenChange={(open) => { if (!open) { setDeletePatientId(null); setDeletePatientName(''); } }}>
         <AlertDialogContent className="bg-white">
@@ -1715,6 +1769,16 @@ export default function Dashboard() {
                 aria-label="Toggle patient active status"
               />
             </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => { setEditPatientName(activePatient.name); setIsEditPatientOpen(true); }}
+              aria-label="Edit patient"
+              className="gap-1.5"
+            >
+              <Pencil className="w-4 h-4" />
+              <span className="hidden sm:inline">Edit Patient</span>
+            </Button>
             <Button variant="outline" size="sm" onClick={() => refetchVisits()} aria-label="Refresh visit data" className="gap-1.5">
               <RefreshCw className="w-4 h-4" />
               <span className="hidden sm:inline">Refresh</span>
