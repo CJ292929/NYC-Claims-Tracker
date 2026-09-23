@@ -173,11 +173,25 @@ export const appRouter = router({
 
         await touchClinicUserLastLogin(clinicUser.id);
 
-        const token = await sdk.createClinicSessionToken({
-          clinicUserId: clinicUser.id,
-          username: clinicUser.username,
-          tokenVersion: clinicUser.tokenVersion,
-        });
+        // Signing throws synchronously if JWT_SECRET is unset/empty in this
+        // environment (jose rejects a zero-length HMAC key). Without this
+        // catch, that throw escapes as an unhandled function crash instead
+        // of a JSON tRPC error — surfacing to the client as an HTML/text
+        // 500 body ("A server error has occurred...") that fails to parse.
+        let token: string;
+        try {
+          token = await sdk.createClinicSessionToken({
+            clinicUserId: clinicUser.id,
+            username: clinicUser.username,
+            tokenVersion: clinicUser.tokenVersion,
+          });
+        } catch (err) {
+          console.error("[clinic.login] Failed to sign session token — check JWT_SECRET is set", err);
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: "Login is temporarily unavailable. Please try again later.",
+          });
+        }
         // Upsert a users row so normalProtectedProcedure can resolve ctx.user
         // (clinic_users remains the authority for identity/status/role/
         // must_change_password/token_version — this is a compatibility bridge).
