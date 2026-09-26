@@ -1112,6 +1112,19 @@ export default function Dashboard() {
 
   const formatAmount = (n: number | null | undefined): string => `$${(n ?? 0).toFixed(2)}`;
 
+  /** Display for a money cell that hasn't had a manual value saved yet, but
+   *  has a live sum from the Claims Tracker to show in the meantime — styled
+   *  distinctly so staff can tell it's a computed placeholder, not a
+   *  confirmed figure, until they click to save an explicit override. */
+  const autoFillDisplay = (n: number | null | undefined): React.ReactNode => {
+    if (n == null) return null;
+    return (
+      <span className="text-gray-500 italic" title="Auto-filled from Claims Tracker — click to enter a manual value">
+        {formatAmount(n)}
+      </span>
+    );
+  };
+
   // ── PDF/CSV Claim Upload ──────────────────────────────────────────────────
 
   const handleClaimFileUpload = async (file: File, period: number, uploadType: 'reimbursement' | 'cms1500' = 'reimbursement') => {
@@ -2039,6 +2052,20 @@ export default function Dashboard() {
                   const periodAuth = periodVisits.find(v => v.sessionsAuthorized != null)?.sessionsAuthorized ?? 0;
                   const periodInsurance = periodVisits.find(v => v.insuranceCompany)?.insuranceCompany ?? null;
                   const isActive = period === activePeriod;
+                  // Auto-fill fallback for the money columns below: sum this
+                  // period's actual claim rows so the fields show a live
+                  // reflection of the Claims Tracker until staff explicitly
+                  // save an override on a given visit (which then wins).
+                  const periodClaims: any[] = claimsDataMap[period] ?? [];
+                  const sumClaimsField = (field: string) =>
+                    periodClaims.reduce((n: number, c: any) => n + (c[field] != null ? parseFloat(c[field]) : 0), 0);
+                  const claimsFallback = periodClaims.length > 0
+                    ? {
+                        insuranceReimbursement: sumClaimsField('insurance_reimbursement'),
+                        patientDue: sumClaimsField('patient_amount_due'),
+                        patientPaid: sumClaimsField('patient_amount_paid'),
+                      }
+                    : null;
                   return (
                     <div key={`period-${period}`}>
                     {activeSection !== 'claims' && (
@@ -2221,8 +2248,8 @@ export default function Dashboard() {
                                       type="number"
                                       min={0}
                                       step={0.01}
-                                      value={visit.totalInsuranceReimbursement != null ? String(visit.totalInsuranceReimbursement) : ''}
-                                      display={visit.totalInsuranceReimbursement != null ? formatAmount(visit.totalInsuranceReimbursement) : null}
+                                      value={visit.totalInsuranceReimbursement != null ? String(visit.totalInsuranceReimbursement) : (claimsFallback ? String(claimsFallback.insuranceReimbursement) : '')}
+                                      display={visit.totalInsuranceReimbursement != null ? formatAmount(visit.totalInsuranceReimbursement) : autoFillDisplay(claimsFallback?.insuranceReimbursement)}
                                       isSaving={updateVisit.isPending}
                                       onSave={async (raw) => {
                                         const parsed = parseOptionalAmount(raw);
@@ -2239,8 +2266,8 @@ export default function Dashboard() {
                                       type="number"
                                       min={0}
                                       step={0.01}
-                                      value={visit.totalPatientDue != null ? String(visit.totalPatientDue) : ''}
-                                      display={visit.totalPatientDue != null ? formatAmount(visit.totalPatientDue) : null}
+                                      value={visit.totalPatientDue != null ? String(visit.totalPatientDue) : (claimsFallback ? String(claimsFallback.patientDue) : '')}
+                                      display={visit.totalPatientDue != null ? formatAmount(visit.totalPatientDue) : autoFillDisplay(claimsFallback?.patientDue)}
                                       isSaving={updateVisit.isPending}
                                       onSave={async (raw) => {
                                         const parsed = parseOptionalAmount(raw);
@@ -2257,8 +2284,8 @@ export default function Dashboard() {
                                       type="number"
                                       min={0}
                                       step={0.01}
-                                      value={visit.totalPatientPaid != null ? String(visit.totalPatientPaid) : ''}
-                                      display={visit.totalPatientPaid != null ? formatAmount(visit.totalPatientPaid) : null}
+                                      value={visit.totalPatientPaid != null ? String(visit.totalPatientPaid) : (claimsFallback ? String(claimsFallback.patientPaid) : '')}
+                                      display={visit.totalPatientPaid != null ? formatAmount(visit.totalPatientPaid) : autoFillDisplay(claimsFallback?.patientPaid)}
                                       isSaving={updateVisit.isPending}
                                       onSave={async (raw) => {
                                         const parsed = parseOptionalAmount(raw);
@@ -2271,7 +2298,11 @@ export default function Dashboard() {
                                 <div>
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Amount</p>
                                   <div className="font-semibold text-brand-blue text-base">
-                                    {formatAmount((visit.totalInsuranceReimbursement ?? 0) + (visit.totalPatientDue ?? 0) + (visit.totalPatientPaid ?? 0))}
+                                    {formatAmount(
+                                      (visit.totalInsuranceReimbursement ?? claimsFallback?.insuranceReimbursement ?? 0) +
+                                      (visit.totalPatientDue ?? claimsFallback?.patientDue ?? 0) +
+                                      (visit.totalPatientPaid ?? claimsFallback?.patientPaid ?? 0)
+                                    )}
                                   </div>
                                 </div>
                               </div>
@@ -2406,14 +2437,14 @@ export default function Dashboard() {
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
                           </td>
-                          {/* Total Insurance Reimbursement — EDITABLE */}
+                          {/* Total Insurance Reimbursement — EDITABLE, auto-filled from Claims Tracker until overridden */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             <EditableCell
                               type="number"
                               min={0}
                               step={0.01}
-                              value={visit.totalInsuranceReimbursement != null ? String(visit.totalInsuranceReimbursement) : ''}
-                              display={visit.totalInsuranceReimbursement != null ? formatAmount(visit.totalInsuranceReimbursement) : null}
+                              value={visit.totalInsuranceReimbursement != null ? String(visit.totalInsuranceReimbursement) : (claimsFallback ? String(claimsFallback.insuranceReimbursement) : '')}
+                              display={visit.totalInsuranceReimbursement != null ? formatAmount(visit.totalInsuranceReimbursement) : autoFillDisplay(claimsFallback?.insuranceReimbursement)}
                               isSaving={updateVisit.isPending}
                               onSave={async (raw) => {
                                 const parsed = parseOptionalAmount(raw);
@@ -2422,14 +2453,14 @@ export default function Dashboard() {
                               }}
                             />
                           </td>
-                          {/* Total Patient Due — EDITABLE */}
+                          {/* Total Patient Due — EDITABLE, auto-filled from Claims Tracker until overridden */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             <EditableCell
                               type="number"
                               min={0}
                               step={0.01}
-                              value={visit.totalPatientDue != null ? String(visit.totalPatientDue) : ''}
-                              display={visit.totalPatientDue != null ? formatAmount(visit.totalPatientDue) : null}
+                              value={visit.totalPatientDue != null ? String(visit.totalPatientDue) : (claimsFallback ? String(claimsFallback.patientDue) : '')}
+                              display={visit.totalPatientDue != null ? formatAmount(visit.totalPatientDue) : autoFillDisplay(claimsFallback?.patientDue)}
                               isSaving={updateVisit.isPending}
                               onSave={async (raw) => {
                                 const parsed = parseOptionalAmount(raw);
@@ -2438,14 +2469,14 @@ export default function Dashboard() {
                               }}
                             />
                           </td>
-                          {/* Total Patient Paid — EDITABLE */}
+                          {/* Total Patient Paid — EDITABLE, auto-filled from Claims Tracker until overridden */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             <EditableCell
                               type="number"
                               min={0}
                               step={0.01}
-                              value={visit.totalPatientPaid != null ? String(visit.totalPatientPaid) : ''}
-                              display={visit.totalPatientPaid != null ? formatAmount(visit.totalPatientPaid) : null}
+                              value={visit.totalPatientPaid != null ? String(visit.totalPatientPaid) : (claimsFallback ? String(claimsFallback.patientPaid) : '')}
+                              display={visit.totalPatientPaid != null ? formatAmount(visit.totalPatientPaid) : autoFillDisplay(claimsFallback?.patientPaid)}
                               isSaving={updateVisit.isPending}
                               onSave={async (raw) => {
                                 const parsed = parseOptionalAmount(raw);
@@ -2456,7 +2487,11 @@ export default function Dashboard() {
                           </td>
                           {/* Total Amount — computed, not editable */}
                           <td className="px-4 py-2.5 text-sm font-semibold text-brand-blue whitespace-nowrap">
-                            {formatAmount((visit.totalInsuranceReimbursement ?? 0) + (visit.totalPatientDue ?? 0) + (visit.totalPatientPaid ?? 0))}
+                            {formatAmount(
+                              (visit.totalInsuranceReimbursement ?? claimsFallback?.insuranceReimbursement ?? 0) +
+                              (visit.totalPatientDue ?? claimsFallback?.patientDue ?? 0) +
+                              (visit.totalPatientPaid ?? claimsFallback?.patientPaid ?? 0)
+                            )}
                           </td>
                         </tr>
                       ))}
