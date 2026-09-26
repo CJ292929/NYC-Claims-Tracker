@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
@@ -220,6 +220,7 @@ function EditableCell({
   onSave,
   isSaving,
   min,
+  step,
   emptyLabel = 'Click to set',
 }: {
   type: 'date' | 'number';
@@ -228,6 +229,7 @@ function EditableCell({
   onSave: (value: string) => Promise<boolean | void> | boolean | void;
   isSaving: boolean;
   min?: number;
+  step?: number;
   emptyLabel?: string;
 }) {
   const [editing, setEditing] = useState(false);
@@ -239,6 +241,7 @@ function EditableCell({
         <input
           type={type}
           min={min}
+          step={step}
           value={draft}
           onChange={e => setDraft(e.target.value)}
           autoFocus
@@ -1065,7 +1068,16 @@ export default function Dashboard() {
    *  user's edit isn't silently discarded. */
   const saveVisitField = async (
     visitId: string,
-    patch: Partial<{ dateOfService: string | null; dateAshSubmitted: string | null; sessionsAuthorized: number | null; sessionsRemaining: number | null; sessionNumber: number | null }>,
+    patch: Partial<{
+      dateOfService: string | null;
+      dateAshSubmitted: string | null;
+      sessionsAuthorized: number | null;
+      sessionsRemaining: number | null;
+      sessionNumber: number | null;
+      totalInsuranceReimbursement: number | null;
+      totalPatientDue: number | null;
+      totalPatientPaid: number | null;
+    }>,
     successMessage: string
   ): Promise<boolean> => {
     try {
@@ -1086,6 +1098,19 @@ export default function Dashboard() {
     if (!Number.isInteger(n) || n < 0) return undefined;
     return n;
   };
+
+  /** Parse an EditableCell's raw number-input string into a nullable non-negative
+   *  dollar amount (2-decimal). Returns `undefined` (distinct from `null`) when
+   *  the input is invalid. */
+  const parseOptionalAmount = (raw: string): number | null | undefined => {
+    const trimmed = raw.trim();
+    if (trimmed === '') return null;
+    const n = Number(trimmed);
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    return Math.round(n * 100) / 100;
+  };
+
+  const formatAmount = (n: number | null | undefined): string => `$${(n ?? 0).toFixed(2)}`;
 
   // ── PDF/CSV Claim Upload ──────────────────────────────────────────────────
 
@@ -2037,8 +2062,18 @@ export default function Dashboard() {
                               : 'Completed authorization period · fields marked (editable) can still be corrected'}
                           </CardDescription>
                         </div>
-                        {/* Log Session button only on active period (oldest with remaining sessions) */}
-                        {isActive && (
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap"
+                            onClick={() => navigate('/claims')}
+                          >
+                            <FileText className="w-4 h-4" />
+                            View Claims
+                          </Button>
+                          {/* Log Session button only on active period (oldest with remaining sessions) */}
+                          {isActive && (
                           <Dialog open={showLogSessionDialog} onOpenChange={setShowLogSessionDialog}>
                             <DialogTrigger asChild>
                               <Button className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold px-5 py-2.5 rounded-lg inline-flex items-center gap-2 transition-all shadow-sm hover:shadow-md">
@@ -2081,7 +2116,8 @@ export default function Dashboard() {
                               </div>
                             </DialogContent>
                           </Dialog>
-                        )}
+                          )}
+                        </div>
                       </CardHeader>
                       <CardContent className="p-0">
                         {/* Mobile Visit Cards — below md */}
@@ -2178,6 +2214,69 @@ export default function Dashboard() {
                                   />
                                 </div>
                               </div>
+
+                              <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
+                                <div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Insurance Reimbursement</p>
+                                  <div className="font-medium text-brand-blue text-base">
+                                    <EditableCell
+                                      type="number"
+                                      min={0}
+                                      step={0.01}
+                                      value={visit.totalInsuranceReimbursement != null ? String(visit.totalInsuranceReimbursement) : ''}
+                                      display={visit.totalInsuranceReimbursement != null ? formatAmount(visit.totalInsuranceReimbursement) : null}
+                                      isSaving={updateVisit.isPending}
+                                      onSave={async (raw) => {
+                                        const parsed = parseOptionalAmount(raw);
+                                        if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                        return saveVisitField(visit.id, { totalInsuranceReimbursement: parsed }, 'Total Insurance Reimbursement saved');
+                                      }}
+                                    />
+                                  </div>
+                                </div>
+                                <div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Patient Due</p>
+                                  <div className="font-medium text-brand-blue text-base">
+                                    <EditableCell
+                                      type="number"
+                                      min={0}
+                                      step={0.01}
+                                      value={visit.totalPatientDue != null ? String(visit.totalPatientDue) : ''}
+                                      display={visit.totalPatientDue != null ? formatAmount(visit.totalPatientDue) : null}
+                                      isSaving={updateVisit.isPending}
+                                      onSave={async (raw) => {
+                                        const parsed = parseOptionalAmount(raw);
+                                        if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                        return saveVisitField(visit.id, { totalPatientDue: parsed }, 'Total Patient Due saved');
+                                      }}
+                                    />
+                                  </div>
+                                </div>
+                                <div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Patient Paid</p>
+                                  <div className="font-medium text-brand-blue text-base">
+                                    <EditableCell
+                                      type="number"
+                                      min={0}
+                                      step={0.01}
+                                      value={visit.totalPatientPaid != null ? String(visit.totalPatientPaid) : ''}
+                                      display={visit.totalPatientPaid != null ? formatAmount(visit.totalPatientPaid) : null}
+                                      isSaving={updateVisit.isPending}
+                                      onSave={async (raw) => {
+                                        const parsed = parseOptionalAmount(raw);
+                                        if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                        return saveVisitField(visit.id, { totalPatientPaid: parsed }, 'Total Patient Paid saved');
+                                      }}
+                                    />
+                                  </div>
+                                </div>
+                                <div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Amount</p>
+                                  <div className="font-semibold text-brand-blue text-base">
+                                    {formatAmount((visit.totalInsuranceReimbursement ?? 0) + (visit.totalPatientDue ?? 0) + (visit.totalPatientPaid ?? 0))}
+                                  </div>
+                                </div>
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -2208,6 +2307,19 @@ export default function Dashboard() {
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
                                 </th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Status</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                  Total Insurance Reimbursement
+                                  <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
+                                </th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                  Total Patient Due
+                                  <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
+                                </th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                  Total Patient Paid
+                                  <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
+                                </th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Total Amount</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-100">
@@ -2295,6 +2407,58 @@ export default function Dashboard() {
                           {/* Auth Status */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
+                          </td>
+                          {/* Total Insurance Reimbursement — EDITABLE */}
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
+                            <EditableCell
+                              type="number"
+                              min={0}
+                              step={0.01}
+                              value={visit.totalInsuranceReimbursement != null ? String(visit.totalInsuranceReimbursement) : ''}
+                              display={visit.totalInsuranceReimbursement != null ? formatAmount(visit.totalInsuranceReimbursement) : null}
+                              isSaving={updateVisit.isPending}
+                              onSave={async (raw) => {
+                                const parsed = parseOptionalAmount(raw);
+                                if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                return saveVisitField(visit.id, { totalInsuranceReimbursement: parsed }, 'Total Insurance Reimbursement saved');
+                              }}
+                            />
+                          </td>
+                          {/* Total Patient Due — EDITABLE */}
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
+                            <EditableCell
+                              type="number"
+                              min={0}
+                              step={0.01}
+                              value={visit.totalPatientDue != null ? String(visit.totalPatientDue) : ''}
+                              display={visit.totalPatientDue != null ? formatAmount(visit.totalPatientDue) : null}
+                              isSaving={updateVisit.isPending}
+                              onSave={async (raw) => {
+                                const parsed = parseOptionalAmount(raw);
+                                if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                return saveVisitField(visit.id, { totalPatientDue: parsed }, 'Total Patient Due saved');
+                              }}
+                            />
+                          </td>
+                          {/* Total Patient Paid — EDITABLE */}
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
+                            <EditableCell
+                              type="number"
+                              min={0}
+                              step={0.01}
+                              value={visit.totalPatientPaid != null ? String(visit.totalPatientPaid) : ''}
+                              display={visit.totalPatientPaid != null ? formatAmount(visit.totalPatientPaid) : null}
+                              isSaving={updateVisit.isPending}
+                              onSave={async (raw) => {
+                                const parsed = parseOptionalAmount(raw);
+                                if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                return saveVisitField(visit.id, { totalPatientPaid: parsed }, 'Total Patient Paid saved');
+                              }}
+                            />
+                          </td>
+                          {/* Total Amount — computed, not editable */}
+                          <td className="px-4 py-2.5 text-sm font-semibold text-brand-blue whitespace-nowrap">
+                            {formatAmount((visit.totalInsuranceReimbursement ?? 0) + (visit.totalPatientDue ?? 0) + (visit.totalPatientPaid ?? 0))}
                           </td>
                         </tr>
                       ))}

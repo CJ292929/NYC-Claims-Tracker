@@ -64,6 +64,9 @@ const visitRecordInput = z.object({
   newAuth: z.string().nullable().optional(),
   dateAshSubmitted: z.string().nullable().optional(), // ISO date string "YYYY-MM-DD"
   authStatus: z.enum(["none", "pending", "approved", "denied"]).optional(),
+  totalInsuranceReimbursement: z.number().nullable().optional(),
+  totalPatientDue: z.number().nullable().optional(),
+  totalPatientPaid: z.number().nullable().optional(),
 });
 
 // Helper: parse a date string → Date | null (stored as SQL DATE).

@@ -93,11 +93,21 @@ CREATE TABLE IF NOT EXISTS public.visit_records (
   date_ash_submitted date,
   auth_status text NOT NULL DEFAULT 'none' CHECK (auth_status IN ('none', 'pending', 'approved', 'denied')),
   insurance_company text,
+  total_insurance_reimbursement numeric(10,2),
+  total_patient_due numeric(10,2),
+  total_patient_paid numeric(10,2),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_visit_records_patient ON public.visit_records(patient_id);
+
+-- Migration for an already-existing visit_records table (CREATE TABLE IF NOT EXISTS
+-- above is a no-op once the table exists) — run this ALTER on the live Supabase
+-- project to add the 3 new money columns without touching existing rows.
+ALTER TABLE public.visit_records ADD COLUMN IF NOT EXISTS total_insurance_reimbursement numeric(10,2);
+ALTER TABLE public.visit_records ADD COLUMN IF NOT EXISTS total_patient_due numeric(10,2);
+ALTER TABLE public.visit_records ADD COLUMN IF NOT EXISTS total_patient_paid numeric(10,2);
 
 -- ─── claims_records ────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.claims_records (

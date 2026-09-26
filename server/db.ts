@@ -60,6 +60,9 @@ function toVisitRecord(row: any): VisitRecord {
     dateAshSubmitted: row.date_ash_submitted ? new Date(row.date_ash_submitted + "T00:00:00Z") : null,
     authStatus: row.auth_status ?? "none",
     insuranceCompany: row.insurance_company ?? null,
+    totalInsuranceReimbursement: row.total_insurance_reimbursement ?? null,
+    totalPatientDue: row.total_patient_due ?? null,
+    totalPatientPaid: row.total_patient_paid ?? null,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   };
@@ -319,6 +322,9 @@ export async function createVisitRecord(data: {
   newAuth?: string | null;
   dateAshSubmitted?: Date | null;
   authStatus?: "none" | "pending" | "approved" | "denied";
+  totalInsuranceReimbursement?: number | null;
+  totalPatientDue?: number | null;
+  totalPatientPaid?: number | null;
 }): Promise<string> {
   const { data: row, error } = await supabase
     .from("visit_records")
@@ -332,6 +338,9 @@ export async function createVisitRecord(data: {
       new_auth: data.newAuth ?? null,
       date_ash_submitted: data.dateAshSubmitted ? data.dateAshSubmitted.toISOString().split("T")[0] : null,
       auth_status: data.authStatus ?? "none",
+      total_insurance_reimbursement: data.totalInsuranceReimbursement ?? null,
+      total_patient_due: data.totalPatientDue ?? null,
+      total_patient_paid: data.totalPatientPaid ?? null,
     })
     .select("id")
     .single();
@@ -354,6 +363,9 @@ export async function updateVisitRecord(
     newAuth?: string | null;
     dateAshSubmitted?: Date | null;
     authStatus?: "none" | "pending" | "approved" | "denied";
+    totalInsuranceReimbursement?: number | null;
+    totalPatientDue?: number | null;
+    totalPatientPaid?: number | null;
   }
 ): Promise<void> {
   const update: Record<string, unknown> = {};
@@ -369,6 +381,9 @@ export async function updateVisitRecord(
     update.date_ash_submitted = data.dateAshSubmitted ? data.dateAshSubmitted.toISOString().split("T")[0] : null;
   }
   if (data.authStatus !== undefined) update.auth_status = data.authStatus;
+  if (data.totalInsuranceReimbursement !== undefined) update.total_insurance_reimbursement = data.totalInsuranceReimbursement;
+  if (data.totalPatientDue !== undefined) update.total_patient_due = data.totalPatientDue;
+  if (data.totalPatientPaid !== undefined) update.total_patient_paid = data.totalPatientPaid;
 
   const { error } = await supabase.from("visit_records").update(update).eq("id", id);
   if (error) {

@@ -60,6 +60,9 @@ export interface VisitRecord {
   dateAshSubmitted: Date | null;
   authStatus: "none" | "pending" | "approved" | "denied";
   insuranceCompany: string | null;  // insurance used for this auth period
+  totalInsuranceReimbursement: number | null;  // numeric(10,2)
+  totalPatientDue: number | null;              // numeric(10,2)
+  totalPatientPaid: number | null;             // numeric(10,2)
   createdAt: Date;
   updatedAt: Date;
 }

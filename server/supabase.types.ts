@@ -70,6 +70,9 @@ export interface VisitRecordRow {
   date_ash_submitted: string | null; // ISO date "YYYY-MM-DD"
   auth_status: AuthStatus;
   insurance_company: string | null;  // insurance used for this auth period
+  total_insurance_reimbursement: number | null;  // numeric(10,2)
+  total_patient_due: number | null;              // numeric(10,2)
+  total_patient_paid: number | null;             // numeric(10,2)
   created_at: string;
   updated_at: string;
 }
@@ -143,6 +146,9 @@ export type InsertVisitRecord = {
   new_auth?: string | null;
   date_ash_submitted?: string | null;
   auth_status?: AuthStatus;
+  total_insurance_reimbursement?: number | null;
+  total_patient_due?: number | null;
+  total_patient_paid?: number | null;
 };
 
 export type InsertClaimRecord = {
