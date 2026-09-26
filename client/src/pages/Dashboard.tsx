@@ -2064,12 +2064,10 @@ export default function Dashboard() {
                         </div>
                         <div className="flex items-center gap-2">
                           <Button
-                            variant="outline"
-                            size="sm"
-                            className="inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap"
+                            className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold px-5 py-2.5 rounded-lg inline-flex items-center gap-2 transition-all shadow-sm hover:shadow-md"
                             onClick={() => navigate('/claims')}
                           >
-                            <FileText className="w-4 h-4" />
+                            <FileText className="w-4 h-4" strokeWidth={2.5} />
                             View Claims
                           </Button>
                           {/* Log Session button only on active period (oldest with remaining sessions) */}
