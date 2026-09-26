@@ -161,6 +161,7 @@ __export(db_exports, {
   bulkCreateVisitRecords: () => bulkCreateVisitRecords,
   changeClinicUserPassword: () => changeClinicUserPassword,
   classifyClaimFollowUp: () => classifyClaimFollowUp,
+  createAuditLog: () => createAuditLog,
   createClaimRecord: () => createClaimRecord,
   createClinicUser: () => createClinicUser,
   createPatient: () => createPatient,
@@ -169,6 +170,7 @@ __export(db_exports, {
   deletePatient: () => deletePatient,
   determineActiveAuthPeriod: () => determineActiveAuthPeriod,
   determineMarkAsRequestedTargetRow: () => determineMarkAsRequestedTargetRow,
+  diffPatientUpdate: () => diffPatientUpdate,
   getAllPatients: () => getAllPatients,
   getAuthAlertSummaries: () => getAuthAlertSummaries,
   getClaimsByPatientAndPeriod: () => getClaimsByPatientAndPeriod,
@@ -332,6 +334,26 @@ async function updatePatient(id, data) {
   const { error } = await supabase.from("patients").update(update).eq("id", id);
   if (error) {
     console.error("[Supabase] updatePatient:", error);
+    throw error;
+  }
+}
+function diffPatientUpdate(before, after) {
+  const changes = [];
+  if (after.name !== void 0 && after.name !== before.name) {
+    changes.push({ action: "PATIENT_NAME_UPDATE", oldValue: before.name, newValue: after.name });
+  }
+  return changes;
+}
+async function createAuditLog(entry) {
+  const { error } = await supabase.from("audit_logs").insert({
+    patient_id: entry.patientId,
+    actor_id: entry.actorId,
+    action: entry.action,
+    old_value: entry.oldValue,
+    new_value: entry.newValue
+  });
+  if (error) {
+    console.error("[Supabase] createAuditLog:", error);
     throw error;
   }
 }
@@ -3622,11 +3644,20 @@ var appRouter = router({
         throw new TRPCError3({ code: "FORBIDDEN", message: "This account has been archived. Contact your administrator." });
       }
       await touchClinicUserLastLogin(clinicUser.id);
-      const token = await sdk.createClinicSessionToken({
-        clinicUserId: clinicUser.id,
-        username: clinicUser.username,
-        tokenVersion: clinicUser.tokenVersion
-      });
+      let token;
+      try {
+        token = await sdk.createClinicSessionToken({
+          clinicUserId: clinicUser.id,
+          username: clinicUser.username,
+          tokenVersion: clinicUser.tokenVersion
+        });
+      } catch (err) {
+        console.error("[clinic.login] Failed to sign session token \u2014 check JWT_SECRET is set", err);
+        throw new TRPCError3({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Login is temporarily unavailable. Please try again later."
+        });
+      }
       const { upsertUser: upsertUser2 } = await Promise.resolve().then(() => (init_db(), db_exports));
       await upsertUser2({
         openId: `clinic_${clinicUser.username}`,
@@ -3868,14 +3899,23 @@ var appRouter = router({
         authValidUntil: z2.number().nullable().optional(),
         claimsStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted"]).optional()
       })
-    ).mutation(async ({ input }) => {
+    ).mutation(async ({ input, ctx }) => {
       const { id, authDate, authValidUntil, claimsStatus, ...rest } = input;
+      const before = await getPatientById(id);
+      if (!before) throw new TRPCError3({ code: "NOT_FOUND", message: "Patient not found" });
       await updatePatient(id, {
         ...rest,
         ...authDate !== void 0 ? { authDate: parseDate2(authDate) } : {},
         ...authValidUntil !== void 0 ? { authValidUntil } : {},
         ...claimsStatus !== void 0 ? { claimsStatus } : {}
       });
+      const changes = diffPatientUpdate(before, rest);
+      if (changes.length > 0) {
+        const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+        for (const change of changes) {
+          await createAuditLog({ patientId: id, actorId, ...change });
+        }
+      }
       return { success: true };
     }),
     delete: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {

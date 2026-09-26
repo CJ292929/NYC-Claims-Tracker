@@ -325,6 +325,10 @@ export default function Dashboard() {
   // Edit Patient dialog state
   const [isEditPatientOpen, setIsEditPatientOpen] = useState(false);
   const [editPatientName, setEditPatientName] = useState('');
+  const [editPatientInsurance, setEditPatientInsurance] = useState('');
+  /** Track which visit row is currently being edited for # Authorized (visits allowed) */
+  const [editingSessionsAuthorizedId, setEditingSessionsAuthorizedId] = useState<string | null>(null);
+  const [editingSessionsAuthorizedValue, setEditingSessionsAuthorizedValue] = useState<string>('');
   // Claims status filter for patient list
   const [selectedClaimsFilter, setSelectedClaimsFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -1002,6 +1006,37 @@ export default function Dashboard() {
     setEditingAshValue('');
   };
 
+  /** Start editing # Authorized (sessionsAuthorized / "visits allowed") for a visit row */
+  const handleStartEditSessionsAuthorized = (visit: DbVisit) => {
+    setEditingSessionsAuthorizedId(visit.id);
+    setEditingSessionsAuthorizedValue(visit.sessionsAuthorized != null ? String(visit.sessionsAuthorized) : '');
+  };
+
+  /** Save the edited # Authorized value */
+  const handleSaveSessionsAuthorized = (visitId: string) => {
+    const trimmed = editingSessionsAuthorizedValue.trim();
+    const parsed = trimmed === '' ? null : Number(trimmed);
+    if (parsed !== null && (Number.isNaN(parsed) || parsed < 0)) {
+      toast.error('Enter a valid number of authorized sessions');
+      return;
+    }
+    updateVisit.mutate(
+      { id: visitId, sessionsAuthorized: parsed },
+      {
+        onSuccess: () => {
+          toast.success('# Authorized saved');
+          setEditingSessionsAuthorizedId(null);
+        },
+      }
+    );
+  };
+
+  /** Cancel editing without saving */
+  const handleCancelEditSessionsAuthorized = () => {
+    setEditingSessionsAuthorizedId(null);
+    setEditingSessionsAuthorizedValue('');
+  };
+
   // ── PDF/CSV Claim Upload ──────────────────────────────────────────────────
 
   const handleClaimFileUpload = async (file: File, period: number, uploadType: 'reimbursement' | 'cms1500' = 'reimbursement') => {
@@ -1620,7 +1655,7 @@ export default function Dashboard() {
               Edit Patient Details
             </DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              Update this patient's name.
+              Correct this patient's name or insurance company.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
@@ -1632,6 +1667,17 @@ export default function Dashboard() {
                 onChange={e => setEditPatientName(e.target.value)}
                 className="mt-1 border-brand-cream-dark focus:border-brand-blue"
               />
+            </div>
+            <div>
+              <Label htmlFor="edit-patient-insurance" className="text-brand-blue font-semibold">Insurance Company</Label>
+              <Select value={editPatientInsurance} onValueChange={setEditPatientInsurance}>
+                <SelectTrigger id="edit-patient-insurance" className="mt-1 border-brand-cream-dark w-full">
+                  <SelectValue placeholder="Select insurance company" />
+                </SelectTrigger>
+                <SelectContent>
+                  {insuranceList.map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <DialogFooter className="flex gap-3 pt-2 sm:justify-start">
@@ -1648,7 +1694,11 @@ export default function Dashboard() {
               onClick={async () => {
                 if (!selectedPatient) return;
                 try {
-                  await updatePatient.mutateAsync({ id: selectedPatient.id, name: editPatientName.trim() });
+                  await updatePatient.mutateAsync({
+                    id: selectedPatient.id,
+                    name: editPatientName.trim(),
+                    insurance: editPatientInsurance,
+                  });
                   setIsEditPatientOpen(false);
                 } catch {
                   // onError on the mutation already surfaces a toast
@@ -1772,7 +1822,7 @@ export default function Dashboard() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => { setEditPatientName(activePatient.name); setIsEditPatientOpen(true); }}
+              onClick={() => { setEditPatientName(activePatient.name); setEditPatientInsurance(activePatient.insurance); setIsEditPatientOpen(true); }}
               aria-label="Edit patient"
               className="gap-1.5"
             >
@@ -1964,7 +2014,43 @@ export default function Dashboard() {
                                 </div>
                                 <div>
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide"># Authorized</p>
-                                  <p className="font-semibold text-brand-blue text-base">{visit.sessionsAuthorized != null ? visit.sessionsAuthorized : <span className="text-gray-300">—</span>}</p>
+                                  {editingSessionsAuthorizedId === visit.id ? (
+                                    <div className="flex items-center gap-2 flex-wrap mt-1">
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        value={editingSessionsAuthorizedValue}
+                                        onChange={e => setEditingSessionsAuthorizedValue(e.target.value)}
+                                        className="w-20 border border-brand-gold rounded-md px-2 py-2 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30 min-h-[40px]"
+                                        autoFocus
+                                      />
+                                      <Button
+                                        size="sm"
+                                        onClick={() => handleSaveSessionsAuthorized(visit.id)}
+                                        disabled={updateVisit.isPending}
+                                        className="h-auto min-h-[36px] text-green-600 hover:text-green-800 font-bold text-xs px-3 py-2 bg-green-50 hover:bg-green-100"
+                                      >
+                                        {updateVisit.isPending ? '…' : 'Save'}
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="secondary"
+                                        onClick={handleCancelEditSessionsAuthorized}
+                                        className="h-auto min-h-[36px] text-gray-500 hover:text-gray-700 font-bold text-xs px-3 py-2"
+                                      >
+                                        Cancel
+                                      </Button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => handleStartEditSessionsAuthorized(visit)}
+                                      className="font-semibold text-brand-blue text-base hover:underline cursor-pointer min-h-[40px] flex items-center"
+                                      title="Click to edit # Authorized"
+                                      aria-label={visit.sessionsAuthorized != null ? `Edit # Authorized, currently ${visit.sessionsAuthorized}` : 'Set # Authorized'}
+                                    >
+                                      {visit.sessionsAuthorized != null ? visit.sessionsAuthorized : <span className="text-gray-300 font-normal">Click to set</span>}
+                                    </button>
+                                  )}
                                 </div>
                                 <div>
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide"># Remaining</p>
@@ -2025,7 +2111,10 @@ export default function Dashboard() {
                             <thead className="bg-brand-blue/95">
                               <tr>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Date</th>
-                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider"># Authorized</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                  # Authorized
+                                  <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
+                                </th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider"># Remaining</th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Session #</th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Date of Service</th>
@@ -2043,11 +2132,45 @@ export default function Dashboard() {
                           <td className="px-4 py-2.5 text-sm text-brand-blue whitespace-nowrap">
                             {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
-                          {/* # Authorized */}
+                          {/* # Authorized — EDITABLE */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
-                            {visit.sessionsAuthorized != null ? (
-                              <span className="font-semibold text-brand-blue text-base">{visit.sessionsAuthorized}</span>
-                            ) : <span className="text-gray-300 text-lg">—</span>}
+                            {editingSessionsAuthorizedId === visit.id ? (
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={editingSessionsAuthorizedValue}
+                                  onChange={e => setEditingSessionsAuthorizedValue(e.target.value)}
+                                  className="w-20 border border-brand-gold rounded-md px-2 py-1.5 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
+                                  autoFocus
+                                />
+                                <Button
+                                  size="sm"
+                                  onClick={() => handleSaveSessionsAuthorized(visit.id)}
+                                  disabled={updateVisit.isPending}
+                                  className="h-auto text-green-600 hover:text-green-800 font-bold text-xs px-2 py-1 bg-green-50 hover:bg-green-100"
+                                >
+                                  {updateVisit.isPending ? '…' : 'Save'}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  onClick={handleCancelEditSessionsAuthorized}
+                                  className="h-auto text-gray-500 hover:text-gray-700 font-bold text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200"
+                                >
+                                  Cancel
+                                </Button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => handleStartEditSessionsAuthorized(visit)}
+                                className="font-semibold text-brand-blue text-base hover:underline cursor-pointer"
+                                title="Click to edit # Authorized"
+                                aria-label={visit.sessionsAuthorized != null ? `Edit # Authorized, currently ${visit.sessionsAuthorized}` : 'Set # Authorized'}
+                              >
+                                {visit.sessionsAuthorized != null ? visit.sessionsAuthorized : <span className="text-gray-300 text-lg font-normal">—</span>}
+                              </button>
+                            )}
                           </td>
                           {/* # Remaining */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
