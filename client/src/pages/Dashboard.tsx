@@ -3361,7 +3361,9 @@ export default function Dashboard() {
                               <tbody>
                                 {group.claims.map((claim: any, cIdx: number) => {
                                   const lines: any[] = claim.cptLines?.length > 0 ? claim.cptLines : [{ cptCodes: claim.cptCodes, chargeAmount: claim.chargeAmount, insuranceReimbursement: claim.insuranceReimbursement, patientAmountPaid: claim.patientAmountPaid }];
-                                  return lines.map((line: any, lIdx: number) => (
+                                  const sum = (field: string) => lines.reduce((n: number, l: any) => n + (l[field] != null && l[field] !== '' ? parseFloat(l[field]) : 0), 0);
+                                  return [
+                                    ...lines.map((line: any, lIdx: number) => (
                                     <tr key={`${cIdx}-${lIdx}`} className="border-b border-gray-100 hover:bg-white/50">
                                       <td className="px-3 py-1 whitespace-nowrap text-gray-700">
                                         {lIdx === 0 ? (
@@ -3375,7 +3377,16 @@ export default function Dashboard() {
                                       <td className="px-3 py-1 text-right text-gray-700">{line.insuranceReimbursement != null && line.insuranceReimbursement !== '' ? `$${parseFloat(line.insuranceReimbursement).toFixed(2)}` : '—'}</td>
                                       <td className="px-3 py-1 text-right text-gray-700">{line.patientAmountPaid != null && line.patientAmountPaid !== '' ? `$${parseFloat(line.patientAmountPaid).toFixed(2)}` : '—'}</td>
                                     </tr>
-                                  ));
+                                    )),
+                                    ...(lines.length > 1 ? [(
+                                      <tr key={`${cIdx}-total`} className="border-b border-gray-200 bg-gray-50/80 font-semibold">
+                                        <td className="px-3 py-1 whitespace-nowrap text-gray-500 italic" colSpan={2}>Total for this date</td>
+                                        <td className="px-3 py-1 text-right text-gray-800">${sum('chargeAmount').toFixed(2)}</td>
+                                        <td className="px-3 py-1 text-right text-gray-800">${sum('insuranceReimbursement').toFixed(2)}</td>
+                                        <td className="px-3 py-1 text-right text-gray-800">${sum('patientAmountPaid').toFixed(2)}</td>
+                                      </tr>
+                                    )] : []),
+                                  ];
                                 })}
                               </tbody>
                             </table>
@@ -3465,7 +3476,9 @@ export default function Dashboard() {
                         modifier: group.modifier,
                         diagnosisCodes: group.diagnosisCodes,
                       }];
-                      return lines.map((line: any, lIdx: number) => (
+                      const sum = (field: string) => lines.reduce((n: number, l: any) => n + (l[field] != null && l[field] !== '' ? parseFloat(l[field]) : 0), 0);
+                      return [
+                        ...lines.map((line: any, lIdx: number) => (
                         <tr key={`${gIdx}-${lIdx}`} className={`border-b ${lIdx === lines.length - 1 ? 'border-gray-300' : 'border-gray-100'} hover:bg-brand-cream/50`}>
                           {/* Date — show only on first CPT line of each group */}
                           <td className="px-3 py-1.5 border-r border-gray-200 whitespace-nowrap font-medium text-gray-800">
@@ -3521,7 +3534,19 @@ export default function Dashboard() {
                             {lIdx === 0 && (group.insuranceBilled || <span className="text-gray-300">—</span>)}
                           </td>
                         </tr>
-                      ));
+                        )),
+                        ...(lines.length > 1 ? [(
+                          <tr key={`${gIdx}-total`} className="border-b border-gray-300 bg-gray-50/80 font-semibold">
+                            <td className="px-3 py-1.5 border-r border-gray-200 text-gray-500 italic whitespace-nowrap" colSpan={5}>Total for this date</td>
+                            <td className="px-3 py-1.5 border-r border-gray-200 text-right text-gray-800">${sum('chargeAmount').toFixed(2)}</td>
+                            <td className="px-3 py-1.5 border-r border-gray-200 text-right text-gray-800">${sum('insuranceReimbursement').toFixed(2)}</td>
+                            <td className="px-3 py-1.5 border-r border-gray-200 text-right text-gray-800">${sum('patientAmountPaid').toFixed(2)}</td>
+                            <td className="px-3 py-1.5 border-r border-gray-200 text-right text-gray-800">${sum('patientAmountDue').toFixed(2)}</td>
+                            <td className="px-3 py-1.5 border-r border-gray-200" colSpan={3}></td>
+                            <td className="px-3 py-1.5"></td>
+                          </tr>
+                        )] : []),
+                      ];
                     })}
                   </tbody>
                 </table>

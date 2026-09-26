@@ -19,7 +19,7 @@ import { invokeLLM } from './_core/llm';
 import { ENV } from './_core/env';
 import { requireAuthenticatedUser } from './_core/requireAuth';
 import { tryTemplateExtraction, parseCMS1500, type ExtractedClaim, type PatientClaimGroup } from './insuranceTemplates';
-import { extractClaimsWithAI, detectInsuranceType, type ExtractionSource } from './aiClaimExtractor';
+import { extractClaimsWithAI, detectInsuranceType, KNOWN_INSURER_NAMES, type ExtractionSource } from './aiClaimExtractor';
 
 // requireAuthenticatedUser (server/_core/requireAuth.ts) runs before multer
 // so an unauthenticated request never reaches file parsing, template
@@ -528,8 +528,16 @@ export function registerClaimUploadRoute(app: Express) {
           try {
             const detection = await detectInsuranceType(extractedText);
             console.log(`[ClaimUpload] Stage 3/7 — Template/type detection: ${detection.insurer} (${detection.documentType}, confidence: ${detection.confidence})`);
-            // Auto-detect CMS1500 with high confidence
-            if (detection.confidence > 0.7 && detection.documentType === 'cms1500') {
+            // A known EOB-issuing payer's own document rarely doubles as a
+            // CMS-1500 claim form — require a higher confidence bar before
+            // honoring a 'cms1500' classification in that case, since a
+            // false positive here sends genuine EOB text into the CMS-1500
+            // regex parser's unanchored positional extraction (bad data),
+            // whereas a false 'reimbursement' default just falls through to
+            // the AI path with EOB-appropriate prompting (safer failure mode).
+            const isKnownInsurer = KNOWN_INSURER_NAMES.some((name) => detection.insurer.toLowerCase().includes(name));
+            const confidenceThreshold = isKnownInsurer ? 0.9 : 0.7;
+            if (detection.confidence > confidenceThreshold && detection.documentType === 'cms1500') {
               uploadType = 'cms1500';
               console.log('[ClaimUpload] Auto-detected CMS1500 format');
             }

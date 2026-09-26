@@ -58,7 +58,7 @@ function recoverJson(raw: string): any | null {
 // (e.g. hallucinating from the document's letterhead). Matched as a
 // case-insensitive substring, not an exact match, since a payer name is
 // often printed with extra words ("Aetna Choice PPO", "Meritain Health").
-const KNOWN_INSURER_NAMES = [
+export const KNOWN_INSURER_NAMES = [
   "aetna", "bcbs", "blue cross", "blue shield", "cigna", "unitedhealthcare",
   "united healthcare", "uhc", "humana", "meritain", "anthem", "medicare",
   "medicaid", "optum", "wellpoint", "molina", "kaiser", "tricare", "geico",
@@ -143,6 +143,27 @@ function verifyClaimAgainstSourceText(claim: ExtractedClaim, sourceText: string)
   checkAmount("Reimbursement", claim.insuranceReimbursement);
   checkAmount("Patient due", claim.patientAmountDue);
 
+  // Units are 1-2 digits, so whole-document presence alone is a weak signal
+  // (small numbers appear everywhere by chance) — also require the units
+  // value to co-occur with the CPT code on the same source line, the same
+  // way the CPT+charge co-occurrence check below works.
+  if (claim.unitsBilled != null && claim.cptCodes) {
+    const unitsStr = String(Math.round(claim.unitsBilled));
+    const cptCore = claim.cptCodes.match(/^[A-Z]?\d{4,5}/)?.[0] ?? claim.cptCodes;
+    if (!sourceText.includes(unitsStr)) {
+      warnings.push(`Units ${unitsStr} not found in source text`);
+    } else {
+      const coOccurs = sourceText.split("\n").some(
+        (line) =>
+          (line.includes(claim.cptCodes!) || line.includes(cptCore)) &&
+          line.includes(unitsStr)
+      );
+      if (!coOccurs) {
+        warnings.push(`Units ${unitsStr} not found on the same line as CPT "${claim.cptCodes}" — possible misattribution`);
+      }
+    }
+  }
+
   const checkStringField = (label: string, value: string | null | undefined) => {
     if (!value) return;
     if (!sourceText.includes(value)) {
@@ -219,7 +240,7 @@ export async function extractClaimsWithAI(
 
 *** CRITICAL: You MUST extract the PATIENT NAME for EACH claim, individually. This is required for matching against the clinic's patient database. ***
 
-*** DOCUMENT-TYPE BOUNDARY: This is a Reimbursement/EOB document. Extract payment-side data — insuranceReimbursement, patientAmountPaid, patientAmountDue, oaClaimNumber (Claim #), checkDate (Check/Payment Date), and checkNumberVirtualCard (Check/EFT) — plus dateOfService and cptCodes, which double as the key used to identify which existing claim this payment applies to. Many EOBs also print a per-line "Line Level Information" billing table (Billed Amount, DX/Diagnosis Codes, Modifier, Quantity/Units) alongside the payment columns — when that table is present, ALSO extract chargeAmount, diagnosisCodes, modifier, and unitsBilled from it (see field list below); leave any of those null only when the document genuinely does not print it. NEVER extract placeOfService — that comes exclusively from CMS-1500 claim forms (Box 24B) and is never printed on a Reimbursement/EOB. ***
+*** DOCUMENT-TYPE BOUNDARY: This is a Reimbursement/EOB document. Extract payment-side data — insuranceReimbursement, patientAmountPaid, patientAmountDue, oaClaimNumber (Claim #), checkDate (Check/Payment Date), and checkNumberVirtualCard (Check/EFT) — plus dateOfService and cptCodes, which double as the key used to identify which existing claim this payment applies to. Many EOBs also print a per-line "Line Level Information" billing table (Billed Amount, DX/Diagnosis Codes, Modifier, Quantity/Units) alongside the payment columns — when that table is present, ALSO extract chargeAmount, diagnosisCodes, modifier, and unitsBilled from it (see field list below); leave any of those null only when the document genuinely does not print it. Do NOT extract placeOfService for this document type — leave it null even if a "Place of Service" column happens to be visible (some payer portal exports print one), since it is only ever saved from CMS-1500 uploads (Box 24B) and is discarded for Reimbursement/EOB claims regardless of what you extract. ***
 
 Payers lay these documents out very differently — a table of many patients on one page, a single-patient web-portal export, a per-claim narrative block, etc. Do not assume there is only one patient name at the top of the document: scan the ENTIRE document and re-identify the patient name at each claim/service-line block, since one EOB commonly covers many different patients (e.g. a check remitting payment for a whole clinic's batch of claims).
 
@@ -245,6 +266,7 @@ FIELD NAME VARIATIONS — the same data point is labeled differently across paye
 - Charge (chargeAmount) = the provider's ORIGINAL BILLED charge for this line: "Billed Amount", "Charge", "Submitted Charges", "Amount Charged". This is NOT "Allowed Amount"/"Allowable"/"QPA" (the contracted rate) and NOT "Paid"/"Payable" (what insurance actually paid) — those are separate columns; do not substitute either of them into chargeAmount.
 - Insurance Reimbursement = the amount the payer actually PAID/will pay: "Paid Amount", "Payable Amount", "Plan Paid", "Claim Payment Amount". This is NOT the same as "Allowed Amount"/"Allowable"/"QPA" — that is only the contractually recognized rate the patient-responsibility math is based on, and is often larger than what was actually paid (especially out-of-network). If both an "Allowed" and a "Paid"/"Payable" column exist, use the "Paid"/"Payable" one.
 - Patient Due = the patient's owed balance under the plan: "Patient Responsibility", "Patient Resp", "Balance Due". Some EOBs instead print separate "Coinsurance Amount", "Copay Amount", and "Deductible Amount" columns without a single combined "Patient Responsibility" figure — do NOT sum those three yourself and do NOT write any one of them individually into patientAmountDue or patientAmountPaid; leave patientAmountDue null in that case rather than guessing which figure(s) apply, unless an explicit combined "Patient Responsibility"/"Balance Due" label is also present. Some EOBs separately print a "Not Payable"/"Not Covered" column for amounts the plan simply doesn't cover — that is a different concept from Patient Responsibility (it's often only billable to the patient if a separate balance-billing agreement applies) — prefer the explicit "Patient Responsibility" figure when both are present.
+- CRITICAL — a claim/date's own "Totals" row (which sums all of its service lines) is NEVER a per-line patientAmountDue value. If a date has multiple CPT lines and only ONE Patient Due figure is legible per line (e.g. the individual per-line split is unclear from the layout, but a "Totals" row prints one combined figure for the whole date), assign that combined figure only to the FIRST service line for that date and leave patientAmountDue null on the other lines under the same date — never copy the same total onto every line just because it's the clearest number nearby. Each line's real, distinct value (when legible) always takes priority over substituting the total.
 - "Allowed Amount" and any per-line "Coinsurance Amount" / "Copay Amount" / "Deductible Amount" columns are not captured by any field in this schema — do not write them into chargeAmount, insuranceReimbursement, patientAmountPaid, or patientAmountDue.
 - Claim Number = "Claim ID", "ICN", "Reference #", "Claim #", "Transaction ID", "Control Number"
 - Check/Payment Date = "Payment Date", "Check Date", "Direct Deposit Date", "EFT Date"
@@ -522,6 +544,40 @@ IMPORTANT:
         const sourceLine = findSourceLineForClaim(claim, source.text);
         if (sourceLine) {
           claim.notes = [claim.notes, `📄 Source: "${sourceLine}"`]
+            .filter(Boolean)
+            .join(" | ");
+        }
+      }
+    }
+
+    // Cross-claim check (runs regardless of source kind — operates on the
+    // already-extracted numeric fields, not the source text): a payer that
+    // prints one combined Patient Due figure for a date, shared across
+    // multiple CPT lines, gets that same figure copied onto every line by
+    // the model (no single-claim check above can catch this, since each
+    // individual value is a real number that appears in the source text —
+    // just not on a per-line basis). Flag, don't auto-correct: splitting or
+    // zeroing risks being wrong when two lines genuinely owe the same
+    // coincidental amount, so surface it for staff review instead.
+    const byDate = new Map<string, ExtractedClaim[]>();
+    for (const claim of normalizedClaims) {
+      if (claim.patientAmountDue == null || !claim.dateOfService) continue;
+      const key = claim.dateOfService;
+      if (!byDate.has(key)) byDate.set(key, []);
+      byDate.get(key)!.push(claim);
+    }
+    for (const claimsOnDate of Array.from(byDate.values())) {
+      if (claimsOnDate.length < 2) continue;
+      const seen = new Map<number, number>(); // amount -> count seen so far
+      for (const claim of claimsOnDate) {
+        const amount = claim.patientAmountDue!;
+        const countSoFar = seen.get(amount) ?? 0;
+        seen.set(amount, countSoFar + 1);
+        if (countSoFar > 0) {
+          claim.notes = [
+            claim.notes,
+            `⚠️ Patient Due $${amount.toFixed(2)} matches another CPT line on this date — likely a single combined figure duplicated across lines, not per-line data. Verify against source.`,
+          ]
             .filter(Boolean)
             .join(" | ");
         }
