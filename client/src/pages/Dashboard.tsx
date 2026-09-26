@@ -136,6 +136,18 @@ const toInputDate = (d: Date | null | undefined): string => {
   }
 };
 
+/** Convert epoch ms (how authValidUntil is stored) to "YYYY-MM-DD" for <input type="date"> value */
+const msToInputDate = (ms: number | null | undefined): string => {
+  if (ms == null) return '';
+  try {
+    const dt = new Date(ms);
+    if (isNaN(dt.getTime())) return '';
+    return dt.toISOString().split('T')[0];
+  } catch {
+    return '';
+  }
+};
+
 /** Full-width auth-urgency banner styling per shared urgency state, kept
  *  distinct from the small snapshot badge's colors (which come straight from
  *  patientAuthUrgency.ts). Not shown for 'ok' — nothing to alert about,
@@ -192,6 +204,76 @@ function VisitAuthStatusSelect({ visit, onChange }: { visit: DbVisit; onChange: 
         <SelectItem value="Denied">Denied</SelectItem>
       </SelectContent>
     </Select>
+  );
+}
+
+/** Generic click-to-edit cell for a single date/number field on a visit row.
+ *  Manages its own open/closed state so every correctable field (session #,
+ *  date of service, # authorized, # remaining, date auth submitted) can share
+ *  one implementation instead of a bespoke editingXId/editingXValue pair each.
+ *  `onSave` returns `false` to keep the field open (e.g. failed validation or
+ *  a rejected mutation) — anything else closes it back to display mode. */
+function EditableCell({
+  type,
+  value,
+  display,
+  onSave,
+  isSaving,
+  min,
+  emptyLabel = 'Click to set',
+}: {
+  type: 'date' | 'number';
+  value: string;
+  display: React.ReactNode;
+  onSave: (value: string) => Promise<boolean | void> | boolean | void;
+  isSaving: boolean;
+  min?: number;
+  emptyLabel?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-2 flex-wrap">
+        <input
+          type={type}
+          min={min}
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          autoFocus
+          className="border border-brand-gold rounded-md px-2 py-1.5 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30 min-h-[36px] w-full sm:w-auto"
+        />
+        <Button
+          size="sm"
+          disabled={isSaving}
+          onClick={async () => {
+            const result = await onSave(draft);
+            if (result !== false) setEditing(false);
+          }}
+          className="h-auto min-h-[32px] text-green-600 hover:text-green-800 font-bold text-xs px-2 py-1 bg-green-50 hover:bg-green-100"
+        >
+          {isSaving ? '…' : 'Save'}
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => setEditing(false)}
+          className="h-auto min-h-[32px] text-gray-500 hover:text-gray-700 font-bold text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200"
+        >
+          Cancel
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={() => { setDraft(value); setEditing(true); }}
+      className="hover:underline cursor-pointer text-left"
+    >
+      {display ?? <span className="text-gray-300 italic font-normal">{emptyLabel}</span>}
+    </button>
   );
 }
 
@@ -300,9 +382,6 @@ export default function Dashboard() {
   const [csvImportResult, setCsvImportResult] = useState<CsvImportSummary | null>(null);
   const [showLogSessionDialog, setShowLogSessionDialog] = useState(false);
   const [sessionDate, setSessionDate] = useState(new Date().toISOString().split('T')[0]);
-  /** Track which visit row is currently being edited for Date Authorization Submitted */
-  const [editingAshId, setEditingAshId] = useState<string | null>(null);
-  const [editingAshValue, setEditingAshValue] = useState<string>('');
   /** Delete confirmation dialog */
   const [deletePatientId, setDeletePatientId] = useState<string | null>(null);
   const [deletePatientName, setDeletePatientName] = useState<string>('');
@@ -326,9 +405,9 @@ export default function Dashboard() {
   const [isEditPatientOpen, setIsEditPatientOpen] = useState(false);
   const [editPatientName, setEditPatientName] = useState('');
   const [editPatientInsurance, setEditPatientInsurance] = useState('');
-  /** Track which visit row is currently being edited for # Authorized (visits allowed) */
-  const [editingSessionsAuthorizedId, setEditingSessionsAuthorizedId] = useState<string | null>(null);
-  const [editingSessionsAuthorizedValue, setEditingSessionsAuthorizedValue] = useState<string>('');
+  const [editPatientAuthDate, setEditPatientAuthDate] = useState('');
+  const [editPatientAuthValidUntil, setEditPatientAuthValidUntil] = useState('');
+  const [editPatientClaimsStatus, setEditPatientClaimsStatus] = useState('');
   // Claims status filter for patient list
   const [selectedClaimsFilter, setSelectedClaimsFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -981,60 +1060,31 @@ export default function Dashboard() {
     toast.success(`Auth status updated to ${mapped}`);
   };
 
-  /** Start editing Date Authorization Submitted for a visit row */
-  const handleStartEditAsh = (visit: DbVisit) => {
-    setEditingAshId(visit.id);
-    setEditingAshValue(toInputDate(visit.dateAshSubmitted));
-  };
-
-  /** Save the edited Date Authorization Submitted value */
-  const handleSaveAsh = (visitId: string) => {
-    updateVisit.mutate(
-      { id: visitId, dateAshSubmitted: editingAshValue || null },
-      {
-        onSuccess: () => {
-          toast.success('Date Authorization Submitted saved');
-          setEditingAshId(null);
-        },
-      }
-    );
-  };
-
-  /** Cancel editing without saving */
-  const handleCancelAsh = () => {
-    setEditingAshId(null);
-    setEditingAshValue('');
-  };
-
-  /** Start editing # Authorized (sessionsAuthorized / "visits allowed") for a visit row */
-  const handleStartEditSessionsAuthorized = (visit: DbVisit) => {
-    setEditingSessionsAuthorizedId(visit.id);
-    setEditingSessionsAuthorizedValue(visit.sessionsAuthorized != null ? String(visit.sessionsAuthorized) : '');
-  };
-
-  /** Save the edited # Authorized value */
-  const handleSaveSessionsAuthorized = (visitId: string) => {
-    const trimmed = editingSessionsAuthorizedValue.trim();
-    const parsed = trimmed === '' ? null : Number(trimmed);
-    if (parsed !== null && (Number.isNaN(parsed) || parsed < 0)) {
-      toast.error('Enter a valid number of authorized sessions');
-      return;
+  /** Shared save path for every correctable visit field (backs each EditableCell
+   *  in the visit table). Returns false to keep the cell open on failure so the
+   *  user's edit isn't silently discarded. */
+  const saveVisitField = async (
+    visitId: string,
+    patch: Partial<{ dateOfService: string | null; dateAshSubmitted: string | null; sessionsAuthorized: number | null; sessionsRemaining: number | null; sessionNumber: number | null }>,
+    successMessage: string
+  ): Promise<boolean> => {
+    try {
+      await updateVisit.mutateAsync({ id: visitId, ...patch });
+      toast.success(successMessage);
+      return true;
+    } catch {
+      return false; // onError on the mutation already surfaces a toast
     }
-    updateVisit.mutate(
-      { id: visitId, sessionsAuthorized: parsed },
-      {
-        onSuccess: () => {
-          toast.success('# Authorized saved');
-          setEditingSessionsAuthorizedId(null);
-        },
-      }
-    );
   };
 
-  /** Cancel editing without saving */
-  const handleCancelEditSessionsAuthorized = () => {
-    setEditingSessionsAuthorizedId(null);
-    setEditingSessionsAuthorizedValue('');
+  /** Parse an EditableCell's raw number-input string into a nullable non-negative
+   *  integer. Returns `undefined` (distinct from `null`) when the input is invalid. */
+  const parseOptionalCount = (raw: string): number | null | undefined => {
+    const trimmed = raw.trim();
+    if (trimmed === '') return null;
+    const n = Number(trimmed);
+    if (!Number.isInteger(n) || n < 0) return undefined;
+    return n;
   };
 
   // ── PDF/CSV Claim Upload ──────────────────────────────────────────────────
@@ -1655,10 +1705,10 @@ export default function Dashboard() {
               Edit Patient Details
             </DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              Correct this patient's name or insurance company.
+              Correct any patient detail — every field here can be fixed if a mistake was made.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-2">
+          <div className="space-y-4 py-2 max-h-[60vh] overflow-y-auto pr-1">
             <div>
               <Label htmlFor="edit-patient-name" className="text-brand-blue font-semibold">Patient Name</Label>
               <Input
@@ -1676,6 +1726,39 @@ export default function Dashboard() {
                 </SelectTrigger>
                 <SelectContent>
                   {insuranceList.map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label htmlFor="edit-patient-auth-date" className="text-brand-blue font-semibold">Authorization Date</Label>
+              <Input
+                id="edit-patient-auth-date"
+                type="date"
+                value={editPatientAuthDate}
+                onChange={e => setEditPatientAuthDate(e.target.value)}
+                className="mt-1 border-brand-cream-dark focus:border-brand-blue"
+              />
+            </div>
+            <div>
+              <Label htmlFor="edit-patient-auth-valid-until" className="text-brand-blue font-semibold">Authorization Valid Until</Label>
+              <Input
+                id="edit-patient-auth-valid-until"
+                type="date"
+                value={editPatientAuthValidUntil}
+                onChange={e => setEditPatientAuthValidUntil(e.target.value)}
+                className="mt-1 border-brand-cream-dark focus:border-brand-blue"
+              />
+            </div>
+            <div>
+              <Label htmlFor="edit-patient-claims-status" className="text-brand-blue font-semibold">Claims Status</Label>
+              <Select value={editPatientClaimsStatus} onValueChange={setEditPatientClaimsStatus}>
+                <SelectTrigger id="edit-patient-claims-status" className="mt-1 border-brand-cream-dark w-full">
+                  <SelectValue placeholder="Select claims status" />
+                </SelectTrigger>
+                <SelectContent>
+                  {CLAIM_STATUS_FILTERS.filter(f => f.value !== 'all' && f.value !== 'none').map(f => (
+                    <SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -1698,6 +1781,11 @@ export default function Dashboard() {
                     id: selectedPatient.id,
                     name: editPatientName.trim(),
                     insurance: editPatientInsurance,
+                    authDate: editPatientAuthDate || null,
+                    authValidUntil: editPatientAuthValidUntil
+                      ? new Date(editPatientAuthValidUntil + 'T00:00:00Z').getTime()
+                      : null,
+                    claimsStatus: editPatientClaimsStatus as 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted',
                   });
                   setIsEditPatientOpen(false);
                 } catch {
@@ -1822,7 +1910,14 @@ export default function Dashboard() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => { setEditPatientName(activePatient.name); setEditPatientInsurance(activePatient.insurance); setIsEditPatientOpen(true); }}
+              onClick={() => {
+                setEditPatientName(activePatient.name);
+                setEditPatientInsurance(activePatient.insurance);
+                setEditPatientAuthDate(toInputDate(activePatient.authDate));
+                setEditPatientAuthValidUntil(msToInputDate(activePatient.authValidUntil));
+                setEditPatientClaimsStatus(activePatient.claimsStatus);
+                setIsEditPatientOpen(true);
+              }}
               aria-label="Edit patient"
               className="gap-1.5"
             >
@@ -1938,8 +2033,8 @@ export default function Dashboard() {
                               <span className="font-medium">{periodInsurance} · </span>
                             )}
                             {isActive
-                              ? 'Active period · Click the calendar icon in "Date Authorization Submitted" to edit'
-                              : 'Completed authorization period — read-only history'}
+                              ? 'Active period · click any (editable) field below to correct it'
+                              : 'Completed authorization period · fields marked (editable) can still be corrected'}
                           </CardDescription>
                         </div>
                         {/* Log Session button only on active period (oldest with remaining sessions) */}
@@ -1997,7 +2092,18 @@ export default function Dashboard() {
                                 <div className="flex items-baseline gap-1.5">
                                   <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Session</span>
                                   <span className="font-semibold text-gray-700 text-base">
-                                    {visit.sessionNumber != null ? visit.sessionNumber : <span className="text-gray-300">—</span>}
+                                    <EditableCell
+                                      type="number"
+                                      min={1}
+                                      value={visit.sessionNumber != null ? String(visit.sessionNumber) : ''}
+                                      display={visit.sessionNumber}
+                                      isSaving={updateVisit.isPending}
+                                      onSave={async (raw) => {
+                                        const parsed = parseOptionalCount(raw);
+                                        if (parsed === undefined) { toast.error('Enter a valid session number'); return false; }
+                                        return saveVisitField(visit.id, { sessionNumber: parsed }, 'Session # saved');
+                                      }}
+                                    />
                                   </span>
                                 </div>
                                 <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
@@ -2006,7 +2112,15 @@ export default function Dashboard() {
                               <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
                                 <div>
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Date of Service</p>
-                                  <p className="text-brand-blue">{visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300">—</span>}</p>
+                                  <p className="text-brand-blue">
+                                    <EditableCell
+                                      type="date"
+                                      value={toInputDate(visit.dateOfService)}
+                                      display={visit.dateOfService ? formatDate(visit.dateOfService) : null}
+                                      isSaving={updateVisit.isPending}
+                                      onSave={(raw) => saveVisitField(visit.id, { dateOfService: raw || null }, 'Date of Service saved')}
+                                    />
+                                  </p>
                                 </div>
                                 <div>
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Auth Date</p>
@@ -2014,47 +2128,37 @@ export default function Dashboard() {
                                 </div>
                                 <div>
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide"># Authorized</p>
-                                  {editingSessionsAuthorizedId === visit.id ? (
-                                    <div className="flex items-center gap-2 flex-wrap mt-1">
-                                      <input
-                                        type="number"
-                                        min={0}
-                                        value={editingSessionsAuthorizedValue}
-                                        onChange={e => setEditingSessionsAuthorizedValue(e.target.value)}
-                                        className="w-20 border border-brand-gold rounded-md px-2 py-2 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30 min-h-[40px]"
-                                        autoFocus
-                                      />
-                                      <Button
-                                        size="sm"
-                                        onClick={() => handleSaveSessionsAuthorized(visit.id)}
-                                        disabled={updateVisit.isPending}
-                                        className="h-auto min-h-[36px] text-green-600 hover:text-green-800 font-bold text-xs px-3 py-2 bg-green-50 hover:bg-green-100"
-                                      >
-                                        {updateVisit.isPending ? '…' : 'Save'}
-                                      </Button>
-                                      <Button
-                                        size="sm"
-                                        variant="secondary"
-                                        onClick={handleCancelEditSessionsAuthorized}
-                                        className="h-auto min-h-[36px] text-gray-500 hover:text-gray-700 font-bold text-xs px-3 py-2"
-                                      >
-                                        Cancel
-                                      </Button>
-                                    </div>
-                                  ) : (
-                                    <button
-                                      onClick={() => handleStartEditSessionsAuthorized(visit)}
-                                      className="font-semibold text-brand-blue text-base hover:underline cursor-pointer min-h-[40px] flex items-center"
-                                      title="Click to edit # Authorized"
-                                      aria-label={visit.sessionsAuthorized != null ? `Edit # Authorized, currently ${visit.sessionsAuthorized}` : 'Set # Authorized'}
-                                    >
-                                      {visit.sessionsAuthorized != null ? visit.sessionsAuthorized : <span className="text-gray-300 font-normal">Click to set</span>}
-                                    </button>
-                                  )}
+                                  <div className="font-semibold text-brand-blue text-base">
+                                    <EditableCell
+                                      type="number"
+                                      min={0}
+                                      value={visit.sessionsAuthorized != null ? String(visit.sessionsAuthorized) : ''}
+                                      display={visit.sessionsAuthorized}
+                                      isSaving={updateVisit.isPending}
+                                      onSave={async (raw) => {
+                                        const parsed = parseOptionalCount(raw);
+                                        if (parsed === undefined) { toast.error('Enter a valid number of authorized sessions'); return false; }
+                                        return saveVisitField(visit.id, { sessionsAuthorized: parsed }, '# Authorized saved');
+                                      }}
+                                    />
+                                  </div>
                                 </div>
                                 <div>
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide"># Remaining</p>
-                                  <p className="font-bold text-brand-gold text-base">{visit.sessionsRemaining != null ? visit.sessionsRemaining : <span className="text-gray-300">—</span>}</p>
+                                  <div className="font-bold text-brand-gold text-base">
+                                    <EditableCell
+                                      type="number"
+                                      min={0}
+                                      value={visit.sessionsRemaining != null ? String(visit.sessionsRemaining) : ''}
+                                      display={visit.sessionsRemaining}
+                                      isSaving={updateVisit.isPending}
+                                      onSave={async (raw) => {
+                                        const parsed = parseOptionalCount(raw);
+                                        if (parsed === undefined) { toast.error('Enter a valid number of remaining sessions'); return false; }
+                                        return saveVisitField(visit.id, { sessionsRemaining: parsed }, '# Remaining saved');
+                                      }}
+                                    />
+                                  </div>
                                 </div>
                               </div>
 
@@ -2062,45 +2166,17 @@ export default function Dashboard() {
                                 <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">
                                   Date Authorization Submitted
                                 </p>
-                                {editingAshId === visit.id ? (
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <input
-                                      type="date"
-                                      value={editingAshValue}
-                                      onChange={e => setEditingAshValue(e.target.value)}
-                                      className="border border-brand-gold rounded-md px-2 py-2 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30 min-h-[40px]"
-                                      autoFocus
-                                    />
-                                    <Button
-                                      size="sm"
-                                      onClick={() => handleSaveAsh(visit.id)}
-                                      disabled={updateVisit.isPending}
-                                      className="h-auto min-h-[36px] text-green-600 hover:text-green-800 font-bold text-xs px-3 py-2 bg-green-50 hover:bg-green-100"
-                                    >
-                                      {updateVisit.isPending ? '…' : 'Save'}
-                                    </Button>
-                                    <Button
-                                      size="sm"
-                                      variant="secondary"
-                                      onClick={handleCancelAsh}
-                                      className="h-auto min-h-[36px] text-gray-500 hover:text-gray-700 font-bold text-xs px-3 py-2"
-                                    >
-                                      Cancel
-                                    </Button>
-                                  </div>
-                                ) : (
-                                  <button
-                                    onClick={() => handleStartEditAsh(visit)}
-                                    className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue cursor-pointer transition-colors min-h-[40px]"
-                                    title="Click to edit Date Authorization Submitted"
-                                    aria-label={visit.dateAshSubmitted ? `Edit Date Authorization Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date Authorization Submitted'}
-                                  >
-                                    <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
-                                    <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>
-                                      {visit.dateAshSubmitted ? formatDate(visit.dateAshSubmitted) : 'Click to set date'}
-                                    </span>
-                                  </button>
-                                )}
+                                <div className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue transition-colors min-h-[40px]">
+                                  <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
+                                  <EditableCell
+                                    type="date"
+                                    value={toInputDate(visit.dateAshSubmitted)}
+                                    display={visit.dateAshSubmitted ? <span className="text-brand-blue text-sm">{formatDate(visit.dateAshSubmitted)}</span> : null}
+                                    emptyLabel="Click to set date"
+                                    isSaving={updateVisit.isPending}
+                                    onSave={(raw) => saveVisitField(visit.id, { dateAshSubmitted: raw || null }, 'Date Authorization Submitted saved')}
+                                  />
+                                </div>
                               </div>
                             </div>
                           ))}
@@ -2115,9 +2191,18 @@ export default function Dashboard() {
                                   # Authorized
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
                                 </th>
-                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider"># Remaining</th>
-                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Session #</th>
-                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Date of Service</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                  # Remaining
+                                  <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
+                                </th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                  Session #
+                                  <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
+                                </th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                  Date of Service
+                                  <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
+                                </th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
                                   Date Authorization Submitted
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
@@ -2134,101 +2219,78 @@ export default function Dashboard() {
                           </td>
                           {/* # Authorized — EDITABLE */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
-                            {editingSessionsAuthorizedId === visit.id ? (
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={editingSessionsAuthorizedValue}
-                                  onChange={e => setEditingSessionsAuthorizedValue(e.target.value)}
-                                  className="w-20 border border-brand-gold rounded-md px-2 py-1.5 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
-                                  autoFocus
-                                />
-                                <Button
-                                  size="sm"
-                                  onClick={() => handleSaveSessionsAuthorized(visit.id)}
-                                  disabled={updateVisit.isPending}
-                                  className="h-auto text-green-600 hover:text-green-800 font-bold text-xs px-2 py-1 bg-green-50 hover:bg-green-100"
-                                >
-                                  {updateVisit.isPending ? '…' : 'Save'}
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="secondary"
-                                  onClick={handleCancelEditSessionsAuthorized}
-                                  className="h-auto text-gray-500 hover:text-gray-700 font-bold text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200"
-                                >
-                                  Cancel
-                                </Button>
-                              </div>
-                            ) : (
-                              <button
-                                onClick={() => handleStartEditSessionsAuthorized(visit)}
-                                className="font-semibold text-brand-blue text-base hover:underline cursor-pointer"
-                                title="Click to edit # Authorized"
-                                aria-label={visit.sessionsAuthorized != null ? `Edit # Authorized, currently ${visit.sessionsAuthorized}` : 'Set # Authorized'}
-                              >
-                                {visit.sessionsAuthorized != null ? visit.sessionsAuthorized : <span className="text-gray-300 text-lg font-normal">—</span>}
-                              </button>
-                            )}
+                            <div className="font-semibold text-brand-blue text-base">
+                              <EditableCell
+                                type="number"
+                                min={0}
+                                value={visit.sessionsAuthorized != null ? String(visit.sessionsAuthorized) : ''}
+                                display={visit.sessionsAuthorized}
+                                isSaving={updateVisit.isPending}
+                                onSave={async (raw) => {
+                                  const parsed = parseOptionalCount(raw);
+                                  if (parsed === undefined) { toast.error('Enter a valid number of authorized sessions'); return false; }
+                                  return saveVisitField(visit.id, { sessionsAuthorized: parsed }, '# Authorized saved');
+                                }}
+                              />
+                            </div>
                           </td>
-                          {/* # Remaining */}
+                          {/* # Remaining — EDITABLE */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
-                            {visit.sessionsRemaining != null ? (
-                              <span className="font-bold text-brand-gold text-base">{visit.sessionsRemaining}</span>
-                            ) : <span className="text-gray-300 text-lg">—</span>}
+                            <div className="font-bold text-brand-gold text-base">
+                              <EditableCell
+                                type="number"
+                                min={0}
+                                value={visit.sessionsRemaining != null ? String(visit.sessionsRemaining) : ''}
+                                display={visit.sessionsRemaining}
+                                isSaving={updateVisit.isPending}
+                                onSave={async (raw) => {
+                                  const parsed = parseOptionalCount(raw);
+                                  if (parsed === undefined) { toast.error('Enter a valid number of remaining sessions'); return false; }
+                                  return saveVisitField(visit.id, { sessionsRemaining: parsed }, '# Remaining saved');
+                                }}
+                              />
+                            </div>
                           </td>
-                          {/* Session # */}
+                          {/* Session # — EDITABLE */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
-                            {visit.sessionNumber != null ? (
-                              <span className="font-medium text-gray-700 text-base">{visit.sessionNumber}</span>
-                            ) : <span className="text-gray-300 text-lg">—</span>}
+                            <div className="font-medium text-gray-700 text-base">
+                              <EditableCell
+                                type="number"
+                                min={1}
+                                value={visit.sessionNumber != null ? String(visit.sessionNumber) : ''}
+                                display={visit.sessionNumber}
+                                isSaving={updateVisit.isPending}
+                                onSave={async (raw) => {
+                                  const parsed = parseOptionalCount(raw);
+                                  if (parsed === undefined) { toast.error('Enter a valid session number'); return false; }
+                                  return saveVisitField(visit.id, { sessionNumber: parsed }, 'Session # saved');
+                                }}
+                              />
+                            </div>
                           </td>
-                          {/* Date of Service */}
+                          {/* Date of Service — EDITABLE */}
                           <td className="px-4 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
-                            {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
+                            <EditableCell
+                              type="date"
+                              value={toInputDate(visit.dateOfService)}
+                              display={visit.dateOfService ? formatDate(visit.dateOfService) : null}
+                              isSaving={updateVisit.isPending}
+                              onSave={(raw) => saveVisitField(visit.id, { dateOfService: raw || null }, 'Date of Service saved')}
+                            />
                           </td>
                           {/* Date Authorization Submitted — EDITABLE */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
-                            {editingAshId === visit.id ? (
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="date"
-                                  value={editingAshValue}
-                                  onChange={e => setEditingAshValue(e.target.value)}
-                                  className="border border-brand-gold rounded-md px-2 py-1.5 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30"
-                                  autoFocus
-                                />
-                                <Button
-                                  size="sm"
-                                  onClick={() => handleSaveAsh(visit.id)}
-                                  disabled={updateVisit.isPending}
-                                  className="h-auto text-green-600 hover:text-green-800 font-bold text-xs px-2 py-1 bg-green-50 hover:bg-green-100"
-                                >
-                                  {updateVisit.isPending ? '…' : 'Save'}
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="secondary"
-                                  onClick={handleCancelAsh}
-                                  className="h-auto text-gray-500 hover:text-gray-700 font-bold text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200"
-                                >
-                                  Cancel
-                                </Button>
-                              </div>
-                            ) : (
-                              <button
-                                onClick={() => handleStartEditAsh(visit)}
-                                className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue cursor-pointer transition-colors"
-                                title="Click to edit Date Authorization Submitted"
-                                aria-label={visit.dateAshSubmitted ? `Edit Date Authorization Submitted, currently ${formatDate(visit.dateAshSubmitted)}` : 'Set Date Authorization Submitted'}
-                              >
-                                <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
-                                <span className={visit.dateAshSubmitted ? 'text-brand-blue text-sm' : 'text-sm italic'}>
-                                  {visit.dateAshSubmitted ? formatDate(visit.dateAshSubmitted) : 'Click to set date'}
-                                </span>
-                              </button>
-                            )}
+                            <div className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue transition-colors">
+                              <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
+                              <EditableCell
+                                type="date"
+                                value={toInputDate(visit.dateAshSubmitted)}
+                                display={visit.dateAshSubmitted ? <span className="text-brand-blue text-sm">{formatDate(visit.dateAshSubmitted)}</span> : null}
+                                emptyLabel="Click to set date"
+                                isSaving={updateVisit.isPending}
+                                onSave={(raw) => saveVisitField(visit.id, { dateAshSubmitted: raw || null }, 'Date Authorization Submitted saved')}
+                              />
+                            </div>
                           </td>
                           {/* Auth Status */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
