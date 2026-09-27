@@ -2071,6 +2071,16 @@ export default function Dashboard() {
                       patientPaid: sumField('patient_amount_paid'),
                     };
                   };
+                  // Bottom "Totals" footer for the whole period — sums each money
+                  // column individually across every visit row (not combined into
+                  // one number), matching the source EOB's per-column Totals line.
+                  const periodTotals = periodVisits.reduce((acc, v) => {
+                    const cf = getClaimsFallbackForVisit(v);
+                    acc.insuranceReimbursement += v.totalInsuranceReimbursement ?? cf?.insuranceReimbursement ?? 0;
+                    acc.patientDue += v.totalPatientDue ?? cf?.patientDue ?? 0;
+                    acc.patientPaid += v.totalPatientPaid ?? cf?.patientPaid ?? 0;
+                    return acc;
+                  }, { insuranceReimbursement: 0, patientDue: 0, patientPaid: 0 });
                   return (
                     <div key={`period-${period}`}>
                     {activeSection !== 'claims' && (
@@ -2302,21 +2312,18 @@ export default function Dashboard() {
                                     />
                                   </div>
                                 </div>
-                                {/* Total Amount — spans full width, sits below the 3 money fields above */}
-                                <div className="col-span-2 pt-1.5 border-t border-gray-100 flex items-baseline justify-between">
-                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Amount</p>
-                                  <p className="font-semibold text-brand-blue text-base">
-                                    {formatAmount(
-                                      (visit.totalInsuranceReimbursement ?? claimsFallback?.insuranceReimbursement ?? 0) +
-                                      (visit.totalPatientDue ?? claimsFallback?.patientDue ?? 0) +
-                                      (visit.totalPatientPaid ?? claimsFallback?.patientPaid ?? 0)
-                                    )}
-                                  </p>
-                                </div>
                               </div>
                             </div>
                             );
                           })}
+                          {periodVisits.length > 0 && (
+                            <div className="p-4 bg-gray-50/80 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+                              <p className="col-span-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Totals for this period</p>
+                              <p className="text-gray-700">Reimbursement: <span className="font-semibold">{formatAmount(periodTotals.insuranceReimbursement)}</span></p>
+                              <p className="text-gray-700">Patient Due: <span className="font-semibold">{formatAmount(periodTotals.patientDue)}</span></p>
+                              <p className="text-gray-700">Patient Paid: <span className="font-semibold">{formatAmount(periodTotals.patientPaid)}</span></p>
+                            </div>
+                          )}
                         </div>
                         {/* Desktop Visit Table — md and up */}
                         <div className="hidden md:block overflow-x-auto">
@@ -2360,9 +2367,9 @@ export default function Dashboard() {
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-100">
-                      {periodVisits.flatMap((visit) => {
+                      {periodVisits.map((visit) => {
                         const claimsFallback = getClaimsFallbackForVisit(visit);
-                        const row = (
+                        return (
                         <tr key={visit.id} className="hover:bg-brand-cream/30 transition-colors">
                           {/* Auth Date */}
                           <td className="px-4 py-2.5 text-sm text-brand-blue whitespace-nowrap">
@@ -2497,27 +2504,18 @@ export default function Dashboard() {
                           </td>
                         </tr>
                         );
-                        // Total Amount — merged row directly below, spanning under the 3
-                        // money columns only (7 leading columns stay blank to align it).
-                        const totalAmount = (
-                          (visit.totalInsuranceReimbursement ?? claimsFallback?.insuranceReimbursement ?? 0) +
-                          (visit.totalPatientDue ?? claimsFallback?.patientDue ?? 0) +
-                          (visit.totalPatientPaid ?? claimsFallback?.patientPaid ?? 0)
-                        );
-                        const totalRow = (
-                          <tr key={`${visit.id}-total`} className="bg-gray-50/60 border-b border-gray-200">
-                            <td className="px-4 py-1.5" colSpan={7}></td>
-                            <td className="px-4 py-1.5 text-sm whitespace-nowrap" colSpan={3}>
-                              <div className="flex items-baseline justify-between">
-                                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Amount</span>
-                                <span className="font-semibold text-brand-blue">{formatAmount(totalAmount)}</span>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                        return [row, totalRow];
                       })}
                             </tbody>
+                            {periodVisits.length > 0 && (
+                              <tfoot>
+                                <tr className="bg-gray-50/80 border-t-2 border-gray-200">
+                                  <td className="px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide" colSpan={7}>Totals</td>
+                                  <td className="px-4 py-2 text-sm font-semibold text-brand-blue whitespace-nowrap">{formatAmount(periodTotals.insuranceReimbursement)}</td>
+                                  <td className="px-4 py-2 text-sm font-semibold text-brand-blue whitespace-nowrap">{formatAmount(periodTotals.patientDue)}</td>
+                                  <td className="px-4 py-2 text-sm font-semibold text-brand-blue whitespace-nowrap">{formatAmount(periodTotals.patientPaid)}</td>
+                                </tr>
+                              </tfoot>
+                            )}
                           </table>
                         </div>
                       </CardContent>
