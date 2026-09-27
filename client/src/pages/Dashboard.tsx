@@ -2711,6 +2711,70 @@ export default function Dashboard() {
 
                           const hide = (key: string) => hiddenClaimsColumns.has(key);
 
+                          // Shared column source of truth for the desktop table's header AND
+                          // its per-date "Totals" row (bottom of each date-of-service group,
+                          // mirroring the source EOB's own layout) — keeps both in sync so a
+                          // hidden column disappears from the totals row too.
+                          const claimsTableColumns = [
+                            { key: 'placeOfService', label: 'Place of Service', align: 'left' },
+                            { key: 'dateOfService', label: 'Date of Service', align: 'left' },
+                            { key: 'visitNumber', label: 'Visit #', align: 'left' },
+                            { key: 'cptCodes', label: 'CPT Codes', align: 'left' },
+                            { key: 'unitsBilled', label: 'Units', align: 'center' },
+                            { key: 'diagnosisCodes', label: 'Diagnosis', align: 'left' },
+                            { key: 'modifier', label: 'Modifier', align: 'left' },
+                            { key: 'chargeAmount', label: 'Charge', align: 'right' },
+                            { key: 'insuranceReimbursement', label: 'Ins. Reimb.', align: 'right' },
+                            { key: 'patientAmountPaid', label: 'Pt. Paid', align: 'right' },
+                            { key: 'patientAmountDue', label: 'Pt. Due', align: 'right' },
+                            { key: 'insuranceBilled', label: 'Ins. Billed', align: 'left' },
+                            { key: 'claimSubmittedDate', label: 'Date Submitted', align: 'left' },
+                            { key: 'expireBcbsClaimNumber', label: 'Claim #', align: 'left' },
+                            { key: 'claimStatus', label: 'Status', align: 'center' },
+                            { key: 'lmn', label: 'LMN Documents Date Sent', align: 'left' },
+                            { key: 'checkDate', label: 'Check/Payment Date', align: 'left' },
+                            { key: 'checkNumberVirtualCard', label: 'Check/EFT #', align: 'left' },
+                            { key: 'dateOfAppeal', label: 'Appeal Date', align: 'left' },
+                            { key: 'referenceNo', label: 'Appeal Ref #', align: 'left' },
+                          ];
+                          const visibleClaimsColumns = claimsTableColumns.filter(c => !hide(c.key));
+
+                          // Per-date-of-service sums for the bottom "Totals" row — mirrors the
+                          // source EOB's own layout (a Totals row under each date's line items).
+                          const MONEY_TOTAL_FIELDS: Record<string, string> = {
+                            chargeAmount: 'charge_amount',
+                            insuranceReimbursement: 'insurance_reimbursement',
+                            patientAmountPaid: 'patient_amount_paid',
+                            patientAmountDue: 'patient_amount_due',
+                          };
+                          const dateGroupTotals = new Map<string, Record<string, number> & { count: number }>();
+                          for (const c of claims) {
+                            const key = c.date_of_service ?? '';
+                            const cur = dateGroupTotals.get(key) ?? { chargeAmount: 0, insuranceReimbursement: 0, patientAmountPaid: 0, patientAmountDue: 0, count: 0 };
+                            for (const [outKey, rawKey] of Object.entries(MONEY_TOTAL_FIELDS)) {
+                              cur[outKey] += c[rawKey] != null ? parseFloat(c[rawKey]) : 0;
+                            }
+                            cur.count += 1;
+                            dateGroupTotals.set(key, cur);
+                          }
+                          const renderClaimsTotalsRow = (dateKey: string, keyPrefix: string) => {
+                            const g = dateGroupTotals.get(dateKey);
+                            if (!g || g.count < 2) return null;
+                            return (
+                              <tr key={`${keyPrefix}-totals-${dateKey}`} className="bg-gray-50/80 font-semibold border-b border-gray-300 text-xs">
+                                {visibleClaimsColumns.map((col, i) => (
+                                  <td key={col.key} className={`border border-gray-200 px-1 py-1 ${col.key in MONEY_TOTAL_FIELDS ? 'text-right text-gray-800' : ''}`}>
+                                    {i === 0
+                                      ? <span className="text-gray-500 italic">Totals</span>
+                                      : col.key in MONEY_TOTAL_FIELDS
+                                        ? `$${g[col.key].toFixed(2)}`
+                                        : null}
+                                  </td>
+                                ))}
+                              </tr>
+                            );
+                          };
+
                           const claimStatusOptions = [
                             { value: 'submitted', label: 'Submitted' },
                             { value: 'approved', label: 'Approved' },
@@ -2769,7 +2833,20 @@ export default function Dashboard() {
                             <>
                             {/* Mobile Claim Cards — below md */}
                             <div className="md:hidden divide-y divide-gray-200 bg-white">
-                              {claims.map((claim: any) => (
+                              {claims.flatMap((claim: any, claimIdx: number) => {
+                                const nextClaim = claimIdx < claims.length - 1 ? claims[claimIdx + 1] : null;
+                                const isLastOfDateGroup = !nextClaim || nextClaim.date_of_service !== claim.date_of_service;
+                                const g = dateGroupTotals.get(claim.date_of_service ?? '');
+                                const totalsCard = isLastOfDateGroup && g && g.count > 1 ? (
+                                  <div key={`mobile-totals-${claim.date_of_service ?? ''}`} className="p-4 bg-gray-50/80 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+                                    <p className="col-span-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Totals for {claim.date_of_service ? formatCalendarDate(claim.date_of_service) : 'this date'}</p>
+                                    {!hide('chargeAmount') && <p className="text-gray-700">Charge: <span className="font-semibold">${g.chargeAmount.toFixed(2)}</span></p>}
+                                    {!hide('insuranceReimbursement') && <p className="text-gray-700">Ins. Reimb.: <span className="font-semibold">${g.insuranceReimbursement.toFixed(2)}</span></p>}
+                                    {!hide('patientAmountPaid') && <p className="text-gray-700">Pt. Paid: <span className="font-semibold">${g.patientAmountPaid.toFixed(2)}</span></p>}
+                                    {!hide('patientAmountDue') && <p className="text-gray-700">Pt. Due: <span className="font-semibold">${g.patientAmountDue.toFixed(2)}</span></p>}
+                                  </div>
+                                ) : null;
+                                return [(
                                 <div key={claim.id} className="p-4 space-y-4">
                                   {/* Header: Date of Service / claim identifier / status */}
                                   <div className="flex items-start justify-between gap-3">
@@ -2882,24 +2959,27 @@ export default function Dashboard() {
                                     </div>
                                   )}
                                 </div>
-                              ))}
+                                ), ...(totalsCard ? [totalsCard] : [])];
+                              })}
                             </div>
                             {/* Desktop Claims Table — md and up */}
                             <div className="hidden md:block overflow-x-auto">
                               <table className="w-full text-xs border-collapse">
                                 <thead>
                                   <tr className="bg-brand-cream border-b border-brand-cream-dark">
-                                    {[{key:'placeOfService',label:'Place of Service',align:'left'},{key:'dateOfService',label:'Date of Service',align:'left'},{key:'visitNumber',label:'Visit #',align:'left'},{key:'cptCodes',label:'CPT Codes',align:'left'},{key:'unitsBilled',label:'Units',align:'center'},{key:'diagnosisCodes',label:'Diagnosis',align:'left'},{key:'modifier',label:'Modifier',align:'left'},{key:'chargeAmount',label:'Charge',align:'right'},{key:'insuranceReimbursement',label:'Ins. Reimb.',align:'right'},{key:'patientAmountPaid',label:'Pt. Paid',align:'right'},{key:'patientAmountDue',label:'Pt. Due',align:'right'},{key:'insuranceBilled',label:'Ins. Billed',align:'left'},{key:'claimSubmittedDate',label:'Date Submitted',align:'left'},{key:'expireBcbsClaimNumber',label:'Claim #',align:'left'},{key:'claimStatus',label:'Status',align:'center'},{key:'lmn',label:'LMN Documents Date Sent',align:'left'},{key:'checkDate',label:'Check/Payment Date',align:'left'},{key:'checkNumberVirtualCard',label:'Check/EFT #',align:'left'},{key:'dateOfAppeal',label:'Appeal Date',align:'left'},{key:'referenceNo',label:'Appeal Ref #',align:'left'}].filter(c => !hiddenClaimsColumns.has(c.key)).map(c => (
+                                    {visibleClaimsColumns.map(c => (
                                       <th key={c.key} className={`border border-brand-cream-dark px-2 py-2 text-${c.align} font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap`}>{c.label}</th>
                                     ))}
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {claims.map((claim: any, claimIdx: number) => {
+                                  {claims.flatMap((claim: any, claimIdx: number) => {
                                     // Show the date once per group of consecutive rows that share it,
                                     // instead of repeating it on every CPT line for the same visit.
                                     const prevClaim = claimIdx > 0 ? claims[claimIdx - 1] : null;
                                     const isSameDateAsPrev = prevClaim && prevClaim.date_of_service === claim.date_of_service;
+                                    const nextClaim = claimIdx < claims.length - 1 ? claims[claimIdx + 1] : null;
+                                    const isLastOfDateGroup = !nextClaim || nextClaim.date_of_service !== claim.date_of_service;
                                     const isEditing = (field: string) => isEditingField(claim.id, field);
                                     const startEdit = (field: string, rawValue: string) => startEditField(claim.id, field, rawValue);
                                     const commitEdit = (field: string, isNumeric = false, isDate = false) =>
@@ -2969,7 +3049,7 @@ export default function Dashboard() {
                                       );
                                     };
 
-                                    return (
+                                    const row = (
                                       <tr key={claim.id} className="hover:bg-brand-cream/50 border-b border-gray-200 text-xs">
                                         {!hide('placeOfService') && <EditableText field="placeOfService" value={claim.place_of_service} />}
                                         {!hide('dateOfService') && (
@@ -3048,6 +3128,9 @@ export default function Dashboard() {
                                         {!hide('referenceNo') && <EditableText field="referenceNo" value={claim.reference_no} />}
                                       </tr>
                                     );
+                                    return isLastOfDateGroup
+                                      ? [row, renderClaimsTotalsRow(claim.date_of_service ?? '', 'desktop')]
+                                      : [row];
                                   })}
                                 </tbody>
                               </table>
