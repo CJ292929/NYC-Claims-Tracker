@@ -2052,20 +2052,26 @@ export default function Dashboard() {
                   const periodAuth = periodVisits.find(v => v.sessionsAuthorized != null)?.sessionsAuthorized ?? 0;
                   const periodInsurance = periodVisits.find(v => v.insuranceCompany)?.insuranceCompany ?? null;
                   const isActive = period === activePeriod;
-                  // Auto-fill fallback for the money columns below: sum this
-                  // period's actual claim rows so the fields show a live
-                  // reflection of the Claims Tracker until staff explicitly
-                  // save an override on a given visit (which then wins).
+                  // Auto-fill fallback for the money columns below: sum only
+                  // the claims that share THIS VISIT ROW'S own date of
+                  // service (not the whole period lumped together), so each
+                  // row's fields reflect a live per-date breakdown from the
+                  // Claims Tracker until staff explicitly save an override
+                  // on that visit (which then wins).
                   const periodClaims: any[] = claimsDataMap[period] ?? [];
-                  const sumClaimsField = (field: string) =>
-                    periodClaims.reduce((n: number, c: any) => n + (c[field] != null ? parseFloat(c[field]) : 0), 0);
-                  const claimsFallback = periodClaims.length > 0
-                    ? {
-                        insuranceReimbursement: sumClaimsField('insurance_reimbursement'),
-                        patientDue: sumClaimsField('patient_amount_due'),
-                        patientPaid: sumClaimsField('patient_amount_paid'),
-                      }
-                    : null;
+                  const getClaimsFallbackForVisit = (visit: DbVisit) => {
+                    const visitDate = toInputDate(visit.dateOfService);
+                    if (!visitDate) return null;
+                    const claimsOnDate = periodClaims.filter((c: any) => c.date_of_service === visitDate);
+                    if (claimsOnDate.length === 0) return null;
+                    const sumField = (field: string) =>
+                      claimsOnDate.reduce((n: number, c: any) => n + (c[field] != null ? parseFloat(c[field]) : 0), 0);
+                    return {
+                      insuranceReimbursement: sumField('insurance_reimbursement'),
+                      patientDue: sumField('patient_amount_due'),
+                      patientPaid: sumField('patient_amount_paid'),
+                    };
+                  };
                   return (
                     <div key={`period-${period}`}>
                     {activeSection !== 'claims' && (
@@ -2147,7 +2153,9 @@ export default function Dashboard() {
                       <CardContent className="p-0">
                         {/* Mobile Visit Cards — below md */}
                         <div className="md:hidden divide-y divide-gray-100 bg-white">
-                          {periodVisits.map((visit) => (
+                          {periodVisits.map((visit) => {
+                            const claimsFallback = getClaimsFallbackForVisit(visit);
+                            return (
                             <div key={visit.id} className="p-4 space-y-3">
                               <div className="flex items-center justify-between gap-2">
                                 <div className="flex items-baseline gap-1.5">
@@ -2307,7 +2315,8 @@ export default function Dashboard() {
                                 </div>
                               </div>
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                         {/* Desktop Visit Table — md and up */}
                         <div className="hidden md:block overflow-x-auto">
@@ -2352,7 +2361,9 @@ export default function Dashboard() {
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-100">
-                      {periodVisits.map((visit) => (
+                      {periodVisits.map((visit) => {
+                        const claimsFallback = getClaimsFallbackForVisit(visit);
+                        return (
                         <tr key={visit.id} className="hover:bg-brand-cream/30 transition-colors">
                           {/* Auth Date */}
                           <td className="px-4 py-2.5 text-sm text-brand-blue whitespace-nowrap">
@@ -2494,7 +2505,8 @@ export default function Dashboard() {
                             )}
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                             </tbody>
                           </table>
                         </div>
