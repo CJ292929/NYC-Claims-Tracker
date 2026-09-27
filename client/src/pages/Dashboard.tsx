@@ -1099,7 +1099,31 @@ export default function Dashboard() {
     return n;
   };
 
+  /** Parse an EditableCell's raw number-input string into a nullable non-negative
+   *  dollar amount (2-decimal). Returns `undefined` (distinct from `null`) when
+   *  the input is invalid. */
+  const parseOptionalAmount = (raw: string): number | null | undefined => {
+    const trimmed = raw.trim();
+    if (trimmed === '') return null;
+    const n = Number(trimmed);
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    return Math.round(n * 100) / 100;
+  };
+
   const formatAmount = (n: number | null | undefined): string => `$${(n ?? 0).toFixed(2)}`;
+
+  /** Display for a money cell that hasn't had a manual value saved yet, but
+   *  has a live sum from the Claims Tracker to show in the meantime — styled
+   *  distinctly so staff can tell it's a computed placeholder, not a
+   *  confirmed figure, until they click to save an explicit override. */
+  const autoFillDisplay = (n: number | null | undefined): React.ReactNode => {
+    if (n == null) return null;
+    return (
+      <span className="text-gray-500 italic" title="Auto-filled from Claims Tracker — click to enter a manual value">
+        {formatAmount(n)}
+      </span>
+    );
+  };
 
   // ── PDF/CSV Claim Upload ──────────────────────────────────────────────────
 
@@ -2028,9 +2052,25 @@ export default function Dashboard() {
                   const periodAuth = periodVisits.find(v => v.sessionsAuthorized != null)?.sessionsAuthorized ?? 0;
                   const periodInsurance = periodVisits.find(v => v.insuranceCompany)?.insuranceCompany ?? null;
                   const isActive = period === activePeriod;
-                  // Claims for this period, used by the read-only breakdown-by-date-of-service
-                  // table rendered below the visit table (sourced from the Claims Tracker).
+                  // Auto-fill fallback for the money columns below: sum ALL
+                  // of this period's claims together (every date-of-service
+                  // group's bottom Totals added up) — a specific visit row's
+                  // own logged date doesn't reliably line up with the dates
+                  // printed on its claims, so matching by exact date silently
+                  // came up empty. This always reflects the Claims Tracker
+                  // period total until staff explicitly save an override on
+                  // a visit (which then wins for that row only).
                   const periodClaims: any[] = claimsDataMap[period] ?? [];
+                  const getClaimsFallbackForVisit = (_visit: DbVisit) => {
+                    if (periodClaims.length === 0) return null;
+                    const sumField = (field: string) =>
+                      periodClaims.reduce((n: number, c: any) => n + (c[field] != null ? parseFloat(c[field]) : 0), 0);
+                    return {
+                      insuranceReimbursement: sumField('insurance_reimbursement'),
+                      patientDue: sumField('patient_amount_due'),
+                      patientPaid: sumField('patient_amount_paid'),
+                    };
+                  };
                   return (
                     <div key={`period-${period}`}>
                     {activeSection !== 'claims' && (
@@ -2113,6 +2153,7 @@ export default function Dashboard() {
                         {/* Mobile Visit Cards — below md */}
                         <div className="md:hidden divide-y divide-gray-100 bg-white">
                           {periodVisits.map((visit) => {
+                            const claimsFallback = getClaimsFallbackForVisit(visit);
                             return (
                             <div key={visit.id} className="p-4 space-y-3">
                               <div className="flex items-center justify-between gap-2">
@@ -2205,6 +2246,74 @@ export default function Dashboard() {
                                   />
                                 </div>
                               </div>
+
+                              <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
+                                <div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Insurance Reimbursement</p>
+                                  <div className="font-medium text-brand-blue text-base">
+                                    <EditableCell
+                                      type="number"
+                                      min={0}
+                                      step={0.01}
+                                      value={visit.totalInsuranceReimbursement != null ? String(visit.totalInsuranceReimbursement) : (claimsFallback ? String(claimsFallback.insuranceReimbursement) : '')}
+                                      display={visit.totalInsuranceReimbursement != null ? formatAmount(visit.totalInsuranceReimbursement) : autoFillDisplay(claimsFallback?.insuranceReimbursement)}
+                                      isSaving={updateVisit.isPending}
+                                      onSave={async (raw) => {
+                                        const parsed = parseOptionalAmount(raw);
+                                        if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                        return saveVisitField(visit.id, { totalInsuranceReimbursement: parsed }, 'Total Insurance Reimbursement saved');
+                                      }}
+                                    />
+                                  </div>
+                                </div>
+                                <div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Patient Due</p>
+                                  <div className="font-medium text-brand-blue text-base">
+                                    <EditableCell
+                                      type="number"
+                                      min={0}
+                                      step={0.01}
+                                      value={visit.totalPatientDue != null ? String(visit.totalPatientDue) : (claimsFallback ? String(claimsFallback.patientDue) : '')}
+                                      display={visit.totalPatientDue != null ? formatAmount(visit.totalPatientDue) : autoFillDisplay(claimsFallback?.patientDue)}
+                                      isSaving={updateVisit.isPending}
+                                      onSave={async (raw) => {
+                                        const parsed = parseOptionalAmount(raw);
+                                        if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                        return saveVisitField(visit.id, { totalPatientDue: parsed }, 'Total Patient Due saved');
+                                      }}
+                                    />
+                                  </div>
+                                </div>
+                                <div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Patient Paid</p>
+                                  <div className="font-medium text-brand-blue text-base">
+                                    <EditableCell
+                                      type="number"
+                                      min={0}
+                                      step={0.01}
+                                      value={visit.totalPatientPaid != null ? String(visit.totalPatientPaid) : (claimsFallback ? String(claimsFallback.patientPaid) : '')}
+                                      display={visit.totalPatientPaid != null ? formatAmount(visit.totalPatientPaid) : autoFillDisplay(claimsFallback?.patientPaid)}
+                                      isSaving={updateVisit.isPending}
+                                      onSave={async (raw) => {
+                                        const parsed = parseOptionalAmount(raw);
+                                        if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                        return saveVisitField(visit.id, { totalPatientPaid: parsed }, 'Total Patient Paid saved');
+                                      }}
+                                    />
+                                  </div>
+                                </div>
+                                {/* Total Amount — spans full width, sits below the 3 money fields above */}
+                                <div className="col-span-2 pt-1.5 border-t border-gray-100 flex items-baseline justify-between">
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Amount</p>
+                                  <p className="font-semibold text-brand-blue text-base">
+                                    {formatAmount(
+                                      (visit.totalInsuranceReimbursement ?? claimsFallback?.insuranceReimbursement ?? 0) +
+                                      (visit.totalPatientDue ?? claimsFallback?.patientDue ?? 0) +
+                                      (visit.totalPatientPaid ?? claimsFallback?.patientPaid ?? 0)
+                                    )}
+                                  </p>
+                                </div>
+                              </div>
                             </div>
                             );
                           })}
@@ -2236,11 +2345,24 @@ export default function Dashboard() {
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
                                 </th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Status</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                  Total Insurance Reimbursement
+                                  <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
+                                </th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                  Total Patient Due
+                                  <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
+                                </th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
+                                  Total Patient Paid
+                                  <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
+                                </th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-100">
-                      {periodVisits.map((visit) => {
-                        return (
+                      {periodVisits.flatMap((visit) => {
+                        const claimsFallback = getClaimsFallbackForVisit(visit);
+                        const row = (
                         <tr key={visit.id} className="hover:bg-brand-cream/30 transition-colors">
                           {/* Auth Date */}
                           <td className="px-4 py-2.5 text-sm text-brand-blue whitespace-nowrap">
@@ -2325,63 +2447,79 @@ export default function Dashboard() {
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
                           </td>
+                          {/* Total Insurance Reimbursement — EDITABLE, auto-filled from Claims Tracker until overridden */}
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
+                            <EditableCell
+                              type="number"
+                              min={0}
+                              step={0.01}
+                              value={visit.totalInsuranceReimbursement != null ? String(visit.totalInsuranceReimbursement) : (claimsFallback ? String(claimsFallback.insuranceReimbursement) : '')}
+                              display={visit.totalInsuranceReimbursement != null ? formatAmount(visit.totalInsuranceReimbursement) : autoFillDisplay(claimsFallback?.insuranceReimbursement)}
+                              isSaving={updateVisit.isPending}
+                              onSave={async (raw) => {
+                                const parsed = parseOptionalAmount(raw);
+                                if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                return saveVisitField(visit.id, { totalInsuranceReimbursement: parsed }, 'Total Insurance Reimbursement saved');
+                              }}
+                            />
+                          </td>
+                          {/* Total Patient Due — EDITABLE, auto-filled from Claims Tracker until overridden */}
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
+                            <EditableCell
+                              type="number"
+                              min={0}
+                              step={0.01}
+                              value={visit.totalPatientDue != null ? String(visit.totalPatientDue) : (claimsFallback ? String(claimsFallback.patientDue) : '')}
+                              display={visit.totalPatientDue != null ? formatAmount(visit.totalPatientDue) : autoFillDisplay(claimsFallback?.patientDue)}
+                              isSaving={updateVisit.isPending}
+                              onSave={async (raw) => {
+                                const parsed = parseOptionalAmount(raw);
+                                if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                return saveVisitField(visit.id, { totalPatientDue: parsed }, 'Total Patient Due saved');
+                              }}
+                            />
+                          </td>
+                          {/* Total Patient Paid — EDITABLE, auto-filled from Claims Tracker until overridden */}
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
+                            <EditableCell
+                              type="number"
+                              min={0}
+                              step={0.01}
+                              value={visit.totalPatientPaid != null ? String(visit.totalPatientPaid) : (claimsFallback ? String(claimsFallback.patientPaid) : '')}
+                              display={visit.totalPatientPaid != null ? formatAmount(visit.totalPatientPaid) : autoFillDisplay(claimsFallback?.patientPaid)}
+                              isSaving={updateVisit.isPending}
+                              onSave={async (raw) => {
+                                const parsed = parseOptionalAmount(raw);
+                                if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
+                                return saveVisitField(visit.id, { totalPatientPaid: parsed }, 'Total Patient Paid saved');
+                              }}
+                            />
+                          </td>
                         </tr>
                         );
+                        // Total Amount — merged row directly below, spanning under the 3
+                        // money columns only (7 leading columns stay blank to align it).
+                        const totalAmount = (
+                          (visit.totalInsuranceReimbursement ?? claimsFallback?.insuranceReimbursement ?? 0) +
+                          (visit.totalPatientDue ?? claimsFallback?.patientDue ?? 0) +
+                          (visit.totalPatientPaid ?? claimsFallback?.patientPaid ?? 0)
+                        );
+                        const totalRow = (
+                          <tr key={`${visit.id}-total`} className="bg-gray-50/60 border-b border-gray-200">
+                            <td className="px-4 py-1.5" colSpan={7}></td>
+                            <td className="px-4 py-1.5 text-sm whitespace-nowrap" colSpan={3}>
+                              <div className="flex items-baseline justify-between">
+                                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Amount</span>
+                                <span className="font-semibold text-brand-blue">{formatAmount(totalAmount)}</span>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                        return [row, totalRow];
                       })}
                             </tbody>
                           </table>
                         </div>
-                        {/* Claims Breakdown by Date of Service — read-only, sourced from the Claims Tracker */}
-                        {periodClaims.length > 0 && (() => {
-                          const byDate = new Map<string, { insuranceReimbursement: number; patientDue: number; patientPaid: number }>();
-                          for (const c of periodClaims) {
-                            const key = c.date_of_service ?? '';
-                            const cur = byDate.get(key) ?? { insuranceReimbursement: 0, patientDue: 0, patientPaid: 0 };
-                            cur.insuranceReimbursement += c.insurance_reimbursement != null ? parseFloat(c.insurance_reimbursement) : 0;
-                            cur.patientDue += c.patient_amount_due != null ? parseFloat(c.patient_amount_due) : 0;
-                            cur.patientPaid += c.patient_amount_paid != null ? parseFloat(c.patient_amount_paid) : 0;
-                            byDate.set(key, cur);
-                          }
-                          const dateRows = Array.from(byDate.entries()).sort(([a], [b]) => a.localeCompare(b));
-                          const grandTotal = dateRows.reduce((acc, [, v]) => ({
-                            insuranceReimbursement: acc.insuranceReimbursement + v.insuranceReimbursement,
-                            patientDue: acc.patientDue + v.patientDue,
-                            patientPaid: acc.patientPaid + v.patientPaid,
-                          }), { insuranceReimbursement: 0, patientDue: 0, patientPaid: 0 });
-                          return (
-                            <div className="border-t border-gray-200 overflow-x-auto">
-                              <table className="w-full text-sm min-w-full">
-                                <thead className="bg-gray-50">
-                                  <tr>
-                                    <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Date of Service</th>
-                                    <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Total Insurance Reimbursement</th>
-                                    <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Total Patient Due</th>
-                                    <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Total Patient Paid</th>
-                                    <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Total Amount</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-gray-100">
-                                  {dateRows.map(([dateKey, v]) => (
-                                    <tr key={dateKey}>
-                                      <td className="px-4 py-2 text-sm text-brand-blue whitespace-nowrap">{dateKey ? formatCalendarDate(dateKey) : <span className="text-gray-300">—</span>}</td>
-                                      <td className="px-4 py-2 text-sm text-right">{formatAmount(v.insuranceReimbursement)}</td>
-                                      <td className="px-4 py-2 text-sm text-right">{formatAmount(v.patientDue)}</td>
-                                      <td className="px-4 py-2 text-sm text-right">{formatAmount(v.patientPaid)}</td>
-                                      <td className="px-4 py-2 text-sm text-right font-semibold text-brand-blue">{formatAmount(v.insuranceReimbursement + v.patientDue + v.patientPaid)}</td>
-                                    </tr>
-                                  ))}
-                                  <tr className="bg-gray-50/80 font-semibold border-t border-gray-300">
-                                    <td className="px-4 py-2 text-sm text-gray-500 italic">Totals</td>
-                                    <td className="px-4 py-2 text-sm text-right text-gray-800">{formatAmount(grandTotal.insuranceReimbursement)}</td>
-                                    <td className="px-4 py-2 text-sm text-right text-gray-800">{formatAmount(grandTotal.patientDue)}</td>
-                                    <td className="px-4 py-2 text-sm text-right text-gray-800">{formatAmount(grandTotal.patientPaid)}</td>
-                                    <td className="px-4 py-2 text-sm text-right text-gray-800">{formatAmount(grandTotal.insuranceReimbursement + grandTotal.patientDue + grandTotal.patientPaid)}</td>
-                                  </tr>
-                                </tbody>
-                              </table>
-                            </div>
-                          );
-                        })()}
                       </CardContent>
                     </Card>
                     )}
