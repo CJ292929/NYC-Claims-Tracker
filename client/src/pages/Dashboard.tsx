@@ -2052,20 +2052,19 @@ export default function Dashboard() {
                   const periodAuth = periodVisits.find(v => v.sessionsAuthorized != null)?.sessionsAuthorized ?? 0;
                   const periodInsurance = periodVisits.find(v => v.insuranceCompany)?.insuranceCompany ?? null;
                   const isActive = period === activePeriod;
-                  // Auto-fill fallback for the money columns below: sum only
-                  // the claims that share THIS VISIT ROW'S own date of
-                  // service (not the whole period lumped together), so each
-                  // row's fields reflect a live per-date breakdown from the
-                  // Claims Tracker until staff explicitly save an override
-                  // on that visit (which then wins).
+                  // Auto-fill fallback for the money columns below: sum ALL
+                  // of this period's claims together (every date-of-service
+                  // group's bottom Totals added up) — a specific visit row's
+                  // own logged date doesn't reliably line up with the dates
+                  // printed on its claims, so matching by exact date silently
+                  // came up empty. This always reflects the Claims Tracker
+                  // period total until staff explicitly save an override on
+                  // a visit (which then wins for that row only).
                   const periodClaims: any[] = claimsDataMap[period] ?? [];
-                  const getClaimsFallbackForVisit = (visit: DbVisit) => {
-                    const visitDate = toInputDate(visit.dateOfService);
-                    if (!visitDate) return null;
-                    const claimsOnDate = periodClaims.filter((c: any) => c.date_of_service === visitDate);
-                    if (claimsOnDate.length === 0) return null;
+                  const getClaimsFallbackForVisit = (_visit: DbVisit) => {
+                    if (periodClaims.length === 0) return null;
                     const sumField = (field: string) =>
-                      claimsOnDate.reduce((n: number, c: any) => n + (c[field] != null ? parseFloat(c[field]) : 0), 0);
+                      periodClaims.reduce((n: number, c: any) => n + (c[field] != null ? parseFloat(c[field]) : 0), 0);
                     return {
                       insuranceReimbursement: sumField('insurance_reimbursement'),
                       patientDue: sumField('patient_amount_due'),
