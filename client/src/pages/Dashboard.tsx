@@ -2781,7 +2781,7 @@ export default function Dashboard() {
                           }
                           const renderClaimsTotalsRow = (dateKey: string, keyPrefix: string) => {
                             const g = dateGroupTotals.get(dateKey);
-                            if (!g || g.count < 2) return null;
+                            if (!g) return null;
                             return (
                               <tr key={`${keyPrefix}-totals-${dateKey}`} className="bg-gray-50/80 font-semibold border-b border-gray-300 text-xs">
                                 {visibleClaimsColumns.map((col, i) => (
@@ -2859,7 +2859,7 @@ export default function Dashboard() {
                                 const nextClaim = claimIdx < claims.length - 1 ? claims[claimIdx + 1] : null;
                                 const isLastOfDateGroup = !nextClaim || nextClaim.date_of_service !== claim.date_of_service;
                                 const g = dateGroupTotals.get(claim.date_of_service ?? '');
-                                const totalsCard = isLastOfDateGroup && g && g.count > 1 ? (
+                                const totalsCard = isLastOfDateGroup && g ? (
                                   <div key={`mobile-totals-${claim.date_of_service ?? ''}`} className="p-4 bg-gray-50/80 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
                                     <p className="col-span-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Totals for {claim.date_of_service ? formatCalendarDate(claim.date_of_service) : 'this date'}</p>
                                     {!hide('chargeAmount') && <p className="text-gray-700">Charge: <span className="font-semibold">${g.chargeAmount.toFixed(2)}</span></p>}
