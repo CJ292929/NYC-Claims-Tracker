@@ -64,7 +64,7 @@ export default function ChangePassword({ mustChangePassword }: { mustChangePassw
           <div className="inline-flex items-center justify-center w-20 h-20 mb-4">
             <Logo variant="icon" size="xl" className="w-20 h-20 drop-shadow-lg" />
           </div>
-          <h1 className="text-2xl font-serif font-bold text-white">NYC Home Rehab</h1>
+          <h1 className="text-2xl font-serif font-bold text-white">NYC Home Rehab Claims</h1>
           <p className="text-[#E8A93C] text-sm mt-1 uppercase tracking-wide">Physical Therapy · Authorization Tracker</p>
         </div>
 
