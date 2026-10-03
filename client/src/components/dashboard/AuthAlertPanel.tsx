@@ -71,33 +71,14 @@ const URGENCY_CONFIG = {
   },
 };
 
-const insuranceList = [
-  'AARP Medicare Advantage',
-  'AARP Medicare Supplement',
-  'Aetna',
-  'Aetna International',
-  'American Transit',
-  'Cigna Healthcare',
-  'Emblem Health',
-  'Emblem Health GHI Senior',
-  'Empire NYSHIP (United Healthcare)',
-  'GEICO NY PIP',
-  'Global Excel Management',
-  'Humana',
-  'Kaiser Permanente',
-  'Medicare - Queens (Part B)',
-  'Meritain Health',
-  'NYCE PPO Plan',
-  'NY Empire BCBS',
-  'Oxford Health Insurance',
-  'Progressive No Fault',
-  'United Healthcare',
-  'United Healthcare Medicare',
-];
-
 export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => void }) {
   const utils = trpc.useUtils();
   const { data: alerts = [], isLoading, error } = trpc.visits.authAlerts.useQuery();
+  // Same shared catalog used by the Patient Records / patient forms —
+  // see Dashboard.tsx's insuranceList — so this dialog's choices never
+  // drift out of sync with the rest of the dashboard.
+  const { data: insurerCatalog = [] } = trpc.insurance.list.useQuery();
+  const insuranceList = insurerCatalog.map(entry => entry.name);
   const [requestingId, setRequestingId] = useState<string | null>(null);
 
   // New Authorization dialog state

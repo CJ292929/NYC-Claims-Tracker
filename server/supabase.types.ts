@@ -119,6 +119,14 @@ export interface AuditLogRow {
   created_at: string;
 }
 
+export interface InsurerCatalogRow {
+  id: string;                // uuid
+  name: string;
+  normalized_name: string;   // lower(trim(collapse-whitespace(name))) — UNIQUE
+  aliases: string[];         // pre-rename display names for this same product
+  created_at: string;
+}
+
 // ─── Insert types (what INSERT accepts) ──────────────────────────────────────
 
 export type InsertUser = Omit<UserRow, "id" | "created_at" | "updated_at"> & {
@@ -226,6 +234,12 @@ export interface Database {
         Row: AuditLogRow;
         Insert: InsertAuditLog;
         Update: Partial<InsertAuditLog>;
+      };
+      insurer_catalog: {
+        Row: InsurerCatalogRow;
+        // normalized_name is a GENERATED column — never supplied on insert/update.
+        Insert: Omit<InsurerCatalogRow, "id" | "normalized_name" | "aliases" | "created_at">;
+        Update: Partial<Omit<InsurerCatalogRow, "id" | "normalized_name" | "created_at">>;
       };
     };
     Views: {

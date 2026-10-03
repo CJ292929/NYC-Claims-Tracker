@@ -41,10 +41,14 @@ import {
   adminResetClinicUserPassword,
   archiveClinicUser,
   reactivateClinicUser,
+  listInsurerCatalog,
+  getInsurerCatalogEntryByNormalizedName,
+  createInsurerCatalogEntry,
 } from "./db";
 import type { ClinicUser } from "../drizzle/schema";
 import { sdk } from "./_core/sdk";
 import { ONE_YEAR_MS } from "@shared/const";
+import { normalizeInsurerName } from "@shared/insuranceCatalog";
 import {
   clearFailedAttempts,
   getClientIp,
@@ -537,6 +541,49 @@ export const appRouter = router({
       .mutation(async ({ input }) => {
         await setPatientActive(input.id, input.isActive, input.dischargeDate, input.dischargeReason);
         return { success: true };
+      }),
+  }),
+
+  // ── Insurer Catalog (P4-P7) ─────────────────────────────────────────────────
+  // Single source of truth for insurer choices shown in patient forms,
+  // insurance filters, and the generic claims import path. Read access is
+  // every authenticated dashboard user (normalProtectedProcedure); creation
+  // is owner/clinic-admin only (adminOrOwnerProcedure — same gate as staff
+  // management, see its note in _core/trpc.ts).
+  insurance: router({
+    list: normalProtectedProcedure.query(async () => {
+      return listInsurerCatalog();
+    }),
+
+    create: adminOrOwnerProcedure
+      .input(
+        z.object({
+          // Blank-after-trim is rejected by the .refine below rather than
+          // z.string().min(1) alone, which would accept e.g. "   ".
+          name: z.string().transform(v => v.trim()).refine(v => v.length > 0, {
+            message: "Insurance company name is required",
+          }),
+        })
+      )
+      .mutation(async ({ input }) => {
+        const normalizedName = normalizeInsurerName(input.name);
+
+        const existing = await getInsurerCatalogEntryByNormalizedName(normalizedName);
+        if (existing) {
+          throw new TRPCError({ code: "CONFLICT", message: "This insurance company already exists" });
+        }
+
+        try {
+          return await createInsurerCatalogEntry({ name: input.name });
+        } catch (err: unknown) {
+          // Backstop against a race between the uniqueness check above and
+          // the insert — the DB's UNIQUE(normalized_name) index is the real
+          // guard (see createInsurerCatalogEntry in db.ts).
+          if ((err as { code?: string })?.code === "23505") {
+            throw new TRPCError({ code: "CONFLICT", message: "This insurance company already exists" });
+          }
+          throw err;
+        }
       }),
   }),
 
