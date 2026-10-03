@@ -447,6 +447,46 @@ export default function Dashboard() {
     error?: string;
     ambiguousCandidates?: number;
   }> | null>(null);
+  // ── CMS1500 enrichment (P4-P10) ───────────────────────────────────────────
+  // CMS1500 never creates or edits a financial row — it only enriches an
+  // existing Reimbursement/EOB row's clinical fields (visit #, diagnosis,
+  // modifier, units). `cms1500Lines` holds the raw extracted fields per line
+  // (keyed by lineKey); `cms1500Preview` holds the server's match
+  // classification for those same lines; `cms1500Selections` holds the
+  // staff's explicit pick for any line the server reported as ambiguous.
+  type Cms1500Line = {
+    lineKey: string;
+    dateOfService: string | null;
+    cptCodes: string | null;
+    visitNumber: number | null;
+    diagnosisCodes: string | null;
+    modifier: string | null;
+    unitsBilled: number | null;
+  };
+  type Cms1500Candidate = {
+    id: string;
+    authPeriod: number;
+    chargeAmount: number | null;
+    insuranceReimbursement: number | null;
+    patientAmountPaid: number | null;
+    patientAmountDue: number | null;
+    visitNumber: number | null;
+    diagnosisCodes: string | null;
+    modifier: string | null;
+    unitsBilled: number | null;
+  };
+  type Cms1500PreviewLine = {
+    lineKey: string;
+    status: 'matched' | 'needs_selection' | 'no_match' | 'no_claims' | 'invalid_date';
+    candidates: Cms1500Candidate[];
+    claimRecordId?: string;
+  };
+  const [cms1500Lines, setCms1500Lines] = useState<Cms1500Line[]>([]);
+  const [cms1500Preview, setCms1500Preview] = useState<{ hasAnyClaims: boolean; results: Cms1500PreviewLine[] } | null>(null);
+  const [isPreviewingCms1500, setIsPreviewingCms1500] = useState(false);
+  const [cms1500Selections, setCms1500Selections] = useState<Record<string, string>>({});
+  const [cms1500CommitResults, setCms1500CommitResults] = useState<Array<{ lineKey: string; status: 'saved' | 'failed'; error?: string }> | null>(null);
+  const [isSavingCms1500, setIsSavingCms1500] = useState(false);
   const [claimFormData, setClaimFormData] = useState({
     placeOfService: '',
     dateOfService: '',
@@ -776,6 +816,9 @@ export default function Dashboard() {
     },
     onError: (e) => toast.error(`Bulk import failed: ${e.message}`),
   });
+
+  const cms1500EnrichmentPreview = trpc.claims.cms1500EnrichmentPreview.useMutation();
+  const cms1500EnrichmentCommit = trpc.claims.cms1500EnrichmentCommit.useMutation();
 
   const logoutMutation = trpc.auth.logout.useMutation();
 
@@ -1531,6 +1574,117 @@ export default function Dashboard() {
       toast.error(`${failedRows.length} row${failedRows.length !== 1 ? 's' : ''} failed to save. Please review and try again.`);
     }
   };
+
+  // ── CMS1500 enrichment (P4-P10) ─────────────────────────────────────────────
+  // CMS1500 never creates or edits a Charge/Reimbursement/Payment field — it
+  // only fills in visit #, diagnosis, modifier, and units on a Reimbursement/
+  // EOB row that must already exist. This flattens the extracted groups into
+  // per-CPT-line enrichment candidates (ignoring any charge/payment fields
+  // the extractor may have populated) and asks the server which existing
+  // claim row, if any, each line matches.
+  const buildCms1500Lines = (): Cms1500Line[] => {
+    const lines: Cms1500Line[] = [];
+    editingExtractedClaims.forEach((group: any, gIdx: number) => {
+      const cptLines: any[] = group.cptLines && group.cptLines.length > 0 ? group.cptLines : [group];
+      cptLines.forEach((line: any, lIdx: number) => {
+        lines.push({
+          lineKey: `${gIdx}-${lIdx}`,
+          dateOfService: group.dateOfService || line.dateOfService || null,
+          cptCodes: line.cptCodes || null,
+          visitNumber: group.visitNumber !== '' && group.visitNumber != null ? parseInt(group.visitNumber, 10) : null,
+          diagnosisCodes: line.diagnosisCodes || group.diagnosisCodes || null,
+          modifier: line.modifier || group.modifier || null,
+          unitsBilled: line.unitsBilled !== '' && line.unitsBilled != null ? parseInt(line.unitsBilled, 10) : null,
+        });
+      });
+    });
+    return lines;
+  };
+
+  const runCms1500Preview = async () => {
+    if (!activePatient) return;
+    const lines = buildCms1500Lines();
+    setCms1500Lines(lines);
+    setCms1500Preview(null);
+    setCms1500Selections({});
+    setCms1500CommitResults(null);
+    if (lines.length === 0) return;
+    setIsPreviewingCms1500(true);
+    try {
+      const result = await cms1500EnrichmentPreview.mutateAsync({
+        patientId: activePatient.id,
+        lines: lines.map(l => ({ lineKey: l.lineKey, dateOfService: l.dateOfService, cptCodes: l.cptCodes })),
+      });
+      setCms1500Preview(result);
+    } catch (err: any) {
+      toast.error(`Could not check for matching reimbursement rows: ${err.message}`);
+    } finally {
+      setIsPreviewingCms1500(false);
+    }
+  };
+
+  const handleCommitCms1500Enrichment = async () => {
+    if (!activePatient || !cms1500Preview) return;
+    const byKey = new Map(cms1500Lines.map(l => [l.lineKey, l]));
+    const resolvable = cms1500Preview.results
+      .map(r => {
+        const claimRecordId = r.status === 'matched' ? r.claimRecordId : r.status === 'needs_selection' ? cms1500Selections[r.lineKey] : undefined;
+        return claimRecordId ? { r, claimRecordId } : null;
+      })
+      .filter((x): x is { r: Cms1500PreviewLine; claimRecordId: string } => x !== null);
+
+    if (resolvable.length === 0) {
+      toast.error('No lines are ready to save — nothing matched a reimbursement row, or an ambiguous match still needs a selection.');
+      return;
+    }
+
+    setIsSavingCms1500(true);
+    try {
+      const result = await cms1500EnrichmentCommit.mutateAsync({
+        patientId: activePatient.id,
+        lines: resolvable.map(({ r, claimRecordId }) => {
+          const line = byKey.get(r.lineKey)!;
+          return {
+            lineKey: r.lineKey,
+            claimRecordId,
+            dateOfService: line.dateOfService,
+            cptCodes: line.cptCodes,
+            visitNumber: line.visitNumber,
+            diagnosisCodes: line.diagnosisCodes,
+            modifier: line.modifier,
+            unitsBilled: line.unitsBilled,
+          };
+        }),
+      });
+      setCms1500CommitResults(result.results);
+      const savedCount = result.results.filter(r => r.status === 'saved').length;
+      const failedCount = result.results.filter(r => r.status === 'failed').length;
+      const skippedCount = cms1500Preview.results.length - resolvable.length;
+      if (savedCount > 0) {
+        toast.success(`${savedCount} line${savedCount !== 1 ? 's' : ''} enriched with clinical detail.`);
+        utils.claims.getByPatientAndPeriod.invalidate();
+        utils.claims.getFollowUpClaims.invalidate();
+        utils.claims.getStatusCounts.invalidate();
+      }
+      if (failedCount > 0) toast.error(`${failedCount} line${failedCount !== 1 ? 's' : ''} failed to save.`);
+      if (skippedCount > 0) toast(`${skippedCount} line${skippedCount !== 1 ? 's' : ''} skipped (no matching reimbursement row, or still unresolved).`);
+    } catch (err: any) {
+      toast.error(`CMS1500 enrichment failed: ${err.message}`);
+    } finally {
+      setIsSavingCms1500(false);
+    }
+  };
+
+  // Whenever a CMS1500 extraction lands in the single-patient review table,
+  // immediately check which (if any) existing reimbursement row each line
+  // matches — before staff ever sees a "Save" button, so the preview always
+  // shows the real match state rather than a blank/raw table.
+  useEffect(() => {
+    if (claimUploadType === 'cms1500' && !eobPatientGroups && editingExtractedClaims.length > 0 && activePatient) {
+      runCms1500Preview();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingExtractedClaims, claimUploadType, eobPatientGroups, activePatient]);
 
   // ── CSV Upload ─────────────────────────────────────────────────────────────
 
@@ -2699,7 +2853,7 @@ export default function Dashboard() {
                             <label
                               htmlFor={`claim-upload-cms-${period}`}
                               className="cursor-pointer inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap"
-                              title="Upload CMS1500 claim form (PDF) to auto-fill dates, place of service, CPT codes, modifiers, diagnosis codes, units"
+                              title="Fill visit details, diagnosis, and modifiers on existing reimbursement rows. Upload the Reimbursement Insurance EOB first — CMS1500 never creates a claim row or changes charge/payment amounts."
                             >
                               {isExtractingClaims && claimUploadPeriod === period && claimUploadType === 'cms1500'
                                 ? <><Loader2 className="h-4 w-4 animate-spin" /> Extracting…</>
@@ -2721,6 +2875,9 @@ export default function Dashboard() {
                               }}
                             />
                           </div>
+                          <p className="text-[11px] text-muted-foreground mt-1 basis-full w-full sm:w-auto sm:ml-auto sm:text-right">
+                            CMS1500 fills in visit details, diagnosis, and modifiers on existing reimbursement rows — upload Reimbursement Insurance first.
+                          </p>
                         </div>
                       </CardHeader>
                       <CardContent className="p-0">
@@ -3651,6 +3808,142 @@ export default function Dashboard() {
             <div className="flex flex-col items-center justify-center py-16 gap-3 text-gray-400">
               <AlertCircle className="w-10 h-10" />
               <p className="text-sm">No claims extracted yet. Upload a PDF or CSV file to begin.</p>
+            </div>
+          ) : claimUploadType === 'cms1500' ? (
+            /* ── CMS1500 enrichment preview ──────────────────────────────────
+             * CMS1500 never creates a claim row or touches a charge/payment
+             * field — it only fills in visit #, diagnosis, modifier, and
+             * units on a Reimbursement/EOB row that must already exist. */
+            <div className="space-y-4">
+              <p className="text-sm text-gray-600">
+                <span className="font-semibold text-brand-blue">CMS1500 fills in visit details, diagnosis, and modifiers on existing reimbursement rows.</span>
+                {' '}It never creates a claim row or changes a charge/payment amount.
+              </p>
+
+              {isPreviewingCms1500 ? (
+                <div className="flex flex-col items-center justify-center py-12 gap-3 text-gray-500">
+                  <Loader2 className="w-8 h-8 animate-spin text-brand-gold" />
+                  <p className="text-sm">Checking for matching reimbursement rows…</p>
+                </div>
+              ) : cms1500Preview ? (
+                <div className="space-y-3 max-h-[55vh] overflow-y-auto pr-1">
+                  {cms1500Preview.results.map((r) => {
+                    const line = cms1500Lines.find(l => l.lineKey === r.lineKey);
+                    if (!line) return null;
+                    const dateLabel = line.dateOfService
+                      ? formatCalendarDate(line.dateOfService, { month: 'numeric', day: 'numeric', year: 'numeric' })
+                      : '—';
+                    const committed = cms1500CommitResults?.find(c => c.lineKey === r.lineKey);
+                    return (
+                      <div
+                        key={r.lineKey}
+                        className={`rounded-lg border px-4 py-3 ${
+                          committed?.status === 'saved' ? 'border-green-300 bg-green-50' :
+                          committed?.status === 'failed' ? 'border-red-300 bg-red-50' :
+                          r.status === 'matched' ? 'border-green-300 bg-green-50' :
+                          r.status === 'needs_selection' ? 'border-amber-300 bg-amber-50' :
+                          'border-yellow-300 bg-yellow-50'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm">
+                            <span className="font-mono font-semibold text-gray-800">{dateLabel}</span>
+                            <span className="ml-2 font-mono text-blue-700">{line.cptCodes || '—'}</span>
+                          </div>
+                          <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
+                            committed?.status === 'saved' ? 'bg-green-100 text-green-800' :
+                            committed?.status === 'failed' ? 'bg-red-100 text-red-800' :
+                            r.status === 'matched' ? 'bg-green-100 text-green-800' :
+                            r.status === 'needs_selection' ? 'bg-amber-100 text-amber-800' :
+                            'bg-yellow-100 text-yellow-800'
+                          }`}>
+                            {committed?.status === 'saved' ? '✓ Saved'
+                              : committed?.status === 'failed' ? `Failed`
+                              : r.status === 'matched' ? 'Matched — will update'
+                              : r.status === 'needs_selection' ? 'Needs selection'
+                              : r.status === 'no_claims' ? 'No reimbursement row — skipped'
+                              : r.status === 'no_match' ? 'No matching row — skipped'
+                              : 'Invalid date — skipped'}
+                          </span>
+                        </div>
+
+                        {committed?.status === 'failed' && (
+                          <p className="text-xs text-red-700 mt-1">{committed.error}</p>
+                        )}
+
+                        {!committed && r.status === 'matched' && (
+                          <p className="text-xs text-gray-600 mt-1">
+                            Will update: {[
+                              line.visitNumber != null ? `Visit #${line.visitNumber}` : null,
+                              line.diagnosisCodes ? `Dx ${line.diagnosisCodes}` : null,
+                              line.modifier ? `Modifier ${line.modifier}` : null,
+                              line.unitsBilled != null ? `${line.unitsBilled} unit${line.unitsBilled !== 1 ? 's' : ''}` : null,
+                            ].filter(Boolean).join(' · ') || 'nothing new (all fields already blank)'}
+                          </p>
+                        )}
+
+                        {!committed && r.status === 'needs_selection' && (
+                          <div className="mt-2">
+                            <Label className="text-xs text-amber-800 font-semibold">
+                              Multiple existing rows match this date/CPT — select which one to enrich:
+                            </Label>
+                            <Select
+                              value={cms1500Selections[r.lineKey] ?? ''}
+                              onValueChange={(v) => setCms1500Selections(prev => ({ ...prev, [r.lineKey]: v }))}
+                            >
+                              <SelectTrigger className="mt-1 w-full max-w-md bg-white">
+                                <SelectValue placeholder="Select a row…" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {r.candidates.map(c => (
+                                  <SelectItem key={c.id} value={c.id}>
+                                    Period {c.authPeriod} — Charge ${c.chargeAmount != null ? c.chargeAmount.toFixed(2) : '—'}, Reimb. ${c.insuranceReimbursement != null ? c.insuranceReimbursement.toFixed(2) : '—'}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
+
+                        {!committed && r.status === 'no_claims' && (
+                          <p className="text-xs text-yellow-700 mt-1">Upload the reimbursement file first.</p>
+                        )}
+                        {!committed && r.status === 'no_match' && (
+                          <p className="text-xs text-yellow-700 mt-1">No existing reimbursement row for this date/CPT — skipped.</p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              <div className="flex gap-3 justify-end pt-2 border-t">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setShowClaimUploadDialog(false);
+                    setExtractedClaims([]);
+                    setEditingExtractedClaims([]);
+                    setCms1500Preview(null);
+                    setCms1500Lines([]);
+                    setCms1500Selections({});
+                    setCms1500CommitResults(null);
+                  }}
+                >
+                  {cms1500CommitResults ? 'Close' : 'Cancel'}
+                </Button>
+                {!cms1500CommitResults && (
+                  <Button
+                    disabled={isSavingCms1500 || isPreviewingCms1500 || !cms1500Preview}
+                    onClick={handleCommitCms1500Enrichment}
+                    className="bg-brand-blue hover:bg-brand-blue-dark text-white"
+                  >
+                    {isSavingCms1500
+                      ? <><Loader2 className="w-4 h-4 animate-spin mr-2" />Saving…</>
+                      : <><CheckCircle2 className="w-4 h-4 mr-2" />Save Matched Lines</>}
+                  </Button>
+                )}
+              </div>
             </div>
           ) : (
             <div className="space-y-4">

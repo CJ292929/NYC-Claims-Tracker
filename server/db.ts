@@ -1246,6 +1246,140 @@ export async function deleteClaimRecord(id: string): Promise<void> {
   }
 }
 
+// ─── CMS1500 enrichment (P4-P10) ────────────────────────────────────────────
+// A CMS1500 upload never creates or writes a financial/claim row by itself —
+// it only fills in clinical detail (visit #, diagnosis, modifier, units) on a
+// row that a Reimbursement/EOB upload already created. These three functions
+// implement that: find candidate existing rows across ALL auth periods for
+// the patient (never just the latest), then patch ONLY the clinical fields
+// on a specific, re-validated row. charge_amount, insurance_reimbursement,
+// patient_amount_paid, patient_amount_due, and every other payment field are
+// never read from or written by this path.
+
+export type Cms1500EnrichmentCandidate = {
+  id: string;
+  authPeriod: number;
+  chargeAmount: number | null;
+  insuranceReimbursement: number | null;
+  patientAmountPaid: number | null;
+  patientAmountDue: number | null;
+  visitNumber: number | null;
+  diagnosisCodes: string | null;
+  modifier: string | null;
+  unitsBilled: number | null;
+};
+
+/**
+ * Finds existing claims_records rows for this patient that share the exact
+ * service date and CPT code(s) with a CMS1500 line — searched across every
+ * auth period the patient has, not just their latest one, since a
+ * Reimbursement row for an older visit may have been imported before a
+ * CMS1500 upload that enriches it arrives. Returns all matches; the caller
+ * decides what to do with 0 (no match / upload reimbursement first), 1
+ * (auto-match), or 2+ (requires explicit staff selection) results.
+ */
+export async function findCms1500EnrichmentCandidates(
+  patientId: string,
+  dateOfService: Date,
+  cptCodes: string | null
+): Promise<Cms1500EnrichmentCandidate[]> {
+  const dosStr = dateOfService.toISOString().split("T")[0];
+  let query = supabase
+    .from("claims_records")
+    .select("id, auth_period, charge_amount, insurance_reimbursement, patient_amount_paid, patient_amount_due, visit_number, diagnosis_codes, modifier, units_billed")
+    .eq("patient_id", patientId)
+    .eq("date_of_service", dosStr);
+
+  query = cptCodes ? query.eq("cpt_codes", cptCodes) : query.is("cpt_codes", null);
+
+  const { data, error } = await query;
+  if (error) {
+    console.error("[Supabase] findCms1500EnrichmentCandidates:", error);
+    throw error;
+  }
+  return (data ?? []).map((r: any) => ({
+    id: r.id,
+    authPeriod: r.auth_period,
+    chargeAmount: r.charge_amount,
+    insuranceReimbursement: r.insurance_reimbursement,
+    patientAmountPaid: r.patient_amount_paid,
+    patientAmountDue: r.patient_amount_due,
+    visitNumber: r.visit_number,
+    diagnosisCodes: r.diagnosis_codes,
+    modifier: r.modifier,
+    unitsBilled: r.units_billed,
+  }));
+}
+
+/** True if this patient has ANY claims_records row at all, in any period —
+ *  used to distinguish "no reimbursement file uploaded yet" from "a
+ *  reimbursement file exists but this particular date/CPT isn't in it". */
+export async function patientHasAnyClaimRecords(patientId: string): Promise<boolean> {
+  const { count, error } = await supabase
+    .from("claims_records")
+    .select("id", { count: "exact", head: true })
+    .eq("patient_id", patientId);
+  if (error) {
+    console.error("[Supabase] patientHasAnyClaimRecords:", error);
+    throw error;
+  }
+  return (count ?? 0) > 0;
+}
+
+/**
+ * Patches ONLY visit_number / diagnosis_codes / modifier / units_billed on an
+ * existing claim row, after re-validating server-side that `claimRecordId`
+ * actually belongs to `patientId` and still matches `dateOfService` +
+ * `cptCodes` — a client's earlier preview selection is never trusted blindly
+ * at commit time. Never inserts a new row; never touches charge_amount or
+ * any payment field. Fields left undefined/null preserve whatever the row
+ * already had (so a missing EOB modifier, for instance, doesn't block
+ * saving a diagnosis code this call does carry).
+ */
+export async function applyCms1500Enrichment(params: {
+  claimRecordId: string;
+  patientId: string;
+  dateOfService: Date;
+  cptCodes: string | null;
+  visitNumber?: number | null;
+  diagnosisCodes?: string | null;
+  modifier?: string | null;
+  unitsBilled?: number | null;
+}): Promise<void> {
+  const dosStr = params.dateOfService.toISOString().split("T")[0];
+
+  let ownershipQuery = supabase
+    .from("claims_records")
+    .select("id")
+    .eq("id", params.claimRecordId)
+    .eq("patient_id", params.patientId)
+    .eq("date_of_service", dosStr);
+  ownershipQuery = params.cptCodes ? ownershipQuery.eq("cpt_codes", params.cptCodes) : ownershipQuery.is("cpt_codes", null);
+
+  const { data: owned, error: ownErr } = await ownershipQuery.maybeSingle();
+  if (ownErr) {
+    console.error("[Supabase] applyCms1500Enrichment (ownership check):", ownErr);
+    throw ownErr;
+  }
+  if (!owned) {
+    throw new Error("Selected claim row does not belong to this patient or no longer matches the service date/CPT code.");
+  }
+
+  const patch: Record<string, unknown> = {};
+  if (params.visitNumber != null) patch.visit_number = params.visitNumber;
+  if (params.diagnosisCodes != null) patch.diagnosis_codes = params.diagnosisCodes;
+  if (params.modifier != null) patch.modifier = params.modifier;
+  if (params.unitsBilled != null) patch.units_billed = params.unitsBilled;
+
+  if (Object.keys(patch).length === 0) return; // nothing to enrich — idempotent no-op
+
+  const { error } = await supabase.from("claims_records").update(patch).eq("id", params.claimRecordId);
+  if (error) {
+    console.error("[Supabase] applyCms1500Enrichment (update):", error);
+    throw error;
+  }
+}
+
 /**
  * Upsert a claim record by (patient_id, auth_period, date_of_service, cpt_codes).
  *
