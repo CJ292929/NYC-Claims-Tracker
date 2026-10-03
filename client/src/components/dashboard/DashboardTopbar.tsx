@@ -1,17 +1,21 @@
 import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
-import { Menu } from 'lucide-react';
+import { Menu, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
 export function DashboardTopbar({
   title,
   subtitle,
   actions,
   onOpenMobileNav,
+  desktopSidebarOpen,
+  onToggleDesktopSidebar,
 }: {
   title: string;
   subtitle?: string;
   actions?: ReactNode;
   onOpenMobileNav: () => void;
+  desktopSidebarOpen: boolean;
+  onToggleDesktopSidebar: () => void;
 }) {
   return (
     <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-border">
@@ -25,6 +29,20 @@ export function DashboardTopbar({
             className="lg:hidden -ml-2 text-brand-blue"
           >
             <Menu className="w-5 h-5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onToggleDesktopSidebar}
+            aria-label={desktopSidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+            aria-expanded={desktopSidebarOpen}
+            className="hidden lg:inline-flex -ml-2 text-brand-blue"
+          >
+            {desktopSidebarOpen ? (
+              <PanelLeftClose className="w-5 h-5" />
+            ) : (
+              <PanelLeftOpen className="w-5 h-5" />
+            )}
           </Button>
           <div className="min-w-0">
             <h1 className="text-xl sm:text-2xl font-semibold text-brand-blue leading-tight truncate">{title}</h1>
