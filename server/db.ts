@@ -8,7 +8,7 @@
 import { supabase } from "./supabase";
 import { ENV } from "./_core/env";
 import { normalizeUsername, escapeLikePattern } from "./_core/username";
-import type { User, Patient, VisitRecord, ClinicUser, InsertVisitRecord } from "../drizzle/schema";
+import type { User, Patient, VisitRecord, ClinicUser, InsertVisitRecord, InsurerCatalogEntry } from "../drizzle/schema";
 import { determineActivePeriod, deriveAuthPeriodMetrics, getPeriodMetrics } from "@shared/authPeriodMetrics";
 import { deriveAuthorizationUrgency } from "@shared/authUrgency";
 
@@ -85,6 +85,16 @@ function toClinicUser(row: any): ClinicUser {
     updatedAt: new Date(row.updated_at ?? row.created_at),
     lastLoginAt: row.last_login_at ? new Date(row.last_login_at) : null,
     archivedAt: row.archived_at ? new Date(row.archived_at) : null,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toInsurerCatalogEntry(row: any): InsurerCatalogEntry {
+  return {
+    id: row.id,
+    name: row.name,
+    aliases: row.aliases ?? [],
+    createdAt: new Date(row.created_at),
   };
 }
 
@@ -1336,4 +1346,60 @@ export async function upsertClaimRecord(data: {
 
   // No existing record — insert a new one
   return createClaimRecord(data);
+}
+
+// ─── Insurer catalog (P4-P7) ────────────────────────────────────────────────
+// Single source of truth for insurer choices shown in patient forms,
+// insurance filters, and the generic claims import path. See
+// shared/insuranceCatalog.ts for the normalization rule used both here (via
+// normalizedName, computed by the caller) and client-side.
+
+export async function listInsurerCatalog(): Promise<InsurerCatalogEntry[]> {
+  const { data, error } = await supabase
+    .from("insurer_catalog")
+    .select("*")
+    .order("name", { ascending: true });
+
+  if (error) {
+    console.error("[Supabase] listInsurerCatalog:", error);
+    return [];
+  }
+  return (data ?? []).map(toInsurerCatalogEntry);
+}
+
+export async function getInsurerCatalogEntryByNormalizedName(
+  normalizedName: string
+): Promise<InsurerCatalogEntry | undefined> {
+  const { data, error } = await supabase
+    .from("insurer_catalog")
+    .select("*")
+    .eq("normalized_name", normalizedName)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] getInsurerCatalogEntryByNormalizedName:", error);
+    return undefined;
+  }
+  return data ? toInsurerCatalogEntry(data) : undefined;
+}
+
+/** Throws (with a Postgres `code` of "23505") if normalizedName already
+ *  exists — the DB's UNIQUE(normalized_name) index is the real guard against
+ *  a race between two simultaneous submissions; callers should treat that
+ *  error as "duplicate", not a generic failure. */
+export async function createInsurerCatalogEntry(params: {
+  name: string;
+  normalizedName: string;
+}): Promise<InsurerCatalogEntry> {
+  const { data, error } = await supabase
+    .from("insurer_catalog")
+    .insert({ name: params.name, normalized_name: params.normalizedName })
+    .select()
+    .single();
+
+  if (error) {
+    console.error("[Supabase] createInsurerCatalogEntry:", error);
+    throw error;
+  }
+  return toInsurerCatalogEntry(data);
 }

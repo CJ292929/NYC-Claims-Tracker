@@ -161,6 +161,21 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
 
 CREATE INDEX IF NOT EXISTS idx_audit_logs_patient ON public.audit_logs(patient_id, created_at DESC);
 
+-- ─── insurer_catalog (P4-P7: staff-managed insurer choices) ────────────────
+-- aliases preserves pre-rename display names (e.g. "United Healthcare
+-- Medicare" for "United Healthcare Medicare Advantage") so existing
+-- patient/claim rows stored under the old name still resolve to this entry.
+CREATE TABLE IF NOT EXISTS public.insurer_catalog (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  normalized_name text NOT NULL,
+  aliases text[] NOT NULL DEFAULT '{}',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Case/whitespace-insensitive uniqueness: "Aetna" / "aetna " / "AETNA" must collide.
+CREATE UNIQUE INDEX IF NOT EXISTS insurer_catalog_normalized_name_key ON public.insurer_catalog (normalized_name);
+
 -- ─── auto-update updated_at on row changes ─────────────────────────────────
 CREATE OR REPLACE FUNCTION public.set_updated_at()
 RETURNS trigger AS $$

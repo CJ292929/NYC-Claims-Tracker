@@ -90,6 +90,15 @@ export interface ClinicUser {
 
 export type InsertClinicUser = Omit<ClinicUser, "id" | "createdAt" | "updatedAt">;
 
+// ─── InsurerCatalogEntry ────────────────────────────────────────────────────
+
+export interface InsurerCatalogEntry {
+  id: string;               // UUID
+  name: string;
+  aliases: string[];        // previously-used display names for this same product
+  createdAt: Date;
+}
+
 // ─── ClaimRecord ──────────────────────────────────────────────────────────────
 
 export interface ClaimRecord {

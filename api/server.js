@@ -164,6 +164,7 @@ __export(db_exports, {
   createAuditLog: () => createAuditLog,
   createClaimRecord: () => createClaimRecord,
   createClinicUser: () => createClinicUser,
+  createInsurerCatalogEntry: () => createInsurerCatalogEntry,
   createPatient: () => createPatient,
   createVisitRecord: () => createVisitRecord,
   deleteClaimRecord: () => deleteClaimRecord,
@@ -177,12 +178,14 @@ __export(db_exports, {
   getClinicUserById: () => getClinicUserById,
   getClinicUserByUsername: () => getClinicUserByUsername,
   getCompletedPatients: () => getCompletedPatients,
+  getInsurerCatalogEntryByNormalizedName: () => getInsurerCatalogEntryByNormalizedName,
   getLatestVisitIdForPatient: () => getLatestVisitIdForPatient,
   getMarkAsRequestedTargetVisitId: () => getMarkAsRequestedTargetVisitId,
   getPatientById: () => getPatientById,
   getUserByOpenId: () => getUserByOpenId,
   getVisitsByPatientId: () => getVisitsByPatientId,
   listClinicUsers: () => listClinicUsers,
+  listInsurerCatalog: () => listInsurerCatalog,
   reactivateClinicUser: () => reactivateClinicUser,
   setPatientActive: () => setPatientActive,
   sortByFollowUpUrgency: () => sortByFollowUpUrgency,
@@ -260,6 +263,14 @@ function toClinicUser(row) {
     updatedAt: new Date(row.updated_at ?? row.created_at),
     lastLoginAt: row.last_login_at ? new Date(row.last_login_at) : null,
     archivedAt: row.archived_at ? new Date(row.archived_at) : null
+  };
+}
+function toInsurerCatalogEntry(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    aliases: row.aliases ?? [],
+    createdAt: new Date(row.created_at)
   };
 }
 async function upsertUser(user) {
@@ -924,6 +935,30 @@ async function upsertClaimRecord(data) {
     return existingId;
   }
   return createClaimRecord(data);
+}
+async function listInsurerCatalog() {
+  const { data, error } = await supabase.from("insurer_catalog").select("*").order("name", { ascending: true });
+  if (error) {
+    console.error("[Supabase] listInsurerCatalog:", error);
+    return [];
+  }
+  return (data ?? []).map(toInsurerCatalogEntry);
+}
+async function getInsurerCatalogEntryByNormalizedName(normalizedName) {
+  const { data, error } = await supabase.from("insurer_catalog").select("*").eq("normalized_name", normalizedName).maybeSingle();
+  if (error) {
+    console.error("[Supabase] getInsurerCatalogEntryByNormalizedName:", error);
+    return void 0;
+  }
+  return data ? toInsurerCatalogEntry(data) : void 0;
+}
+async function createInsurerCatalogEntry(params) {
+  const { data, error } = await supabase.from("insurer_catalog").insert({ name: params.name, normalized_name: params.normalizedName }).select().single();
+  if (error) {
+    console.error("[Supabase] createInsurerCatalogEntry:", error);
+    throw error;
+  }
+  return toInsurerCatalogEntry(data);
 }
 var FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS;
 var init_db = __esm({
@@ -3614,6 +3649,11 @@ var systemRouter = router({
 // server/routers.ts
 init_db();
 
+// shared/insuranceCatalog.ts
+function normalizeInsurerName(name) {
+  return name.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
 // server/_core/loginRateLimit.ts
 init_username();
 var WINDOW_MS = 15 * 60 * 1e3;
@@ -4056,6 +4096,40 @@ var appRouter = router({
     })).mutation(async ({ input }) => {
       await setPatientActive(input.id, input.isActive, input.dischargeDate, input.dischargeReason);
       return { success: true };
+    })
+  }),
+  // ── Insurer Catalog (P4-P7) ─────────────────────────────────────────────────
+  // Single source of truth for insurer choices shown in patient forms,
+  // insurance filters, and the generic claims import path. Read access is
+  // every authenticated dashboard user (normalProtectedProcedure); creation
+  // is owner/clinic-admin only (adminOrOwnerProcedure — same gate as staff
+  // management, see its note in _core/trpc.ts).
+  insurance: router({
+    list: normalProtectedProcedure.query(async () => {
+      return listInsurerCatalog();
+    }),
+    create: adminOrOwnerProcedure.input(
+      z2.object({
+        // Blank-after-trim is rejected by the .refine below rather than
+        // z.string().min(1) alone, which would accept e.g. "   ".
+        name: z2.string().transform((v) => v.trim()).refine((v) => v.length > 0, {
+          message: "Insurance company name is required"
+        })
+      })
+    ).mutation(async ({ input }) => {
+      const normalizedName = normalizeInsurerName(input.name);
+      const existing = await getInsurerCatalogEntryByNormalizedName(normalizedName);
+      if (existing) {
+        throw new TRPCError3({ code: "CONFLICT", message: "This insurance company already exists" });
+      }
+      try {
+        return await createInsurerCatalogEntry({ name: input.name, normalizedName });
+      } catch (err) {
+        if (err?.code === "23505") {
+          throw new TRPCError3({ code: "CONFLICT", message: "This insurance company already exists" });
+        }
+        throw err;
+      }
     })
   }),
   // ── Visit Records ────────────────────────────────────────────────────────────

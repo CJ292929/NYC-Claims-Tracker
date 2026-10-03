@@ -35,4 +35,16 @@ describe('matchesPatientFilters', () => {
     expect(matchesPatientFilters(patient('2', 'Meritain Health'), scope)).toBe(false);
     expect(matchesPatientFilters(patient('3', 'Aetna'), scope)).toBe(false);
   });
+
+  it('matches patients stored under a pre-rename alias of the selected insurance', () => {
+    const scope = {
+      selectedInsurance: 'United Healthcare Medicare Advantage',
+      selectedClaimsFilter: 'all',
+      patientIdsByStatus: {},
+      selectedInsuranceAliases: ['United Healthcare Medicare'],
+    };
+    expect(matchesPatientFilters(patient('1', 'United Healthcare Medicare'), scope)).toBe(true);
+    expect(matchesPatientFilters(patient('2', 'United Healthcare Medicare Advantage'), scope)).toBe(true);
+    expect(matchesPatientFilters(patient('3', 'United Healthcare'), scope)).toBe(false);
+  });
 });

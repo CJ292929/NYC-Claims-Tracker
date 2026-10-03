@@ -16,6 +16,7 @@ import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch, classifyPatientMatch } from '@shared/nameMatch';
+import { insurerMatchValues } from '@shared/insuranceCatalog';
 import { parseCsvText, parseCsvRow, normalizePatientName, emptyCsvImportSummary, type CsvImportSummary } from '@/lib/csvImport';
 import { matchesPatientFilters } from '@/lib/patientFilters';
 import { routeToNavSection, navSectionToRoute } from '@/lib/navSection';
@@ -77,30 +78,6 @@ interface DbVisit {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const insuranceList = [
-  'AARP Medicare Advantage',
-  'AARP Medicare Supplement',
-  'Aetna',
-  'Aetna International',
-  'American Transit',
-  'Cigna Healthcare',
-  'Emblem Health',
-  'Emblem Health GHI Senior',
-  'Empire NYSHIP (United Healthcare)',
-  'GEICO NY PIP',
-  'Global Excel Management',
-  'Humana',
-  'Kaiser Permanente',
-  'Medicare - Queens (Part B)',
-  'Meritain Health',
-  'NYCE PPO Plan',
-  'NY Empire BCBS',
-  'Oxford Health Insurance',
-  'Progressive No Fault',
-  'United Healthcare',
-  'United Healthcare Medicare',
-];
 
 const CLAIM_STATUS_FILTERS = [
   { value: 'all', label: 'All Claims', color: 'bg-gray-100 text-gray-800' },
@@ -374,6 +351,8 @@ export default function Dashboard() {
   // ── State ──────────────────────────────────────────────────────────────────
   const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null);
   const [showAddPatient, setShowAddPatient] = useState(false);
+  const [showAddInsurance, setShowAddInsurance] = useState(false);
+  const [newInsuranceName, setNewInsuranceName] = useState('');
   const [selectedInsurance, setSelectedInsurance] = useState<string>('Aetna');
   const [newPatientName, setNewPatientName] = useState('');
   const [newPatientInsurance, setNewPatientInsurance] = useState('Aetna');
@@ -499,6 +478,12 @@ export default function Dashboard() {
   const { data: patients = [], isLoading: patientsLoading, refetch: refetchPatients } =
     trpc.patients.list.useQuery();
 
+  // Single shared insurer catalog — patient forms, the Insurance filter
+  // panel, and AuthAlertPanel's "New Authorization" dialog all read from
+  // this same list so none of them can drift out of sync with another.
+  const { data: insurerCatalog = [] } = trpc.insurance.list.useQuery();
+  const insuranceList = useMemo(() => insurerCatalog.map(entry => entry.name), [insurerCatalog]);
+
   // The patient explicitly selected via selectedPatientId — unlike activePatient
   // below, this has NO fallback to patients[0], so it's only truthy when a
   // patient was actually chosen (by clicking a row, an alert card, etc.).
@@ -616,6 +601,24 @@ export default function Dashboard() {
     },
     onError: (e) => toast.error(`Failed to add patient: ${e.message}`),
   });
+
+  const createInsurer = trpc.insurance.create.useMutation({
+    onSuccess: () => {
+      utils.insurance.list.invalidate();
+      toast.success('Insurance company added');
+      setNewInsuranceName('');
+      setShowAddInsurance(false);
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  const handleAddInsurance = () => {
+    if (!newInsuranceName.trim()) {
+      toast.error('Insurance company name is required');
+      return;
+    }
+    createInsurer.mutate({ name: newInsuranceName });
+  };
 
   const createVisit = trpc.visits.create.useMutation({
     onSuccess: () => {
@@ -861,7 +864,11 @@ export default function Dashboard() {
   // folder, and the selected-patient validity check below, so none of them
   // can ever disagree about which patients are "in scope". Intentionally
   // excludes search: search only hides rows, it isn't part of filter scope.
-  const filterScope = { selectedInsurance, selectedClaimsFilter, patientIdsByStatus };
+  const selectedInsuranceAliases = useMemo(
+    () => insurerCatalog.find(entry => entry.name === selectedInsurance)?.aliases ?? [],
+    [insurerCatalog, selectedInsurance]
+  );
+  const filterScope = { selectedInsurance, selectedClaimsFilter, patientIdsByStatus, selectedInsuranceAliases };
 
   // If the currently selected patient no longer matches the active filter
   // scope (the user changed Insurance or Claims Status directly, not by
@@ -919,8 +926,13 @@ export default function Dashboard() {
   // Shared between the desktop Patient Workspace filters panel and the mobile
   // Filters sheet so the two never drift.
   const insuranceCounts = useMemo(
-    () => Object.fromEntries(insuranceList.map(ins => [ins, activePatients.filter(p => p.insurance === ins).length])),
-    [activePatients]
+    () => Object.fromEntries(
+      insurerCatalog.map(entry => {
+        const matchValues = insurerMatchValues(entry);
+        return [entry.name, activePatients.filter(p => matchValues.includes(p.insurance)).length];
+      })
+    ),
+    [insurerCatalog, activePatients]
   );
 
   const handleSelectInsurance = (insurance: string) => {
@@ -3867,6 +3879,51 @@ export default function Dashboard() {
     </Dialog>
   );
 
+  /** Add Insurance Company trigger + dialog — shown beside Add Patient on
+   *  Patient Records. Creation is owner/clinic-admin only server-side
+   *  (adminOrOwnerProcedure); the button is gated behind the same
+   *  canManageStaff check client-side so non-admin staff never see an
+   *  action they can't complete. Read access (insuranceList above) is
+   *  unrestricted — every dashboard user sees newly added insurers. */
+  const addInsuranceAction = (
+    <Dialog open={showAddInsurance} onOpenChange={(open) => { setShowAddInsurance(open); if (!open) setNewInsuranceName(''); }}>
+      <DialogTrigger asChild>
+        <Button size="sm" variant="outline" className="gap-1.5">
+          <Plus className="w-4 h-4" />
+          <span className="hidden sm:inline">Add Insurance Company</span>
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="bg-white">
+        <DialogHeader>
+          <DialogTitle className="text-brand-blue">Add Insurance Company</DialogTitle>
+          <DialogDescription>Add a new insurance company to the shared list used across patient forms and filters</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="new-insurance-name" className="text-brand-blue font-semibold">Insurance Company Name</Label>
+            <Input
+              id="new-insurance-name"
+              placeholder="Enter insurance company name"
+              value={newInsuranceName}
+              onChange={e => setNewInsuranceName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleAddInsurance(); }}
+              className="border-brand-cream-dark"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setShowAddInsurance(false)} disabled={createInsurer.isPending}>
+              Cancel
+            </Button>
+            <Button onClick={handleAddInsurance} disabled={createInsurer.isPending} className="bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
+              {createInsurer.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+              Add Insurance Company
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+
   const bulkUploadTrigger = (
     <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setShowUploadDialog(true)}>
       <Upload className="w-4 h-4" />
@@ -3916,7 +3973,7 @@ export default function Dashboard() {
         canManageStaff={canManageStaff}
         topbarTitle="Patient Records"
         topbarSubtitle="Find and select a patient to view their information"
-        topbarActions={addPatientAction}
+        topbarActions={<div className="flex flex-wrap items-center gap-2">{addPatientAction}{canManageStaff && addInsuranceAction}</div>}
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6">
           {filterChipsElement}
