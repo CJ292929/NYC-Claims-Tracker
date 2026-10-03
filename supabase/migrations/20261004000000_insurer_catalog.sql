@@ -159,9 +159,15 @@ ON CONFLICT (normalized_name) DO NOTHING;
 -- role subject to RLS — there is deliberately no anon/authenticated policy
 -- to admit browser-role access, since all legitimate access goes through the
 -- server. service_role is unaffected: Supabase provisions it with BYPASSRLS,
--- so RLS enablement never blocks the server's own access. FORCE ROW LEVEL
--- SECURITY is additionally applied so RLS also applies to the table owner —
--- belt-and-suspenders, since BYPASSRLS roles ignore FORCE regardless.
+-- so RLS enablement never blocks the server's own access.
+--
+-- Deliberately NOT using FORCE ROW LEVEL SECURITY: FORCE also applies RLS to
+-- the table owner, which would block the owner role used for direct
+-- operational access (e.g. the Supabase SQL Editor) despite that role never
+-- being reachable from the browser — RLS here exists to stop PostgREST
+-- (anon/authenticated), not table-owner access. The explicit NO FORCE below
+-- makes this the end state regardless of what an earlier run of this file
+-- left in place.
 --
 -- The REVOKE below removes the ability to even attempt a query as
 -- anon/authenticated/PUBLIC (defense in depth below RLS, and keeps the
@@ -170,7 +176,7 @@ ON CONFLICT (normalized_name) DO NOTHING;
 -- on whatever ALTER DEFAULT PRIVILEGES happens to be configured on the
 -- project — this table's server access is guaranteed by this migration.
 ALTER TABLE public.insurer_catalog ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.insurer_catalog FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.insurer_catalog NO FORCE ROW LEVEL SECURITY;
 
 REVOKE ALL ON public.insurer_catalog FROM PUBLIC, anon, authenticated;
 GRANT ALL ON public.insurer_catalog TO service_role;
