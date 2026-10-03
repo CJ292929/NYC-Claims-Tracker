@@ -192,7 +192,7 @@ export async function createPatient(data: {
 
 export async function updatePatient(
   id: string,
-  data: { name?: string; insurance?: string; authDate?: Date | null; authValidUntil?: number | null; isActive?: boolean; claimsStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' }
+  data: { name?: string; insurance?: string; authDate?: Date | null; authValidUntil?: number | null; isActive?: boolean; claimsStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | null }
 ): Promise<void> {
   const update: Record<string, unknown> = {};
   if (data.name !== undefined) update.name = data.name;

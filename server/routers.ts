@@ -485,7 +485,13 @@ export const appRouter = router({
           insurance: z.string().optional(),
           authDate: z.string().nullable().optional(),
           authValidUntil: z.number().nullable().optional(),
-          claimsStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted']).optional(),
+          // "none" is the API-level sentinel for "no claims status set" (see
+          // getPatientById/listPatients in db.ts, which map a NULL claims_status
+          // column to "none"). It is NOT a column value — accepting it here and
+          // translating it to `null` below lets the edit form round-trip an
+          // unset status without that NULL ever being asked to match the
+          // 7-value DB enum, which is what previously threw invalid_value.
+          claimsStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted', 'none']).optional(),
         })
       )
       .mutation(async ({ input, ctx }) => {
@@ -498,7 +504,9 @@ export const appRouter = router({
           ...rest,
           ...(authDate !== undefined ? { authDate: parseDate(authDate) } : {}),
           ...(authValidUntil !== undefined ? { authValidUntil } : {}),
-          ...(claimsStatus !== undefined ? { claimsStatus } : {}),
+          // Field omitted entirely → key absent → updatePatient leaves the
+          // column untouched. Field present as "none" → explicit clear (NULL).
+          ...(claimsStatus !== undefined ? { claimsStatus: claimsStatus === 'none' ? null : claimsStatus } : {}),
         });
 
         const changes = diffPatientUpdate(before, rest);
@@ -881,12 +889,48 @@ export const appRouter = router({
             patientAmountDue: z.number().nullable().optional(),
             paymentReceived: z.number().nullable().optional(),
           }))
-        }))
+        })),
+        // Staff-confirmed matches for groups whose extracted name only
+        // produced an ambiguous "candidate" in the preview (see
+        // shared/nameMatch.ts classifyPatientMatch) — e.g. a spelled-out
+        // middle name the fuzzy matcher correctly refuses to auto-match.
+        // Index into patientGroups; never used to override a name that
+        // *does* safely fuzzy-match (that path is untouched below).
+        confirmedMatches: z.array(z.object({
+          groupIndex: z.number().int().nonnegative(),
+          patientId: z.string().uuid(),
+        })).optional(),
       }))
       .mutation(async ({ input }) => {
         const { supabase } = await import('./supabase');
         const allPatients = await getAllPatients();
         const uploadType = input.uploadType ?? 'reimbursement';
+
+        // Validate confirmedMatches structurally before any import work runs:
+        // every groupIndex must refer to a group actually present in this
+        // request, and a client can never submit two different confirmations
+        // for the same group (that's a conflicting/ambiguous instruction, not
+        // something to silently resolve by taking the last one).
+        const confirmedMatches = input.confirmedMatches ?? [];
+        const seenGroupIndexes = new Set<number>();
+        for (const c of confirmedMatches) {
+          if (c.groupIndex >= input.patientGroups.length) {
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message: `confirmedMatches: groupIndex ${c.groupIndex} does not refer to any group in this import`,
+            });
+          }
+          if (seenGroupIndexes.has(c.groupIndex)) {
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message: `confirmedMatches: conflicting duplicate confirmation for groupIndex ${c.groupIndex}`,
+            });
+          }
+          seenGroupIndexes.add(c.groupIndex);
+        }
+        const confirmedByIndex = new Map(
+          confirmedMatches.map(c => [c.groupIndex, c.patientId])
+        );
 
         const results: Array<{
           patientName: string;
@@ -896,19 +940,43 @@ export const appRouter = router({
           authPeriod?: number;
           claimsImported: number;
           error?: string;
+          ambiguousCandidates?: number;
         }> = [];
 
-        for (const group of input.patientGroups) {
+        for (let groupIndex = 0; groupIndex < input.patientGroups.length; groupIndex++) {
+          const group = input.patientGroups[groupIndex];
           // Fuzzy name matching: handles "ALLISON AUYEUNG" ↔ "AUYEUNG, ALLISON"
           // and other format variations (First Last, Last First, Last, First, mixed case)
-          const { findMatchingPatient } = await import('./nameMatch');
-          const matchedPatient = findMatchingPatient(group.patientName, allPatients);
+          const { classifyPatientMatch } = await import('@shared/nameMatch');
+          const { confirmed: safeMatch, candidates } = classifyPatientMatch(group.patientName, allPatients);
+          // A staff confirmation only ever fills in for a name the fuzzy
+          // matcher didn't already safely resolve — it can't override a
+          // *different* safe match. The confirmed id must also belong to
+          // THIS group's own eligible candidate set (the same list the
+          // preview showed the staff member to choose from) — not just any
+          // patient that happens to exist in the system — otherwise a
+          // confirmation meant for one ambiguous name could be replayed
+          // against an unrelated group, or an unrecognized/stale patientId
+          // (e.g. the patient was deleted after the preview was shown) could
+          // slip a claim onto the wrong record. An id that isn't an eligible
+          // candidate is ignored rather than trusted blindly.
+          const confirmedId = safeMatch ? null : confirmedByIndex.get(groupIndex) ?? null;
+          const confirmedPatient = confirmedId
+            ? candidates.find(p => p.id === confirmedId) ?? null
+            : null;
+          const matchedPatient = safeMatch ?? confirmedPatient;
 
           if (!matchedPatient) {
             results.push({
               patientName: group.patientName,
               matched: false,
               claimsImported: 0,
+              // Distinguishes "nothing in the file resembles a dashboard
+              // patient" from "a likely match exists but requires explicit
+              // staff confirmation" (e.g. a middle-name difference) — the
+              // confirmation UI lives in the client preview; an unconfirmed
+              // candidate is still correctly skipped here, never auto-imported.
+              ...(candidates.length > 0 ? { ambiguousCandidates: candidates.length } : {}),
             });
             continue;
           }

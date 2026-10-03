@@ -1,10 +1,27 @@
 import { NOT_ADMIN_ERR_MSG, PASSWORD_CHANGE_REQUIRED_ERR_MSG, UNAUTHED_ERR_MSG } from '@shared/const';
 import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
+import { ZodError } from "zod";
 import type { TrpcContext } from "./context";
 
 const t = initTRPC.context<TrpcContext>().create({
   transformer: superjson,
+  // Default tRPC behavior surfaces the raw ZodError (a JSON-ish array of
+  // {code, path, message} issues) as `error.message`, which clients then
+  // show verbatim in toasts. Collapse it into one readable sentence per
+  // field instead.
+  errorFormatter(opts) {
+    const { shape, error } = opts;
+    const zodError = error.cause instanceof ZodError ? error.cause : null;
+    if (!zodError) return shape;
+    const message = zodError.issues
+      .map(issue => {
+        const field = issue.path.join(".") || "input";
+        return `${field}: ${issue.message}`;
+      })
+      .join("; ");
+    return { ...shape, message: message || shape.message };
+  },
 });
 
 export const router = t.router;

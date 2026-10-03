@@ -1,8 +1,15 @@
 /**
- * server/nameMatch.ts
+ * shared/nameMatch.ts
  *
- * Fuzzy patient name matching utility. This result drives which patient record
- * an extracted claim gets saved against (see bulkImportFromEOB in routers.ts),
+ * Fuzzy patient name matching utility — the single implementation used by
+ * both the client (single-patient upload flow + bulk import preview) and the
+ * server (bulkImportFromEOB persistence). Previously server/nameMatch.ts and
+ * client/src/lib/nameMatch.ts were separately hand-maintained copies of the
+ * same logic; keeping one copy here means the preview a staff member sees
+ * can never drift from what persistence actually does.
+ *
+ * This result drives which patient record an extracted claim gets saved
+ * against (see bulkImportFromEOB in routers.ts),
  * so a false-positive match silently misattributes real financial/medical data
  * to the wrong patient — every strategy here requires the FULL set of name
  * tokens to match (just possibly reordered), never a partial/initial-only
@@ -197,4 +204,76 @@ export function findMatchingPatient<T extends { name: string }>(
 
   // Try fuzzy match
   return patients.find(p => fuzzyNameMatch(eobName, p.name)) ?? null;
+}
+
+/**
+ * Looser "candidate" detector for names fuzzyNameMatch deliberately refuses
+ * to auto-match: every token of the shorter name appears, in order, inside
+ * the longer name, but the longer name has extra tokens too long to be an
+ * initial/suffix (e.g. a spelled-out middle name — "JOHN SMITH" vs "JOHN
+ * MICHAEL SMITH"). This is NOT a safe automatic match — two different real
+ * people can share a first+last name — so it must only ever be surfaced for
+ * explicit staff confirmation, never used to auto-import.
+ */
+function isNameSubsequence(shorter: string[], longer: string[]): boolean {
+  let i = 0;
+  for (const token of longer) {
+    if (token === shorter[i]) i++;
+    if (i === shorter.length) return true;
+  }
+  return shorter.length === 0;
+}
+
+function isCandidateNameMatch(eobName: string, dashName: string): boolean {
+  if (!eobName || !dashName) return false;
+  const tokensEob = tokenize(eobName);
+  const tokensDash = tokenize(dashName);
+  if (tokensEob.length === tokensDash.length) return false; // equal-length diffs are fuzzyNameMatch's job
+  if (tokensEob.length < 2 || tokensDash.length < 2) return false; // require a first+last anchor on both sides
+
+  const [shorter, longer] = tokensEob.length < tokensDash.length
+    ? [tokensEob, tokensDash]
+    : [tokensDash, tokensEob];
+  return isNameSubsequence(shorter, longer);
+}
+
+/**
+ * Classifies a dashboard roster against one extracted EOB name into two
+ * tiers, so callers (the bulk import preview, and the single-patient upload
+ * flow it shares this module with) can tell "nothing at all in the file
+ * resembles this patient" apart from "a specific name was found that looks
+ * like this patient but differs by a middle name or similar — a human needs
+ * to confirm it's the same person before anything is imported."
+ *
+ * `confirmed` is populated only by the existing safe-match rules in
+ * fuzzyNameMatch (exact/token-set/reversed/suffix-or-initial-tolerant) and is
+ * safe to auto-import, exactly as before. `candidates` is never safe to
+ * auto-import — every caller must require an explicit confirmation action
+ * before treating a candidate as a match.
+ */
+export function classifyPatientMatch<T extends { name: string }>(
+  eobName: string,
+  patients: T[]
+): { confirmed: T | null; candidates: T[] } {
+  // Collect EVERY roster entry that satisfies the safe-match rules, rather
+  // than taking findMatchingPatient's first hit — if two roster entries both
+  // qualify (e.g. a duplicate patient record, or two patients who happen to
+  // share the exact same formatted name), picking the first would silently
+  // misattribute the claim to whichever happens to sort first. Exact matches
+  // are checked as their own tier so an unambiguous exact match still wins
+  // outright even if some other patient also fuzzy-matches (see "exact match
+  // wins outright" in nameMatch.test.ts).
+  const exactMatches = patients.filter(p => normalizeName(p.name) === normalizeName(eobName));
+  const safeMatches = exactMatches.length > 0
+    ? exactMatches
+    : patients.filter(p => fuzzyNameMatch(eobName, p.name));
+
+  if (safeMatches.length === 1) return { confirmed: safeMatches[0], candidates: [] };
+  if (safeMatches.length > 1) {
+    // Ambiguous duplicate: never auto-import, require an explicit staff pick
+    // from among exactly these matches.
+    return { confirmed: null, candidates: safeMatches };
+  }
+
+  return { confirmed: null, candidates: patients.filter(p => isCandidateNameMatch(eobName, p.name)) };
 }
