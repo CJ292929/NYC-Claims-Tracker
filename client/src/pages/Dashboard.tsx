@@ -2774,9 +2774,9 @@ export default function Dashboard() {
                       className="border border-border border-t-4 border-t-brand-gold shadow-brand rounded-xl mb-6 ml-0"
                     >
                       <CardHeader className="bg-white rounded-t-xl">
-                        <div className="flex items-start justify-between gap-4 mb-4">
-                          <div className="space-y-1">
-                            <CardTitle className="text-xl font-semibold tracking-tight text-brand-blue">
+                        <div className="flex flex-wrap items-start justify-between gap-4 mb-4">
+                          <div className="space-y-1 shrink-0">
+                            <CardTitle className="text-xl font-semibold tracking-tight text-brand-blue whitespace-nowrap">
                               Claims Tracker — Period {period}
                             </CardTitle>
                             <CardDescription className="text-sm text-muted-foreground">
@@ -2931,9 +2931,6 @@ export default function Dashboard() {
                               }}
                             />
                           </div>
-                          <p className="text-[11px] text-muted-foreground mt-1 basis-full w-full sm:w-auto sm:ml-auto sm:text-right">
-                            CMS1500 fills in visit details, diagnosis, and modifiers on existing reimbursement rows — upload Reimbursement Insurance first.
-                          </p>
                         </div>
                       </CardHeader>
                       <CardContent className="p-0">
