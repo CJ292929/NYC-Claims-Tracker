@@ -80,10 +80,10 @@ describe("claims.cms1500EnrichmentPreview", () => {
     expect(result.results[0].status).toBe("no_match");
   });
 
-  it("reports 'matched' with the single candidate's id when exactly one row matches", async () => {
+  it("reports 'matched' with the single candidate's id when exactly one row matches AND it has reimbursement evidence", async () => {
     dbMock.patientHasAnyClaimRecords.mockResolvedValue(true);
     dbMock.findCms1500EnrichmentCandidates.mockResolvedValue([
-      { id: "33333333-3333-4333-8333-333333333333", authPeriod: 2, chargeAmount: 100, insuranceReimbursement: 80, patientAmountPaid: 0, patientAmountDue: 0, visitNumber: null, diagnosisCodes: null, modifier: null, unitsBilled: null },
+      { id: "33333333-3333-4333-8333-333333333333", authPeriod: 2, chargeAmount: 100, insuranceReimbursement: 80, patientAmountPaid: 0, patientAmountDue: 0, visitNumber: null, diagnosisCodes: null, modifier: null, unitsBilled: null, hasReimbursementEvidence: true },
     ]);
 
     const caller = ownerCaller();
@@ -94,6 +94,39 @@ describe("claims.cms1500EnrichmentPreview", () => {
 
     expect(result.results[0].status).toBe("matched");
     expect(result.results[0].claimRecordId).toBe("33333333-3333-4333-8333-333333333333");
+  });
+
+  it("reports 'matched_unconfirmed' (not auto-'matched') when the single candidate has NO reimbursement evidence -- provenance is unknown", async () => {
+    dbMock.patientHasAnyClaimRecords.mockResolvedValue(true);
+    dbMock.findCms1500EnrichmentCandidates.mockResolvedValue([
+      { id: "33333333-3333-4333-8333-333333333333", authPeriod: 1, chargeAmount: 100, insuranceReimbursement: null, patientAmountPaid: null, patientAmountDue: null, visitNumber: null, diagnosisCodes: null, modifier: null, unitsBilled: null, hasReimbursementEvidence: false },
+    ]);
+
+    const caller = ownerCaller();
+    const result = await caller.claims.cms1500EnrichmentPreview({
+      patientId: PATIENT_ID,
+      lines: [{ lineKey: "l1", dateOfService: "2026-05-19", cptCodes: "97110" }],
+    });
+
+    expect(result.results[0].status).toBe("matched_unconfirmed");
+    // Still carries the candidate id so the client CAN commit it, but only
+    // after an explicit staff confirmation -- never auto-included.
+    expect(result.results[0].claimRecordId).toBe("33333333-3333-4333-8333-333333333333");
+  });
+
+  it("reports 'matched' when the single candidate's reimbursement field is an explicit zero -- a denied/zero-payment EOB is still valid evidence, not treated as missing", async () => {
+    dbMock.patientHasAnyClaimRecords.mockResolvedValue(true);
+    dbMock.findCms1500EnrichmentCandidates.mockResolvedValue([
+      { id: "33333333-3333-4333-8333-333333333333", authPeriod: 1, chargeAmount: 100, insuranceReimbursement: 0, patientAmountPaid: 0, patientAmountDue: 0, visitNumber: null, diagnosisCodes: null, modifier: null, unitsBilled: null, hasReimbursementEvidence: true },
+    ]);
+
+    const caller = ownerCaller();
+    const result = await caller.claims.cms1500EnrichmentPreview({
+      patientId: PATIENT_ID,
+      lines: [{ lineKey: "l1", dateOfService: "2026-05-19", cptCodes: "97110" }],
+    });
+
+    expect(result.results[0].status).toBe("matched");
   });
 
   it("reports 'needs_selection' with all candidates when more than one row matches", async () => {

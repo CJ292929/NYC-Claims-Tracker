@@ -37,6 +37,7 @@ import { getPatientMetrics } from '@/lib/patientMetrics';
 import { getPatientOverviewMetrics } from '@/lib/patientOverviewMetrics';
 import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
+import { resolveClaimReviewView } from '@/lib/claimReviewRouting';
 import { formatCalendarDate } from '@/lib/date';
 import type { AuthUrgency } from '@shared/authUrgency';
 
@@ -446,6 +447,15 @@ export default function Dashboard() {
     claimsImported: number;
     error?: string;
     ambiguousCandidates?: number;
+    skippedNoMatch?: number;
+    skippedNoReimbursementUploaded?: number;
+    skippedNeedsSelection?: number;
+    skippedUnconfirmedProvenance?: number;
+    skippedCms1500Lines?: Array<{
+      dateOfService: string | null;
+      cptCodes: string | null;
+      reason: 'no_match' | 'no_reimbursement_uploaded' | 'needs_selection' | 'unconfirmed_provenance' | 'invalid_date';
+    }>;
   }> | null>(null);
   // ── CMS1500 enrichment (P4-P10) ───────────────────────────────────────────
   // CMS1500 never creates or edits a financial row — it only enriches an
@@ -474,10 +484,17 @@ export default function Dashboard() {
     diagnosisCodes: string | null;
     modifier: string | null;
     unitsBilled: number | null;
+    // claims_records has no column recording how a row was created, so this
+    // is a best-effort proxy: true when the row has at least one field only
+    // a Reimbursement/EOB upload ever writes (present, even as an explicit
+    // zero — a denied/zero-payment EOB line still counts). False means the
+    // row could just as easily be a manual entry or a legacy/pre-fix
+    // CMS1500-only insert, not a confirmed reimbursement row.
+    hasReimbursementEvidence: boolean;
   };
   type Cms1500PreviewLine = {
     lineKey: string;
-    status: 'matched' | 'needs_selection' | 'no_match' | 'no_claims' | 'invalid_date';
+    status: 'matched' | 'matched_unconfirmed' | 'needs_selection' | 'no_match' | 'no_claims' | 'invalid_date';
     candidates: Cms1500Candidate[];
     claimRecordId?: string;
   };
@@ -485,8 +502,25 @@ export default function Dashboard() {
   const [cms1500Preview, setCms1500Preview] = useState<{ hasAnyClaims: boolean; results: Cms1500PreviewLine[] } | null>(null);
   const [isPreviewingCms1500, setIsPreviewingCms1500] = useState(false);
   const [cms1500Selections, setCms1500Selections] = useState<Record<string, string>>({});
+  // Explicit staff confirmation that an unconfirmed-provenance single match
+  // really is the reimbursement row — never auto-set; only ticking the
+  // checkbox in the preview UI adds a lineKey here.
+  const [cms1500ProvenanceConfirmations, setCms1500ProvenanceConfirmations] = useState<Record<string, boolean>>({});
   const [cms1500CommitResults, setCms1500CommitResults] = useState<Array<{ lineKey: string; status: 'saved' | 'failed'; error?: string }> | null>(null);
   const [isSavingCms1500, setIsSavingCms1500] = useState(false);
+  // Which save path the claim upload preview dialog routes to --
+  // 'cms1500Enrichment' (enrichment-only commit) vs 'reimbursementTable'
+  // (legacy full-write claims.upsert). Computed early (component body, not
+  // inside a specific route branch's JSX) since the dialog using it is
+  // nested inside more than one of this component's conditional early
+  // returns. See resolveClaimReviewView's doc comment for why this must be
+  // a shared, tested function rather than an inline ternary re-derived
+  // separately in the JSX.
+  const claimReviewView = resolveClaimReviewView({
+    eobPatientGroups,
+    editingExtractedClaimsLength: editingExtractedClaims.length,
+    claimUploadType,
+  });
   const [claimFormData, setClaimFormData] = useState({
     placeOfService: '',
     dateOfService: '',
@@ -1514,6 +1548,16 @@ export default function Dashboard() {
 
   const handleSaveExtractedClaims = async () => {
     if (!activePatient || claimUploadPeriod === null) return;
+    // Defense-in-depth: this full read/write claims.upsert path (charge,
+    // payment fields, insert-on-no-match) is only ever wired to the "Save N
+    // Claims" button in the reimbursementTable view (see
+    // resolveClaimReviewView) -- but if a future edit ever called this
+    // directly for a CMS1500 extraction, it must refuse rather than write a
+    // charge/payment field or insert a row for CMS1500 data.
+    if (claimUploadType === 'cms1500') {
+      toast.error('Internal error: CMS1500 data cannot be saved through the reimbursement claim upsert path.');
+      return;
+    }
     setIsSavingExtractedClaims(true);
     let saved = 0;
     const failedRows: any[] = [];
@@ -1607,6 +1651,7 @@ export default function Dashboard() {
     setCms1500Lines(lines);
     setCms1500Preview(null);
     setCms1500Selections({});
+    setCms1500ProvenanceConfirmations({});
     setCms1500CommitResults(null);
     if (lines.length === 0) return;
     setIsPreviewingCms1500(true);
@@ -1625,16 +1670,27 @@ export default function Dashboard() {
 
   const handleCommitCms1500Enrichment = async () => {
     if (!activePatient || !cms1500Preview) return;
+    // Defense-in-depth mirror of the guard in handleSaveExtractedClaims.
+    if (claimUploadType !== 'cms1500') {
+      toast.error('Internal error: this enrichment-only path cannot be used for a reimbursement upload.');
+      return;
+    }
     const byKey = new Map(cms1500Lines.map(l => [l.lineKey, l]));
     const resolvable = cms1500Preview.results
       .map(r => {
-        const claimRecordId = r.status === 'matched' ? r.claimRecordId : r.status === 'needs_selection' ? cms1500Selections[r.lineKey] : undefined;
+        const claimRecordId = r.status === 'matched'
+          ? r.claimRecordId
+          : r.status === 'matched_unconfirmed'
+            ? (cms1500ProvenanceConfirmations[r.lineKey] ? r.claimRecordId : undefined)
+            : r.status === 'needs_selection'
+              ? cms1500Selections[r.lineKey]
+              : undefined;
         return claimRecordId ? { r, claimRecordId } : null;
       })
       .filter((x): x is { r: Cms1500PreviewLine; claimRecordId: string } => x !== null);
 
     if (resolvable.length === 0) {
-      toast.error('No lines are ready to save — nothing matched a reimbursement row, or an ambiguous match still needs a selection.');
+      toast.error('No lines are ready to save — nothing matched a reimbursement row, an ambiguous match still needs a selection, or an unconfirmed match still needs confirmation.');
       return;
     }
 
@@ -3593,7 +3649,7 @@ export default function Dashboard() {
               <p className="text-xs text-gray-400">Checking for known insurance templates, then using AI if needed.</p>
             </div>
 
-          ) : eobPatientGroups ? (
+          ) : claimReviewView === 'bulk' ? (
             /* ── Multi-patient EOB preview ── */
             <div className="space-y-4">
               {bulkImportResults ? (
@@ -3601,38 +3657,62 @@ export default function Dashboard() {
                 <div className="space-y-3">
                   <p className="text-sm font-semibold text-gray-700">Import Results:</p>
                   {bulkImportResults.map((r, i) => (
-                    <div key={i} className={`flex items-center justify-between px-4 py-3 rounded-lg border ${
+                    <div key={i} className={`rounded-lg border ${
                       r.matched && !r.error ? 'bg-green-50 border-green-200' :
                       r.error ? 'bg-red-50 border-red-200' :
                       'bg-yellow-50 border-yellow-200'
                     }`}>
-                      <div>
-                        <p className="font-semibold text-sm text-gray-800">{r.patientName}</p>
-                        {r.matched && r.dashboardName && (
-                          <p className="text-xs text-gray-500">Matched: {r.dashboardName} · Auth Period {r.authPeriod}</p>
-                        )}
-                        {!r.matched && r.ambiguousCandidates ? (
-                          <p className="text-xs text-amber-700">
-                            {r.ambiguousCandidates} possible match{r.ambiguousCandidates !== 1 ? 'es' : ''} found but not confirmed — skipped
+                      <div className="flex items-center justify-between px-4 py-3">
+                        <div>
+                          <p className="font-semibold text-sm text-gray-800">{r.patientName}</p>
+                          {r.matched && r.dashboardName && (
+                            <p className="text-xs text-gray-500">Matched: {r.dashboardName} · Auth Period {r.authPeriod}</p>
+                          )}
+                          {!r.matched && r.ambiguousCandidates ? (
+                            <p className="text-xs text-amber-700">
+                              {r.ambiguousCandidates} possible match{r.ambiguousCandidates !== 1 ? 'es' : ''} found but not confirmed — skipped
+                            </p>
+                          ) : !r.matched ? (
+                            <p className="text-xs text-yellow-700">Not found in dashboard — skipped</p>
+                          ) : null}
+                          {r.error && (
+                            <p className="text-xs text-red-600">Error: {r.error}</p>
+                          )}
+                        </div>
+                        <div className="text-right">
+                          {r.matched && !r.error && (
+                            <span className="text-green-700 font-semibold text-sm">✓ {r.claimsImported} claim{r.claimsImported !== 1 ? 's' : ''} imported</span>
+                          )}
+                          {!r.matched && (
+                            <span className="text-yellow-600 font-semibold text-sm">Skipped</span>
+                          )}
+                          {r.error && (
+                            <span className="text-red-600 font-semibold text-sm">{r.claimsImported} saved before error</span>
+                          )}
+                        </div>
+                      </div>
+                      {r.skippedCms1500Lines && r.skippedCms1500Lines.length > 0 && (
+                        <div className="px-4 pb-3 pt-0">
+                          <p className="text-xs font-semibold text-amber-800">
+                            {r.skippedCms1500Lines.length} CMS1500 line{r.skippedCms1500Lines.length !== 1 ? 's' : ''} skipped — no money changed, nothing enriched:
                           </p>
-                        ) : !r.matched ? (
-                          <p className="text-xs text-yellow-700">Not found in dashboard — skipped</p>
-                        ) : null}
-                        {r.error && (
-                          <p className="text-xs text-red-600">Error: {r.error}</p>
-                        )}
-                      </div>
-                      <div className="text-right">
-                        {r.matched && !r.error && (
-                          <span className="text-green-700 font-semibold text-sm">✓ {r.claimsImported} claim{r.claimsImported !== 1 ? 's' : ''} imported</span>
-                        )}
-                        {!r.matched && (
-                          <span className="text-yellow-600 font-semibold text-sm">Skipped</span>
-                        )}
-                        {r.error && (
-                          <span className="text-red-600 font-semibold text-sm">{r.claimsImported} saved before error</span>
-                        )}
-                      </div>
+                          <ul className="mt-1 space-y-0.5">
+                            {r.skippedCms1500Lines.map((line, li) => (
+                              <li key={li} className="text-xs text-amber-700 font-mono">
+                                {line.dateOfService ?? '—'} · {line.cptCodes ?? '—'} —{' '}
+                                {line.reason === 'no_reimbursement_uploaded' ? 'upload the reimbursement file first'
+                                  : line.reason === 'no_match' ? 'no matching reimbursement row'
+                                  : line.reason === 'needs_selection' ? 'multiple candidate rows — needs selection'
+                                  : line.reason === 'unconfirmed_provenance' ? 'match found but reimbursement not confirmed'
+                                  : 'invalid/missing date'}
+                              </li>
+                            ))}
+                          </ul>
+                          <p className="mt-1 text-xs text-amber-700">
+                            Resolve these on {r.dashboardName ?? r.patientName}'s own page via the single-patient CMS1500 upload, which supports picking the right row and confirming an unconfirmed match.
+                          </p>
+                        </div>
+                      )}
                     </div>
                   ))}
                   <div className="flex justify-end pt-2 border-t">
@@ -3658,11 +3738,11 @@ export default function Dashboard() {
                 /* Preview before import */
                 <>
                   <p className="text-sm text-gray-600">
-                    <span className="font-semibold text-green-700">{eobPatientGroups.length}</span> patient{eobPatientGroups.length !== 1 ? 's' : ''} detected in this file.
+                    <span className="font-semibold text-green-700">{eobPatientGroups!.length}</span> patient{eobPatientGroups!.length !== 1 ? 's' : ''} detected in this file.
                     Patients matching your dashboard will have their claims auto-imported.
                   </p>
                   <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-1">
-                    {eobPatientGroups.map((group, gIdx) => {
+                    {eobPatientGroups!.map((group, gIdx) => {
                       const { confirmed: matchedPatient, candidates } = classifyPatientMatch(group.patientName, patients);
                       const overriddenId = manualMatchOverrides[gIdx];
                       const confirmedCandidate = overriddenId ? patients.find(p => p.id === overriddenId) ?? null : null;
@@ -3779,7 +3859,7 @@ export default function Dashboard() {
                         setIsBulkImporting(true);
                         try {
                           await bulkImportFromEOB.mutateAsync({
-                            patientGroups: eobPatientGroups,
+                            patientGroups: eobPatientGroups!,
                             uploadType: claimUploadType,
                             // Explicit staff confirmations for groups that only
                             // produced an ambiguous "candidate" match (see
@@ -3804,12 +3884,12 @@ export default function Dashboard() {
               )}
             </div>
 
-          ) : editingExtractedClaims.length === 0 ? (
+          ) : claimReviewView === 'empty' ? (
             <div className="flex flex-col items-center justify-center py-16 gap-3 text-gray-400">
               <AlertCircle className="w-10 h-10" />
               <p className="text-sm">No claims extracted yet. Upload a PDF or CSV file to begin.</p>
             </div>
-          ) : claimUploadType === 'cms1500' ? (
+          ) : claimReviewView === 'cms1500Enrichment' ? (
             /* ── CMS1500 enrichment preview ──────────────────────────────────
              * CMS1500 never creates a claim row or touches a charge/payment
              * field — it only fills in visit #, diagnosis, modifier, and
@@ -3841,6 +3921,7 @@ export default function Dashboard() {
                           committed?.status === 'saved' ? 'border-green-300 bg-green-50' :
                           committed?.status === 'failed' ? 'border-red-300 bg-red-50' :
                           r.status === 'matched' ? 'border-green-300 bg-green-50' :
+                          r.status === 'matched_unconfirmed' ? 'border-amber-300 bg-amber-50' :
                           r.status === 'needs_selection' ? 'border-amber-300 bg-amber-50' :
                           'border-yellow-300 bg-yellow-50'
                         }`}
@@ -3854,12 +3935,14 @@ export default function Dashboard() {
                             committed?.status === 'saved' ? 'bg-green-100 text-green-800' :
                             committed?.status === 'failed' ? 'bg-red-100 text-red-800' :
                             r.status === 'matched' ? 'bg-green-100 text-green-800' :
+                            r.status === 'matched_unconfirmed' ? 'bg-amber-100 text-amber-800' :
                             r.status === 'needs_selection' ? 'bg-amber-100 text-amber-800' :
                             'bg-yellow-100 text-yellow-800'
                           }`}>
                             {committed?.status === 'saved' ? '✓ Saved'
                               : committed?.status === 'failed' ? `Failed`
                               : r.status === 'matched' ? 'Matched — will update'
+                              : r.status === 'matched_unconfirmed' ? 'Confirm this is the reimbursement row'
                               : r.status === 'needs_selection' ? 'Needs selection'
                               : r.status === 'no_claims' ? 'No reimbursement row — skipped'
                               : r.status === 'no_match' ? 'No matching row — skipped'
@@ -3882,6 +3965,25 @@ export default function Dashboard() {
                           </p>
                         )}
 
+                        {!committed && r.status === 'matched_unconfirmed' && (
+                          <div className="mt-2 space-y-1.5">
+                            <p className="text-xs text-amber-800">
+                              This system doesn't track how a claim row was created, and this row has no reimbursement
+                              data on it yet (no insurance reimbursement, patient paid/due, claim #, or check info) —
+                              it could be the right reimbursement row before an EOB adds payment info, or it could be a
+                              manual/legacy entry. Confirm this is the correct row before saving.
+                            </p>
+                            <label className="flex items-center gap-2 text-xs font-medium text-amber-900">
+                              <input
+                                type="checkbox"
+                                checked={!!cms1500ProvenanceConfirmations[r.lineKey]}
+                                onChange={(e) => setCms1500ProvenanceConfirmations(prev => ({ ...prev, [r.lineKey]: e.target.checked }))}
+                              />
+                              Yes, this is the correct reimbursement row — apply visit/diagnosis/modifier/units to it.
+                            </label>
+                          </div>
+                        )}
+
                         {!committed && r.status === 'needs_selection' && (
                           <div className="mt-2">
                             <Label className="text-xs text-amber-800 font-semibold">
@@ -3898,6 +4000,7 @@ export default function Dashboard() {
                                 {r.candidates.map(c => (
                                   <SelectItem key={c.id} value={c.id}>
                                     Period {c.authPeriod} — Charge ${c.chargeAmount != null ? c.chargeAmount.toFixed(2) : '—'}, Reimb. ${c.insuranceReimbursement != null ? c.insuranceReimbursement.toFixed(2) : '—'}
+                                    {!c.hasReimbursementEvidence ? ' (no reimbursement data recorded)' : ''}
                                   </SelectItem>
                                 ))}
                               </SelectContent>
@@ -3927,6 +4030,7 @@ export default function Dashboard() {
                     setCms1500Preview(null);
                     setCms1500Lines([]);
                     setCms1500Selections({});
+                    setCms1500ProvenanceConfirmations({});
                     setCms1500CommitResults(null);
                   }}
                 >

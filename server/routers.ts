@@ -896,12 +896,21 @@ export const appRouter = router({
      * CMS1500 enrichment, step 1 — preview only, no writes.
      *
      * For each CMS1500 line (identified by its date of service + CPT
-     * code(s)), finds existing Reimbursement/EOB claim rows for this patient
-     * across EVERY auth period (never just their latest) and classifies the
-     * result: exactly one candidate -> 'matched', none -> 'no_match' (or
-     * 'no_claims' if the patient has no claim rows at all, meaning the
-     * reimbursement file was never uploaded), more than one ->
-     * 'needs_selection' (staff must pick which row in the client UI).
+     * code(s)), finds existing claim rows for this patient across EVERY auth
+     * period (never just their latest) and classifies the result:
+     *   - 0 candidates -> 'no_match' (or 'no_claims' if the patient has no
+     *     claim rows at all, meaning the reimbursement file was never
+     *     uploaded)
+     *   - 1 candidate WITH reimbursement evidence (see
+     *     Cms1500EnrichmentCandidate.hasReimbursementEvidence) -> 'matched',
+     *     safe to auto-apply
+     *   - 1 candidate with NO reimbursement evidence -> 'matched_unconfirmed'
+     *     — claims_records has no provenance column, so a lone match could
+     *     be a manual entry or a legacy/pre-fix CMS1500-only row rather than
+     *     an actual reimbursement row; this is disclosed to staff and
+     *     requires an explicit confirmation click before it's included in
+     *     the commit, never auto-applied like a confirmed 'matched' line
+     *   - 2+ candidates -> 'needs_selection' (staff must pick which row)
      */
     cms1500EnrichmentPreview: normalProtectedProcedure
       .input(z.object({
@@ -925,7 +934,8 @@ export const appRouter = router({
             return { lineKey: line.lineKey, status, candidates: [] as Cms1500EnrichmentCandidateDTO[] };
           }
           if (candidates.length === 1) {
-            return { lineKey: line.lineKey, status: 'matched' as const, candidates, claimRecordId: candidates[0].id };
+            const status: 'matched' | 'matched_unconfirmed' = candidates[0].hasReimbursementEvidence ? 'matched' : 'matched_unconfirmed';
+            return { lineKey: line.lineKey, status, candidates, claimRecordId: candidates[0].id };
           }
           return { lineKey: line.lineKey, status: 'needs_selection' as const, candidates };
         }));
@@ -1089,6 +1099,18 @@ export const appRouter = router({
           skippedNoMatch?: number;
           skippedNoReimbursementUploaded?: number;
           skippedNeedsSelection?: number;
+          skippedUnconfirmedProvenance?: number;
+          // Per-line detail for every cms1500 line skipped above -- never
+          // just a count. Lets staff see exactly which dates/CPTs need
+          // attention and routes them to the single-patient CMS1500 review
+          // (cms1500EnrichmentPreview/Commit), which supports both the
+          // multi-candidate selection and the unconfirmed-provenance
+          // confirmation this bulk flow can't offer inline.
+          skippedCms1500Lines?: Array<{
+            dateOfService: string | null;
+            cptCodes: string | null;
+            reason: 'no_match' | 'no_reimbursement_uploaded' | 'needs_selection' | 'unconfirmed_provenance' | 'invalid_date';
+          }>;
         }> = [];
 
         for (let groupIndex = 0; groupIndex < input.patientGroups.length; groupIndex++) {
@@ -1145,6 +1167,8 @@ export const appRouter = router({
           let skippedNoMatch = 0;
           let skippedNoReimbursementUploaded = 0;
           let skippedNeedsSelection = 0;
+          let skippedUnconfirmedProvenance = 0;
+          const skippedCms1500Lines: Array<{ dateOfService: string | null; cptCodes: string | null; reason: 'no_match' | 'no_reimbursement_uploaded' | 'needs_selection' | 'unconfirmed_provenance' | 'invalid_date' }> = [];
           try {
             if (uploadType === 'cms1500') {
               // CMS1500 never creates or writes a financial row. Each line is
@@ -1169,14 +1193,37 @@ export const appRouter = router({
                     }];
                 const dos = parseDate(claim.dateOfService);
                 for (const line of lines) {
-                  if (!dos) { skippedNoMatch++; continue; }
+                  if (!dos) {
+                    skippedNoMatch++;
+                    skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'invalid_date' });
+                    continue;
+                  }
                   const candidates = await findCms1500EnrichmentCandidates(matchedPatient.id, dos, line.cptCodes ?? null);
                   if (candidates.length === 0) {
-                    if (hasAnyClaims) skippedNoMatch++; else skippedNoReimbursementUploaded++;
+                    if (hasAnyClaims) {
+                      skippedNoMatch++;
+                      skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'no_match' });
+                    } else {
+                      skippedNoReimbursementUploaded++;
+                      skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'no_reimbursement_uploaded' });
+                    }
                     continue;
                   }
                   if (candidates.length > 1) {
                     skippedNeedsSelection++;
+                    skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'needs_selection' });
+                    continue;
+                  }
+                  if (!candidates[0].hasReimbursementEvidence) {
+                    // claims_records has no provenance column -- a lone
+                    // match with none of the reimbursement-only fields ever
+                    // set could be a manual entry or a legacy/pre-fix
+                    // CMS1500-only row rather than an actual reimbursement
+                    // row. This bulk flow has no per-line confirmation UI,
+                    // so it skips rather than guessing; staff can confirm it
+                    // explicitly via the single-patient CMS1500 flow.
+                    skippedUnconfirmedProvenance++;
+                    skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'unconfirmed_provenance' });
                     continue;
                   }
                   await applyCms1500Enrichment({
@@ -1254,6 +1301,8 @@ export const appRouter = router({
               ...(skippedNoMatch > 0 ? { skippedNoMatch } : {}),
               ...(skippedNoReimbursementUploaded > 0 ? { skippedNoReimbursementUploaded } : {}),
               ...(skippedNeedsSelection > 0 ? { skippedNeedsSelection } : {}),
+              ...(skippedUnconfirmedProvenance > 0 ? { skippedUnconfirmedProvenance } : {}),
+              ...(skippedCms1500Lines.length > 0 ? { skippedCms1500Lines } : {}),
             });
           } catch (err: any) {
             results.push({

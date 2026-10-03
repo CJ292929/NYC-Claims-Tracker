@@ -1267,7 +1267,29 @@ export type Cms1500EnrichmentCandidate = {
   diagnosisCodes: string | null;
   modifier: string | null;
   unitsBilled: number | null;
+  // claims_records has no column recording how a row was created (manual
+  // entry, a legacy/pre-fix CMS1500 insert, or an actual Reimbursement/EOB
+  // upload) — true provenance is unavailable. This is a best-effort proxy:
+  // true when at least one field that ONLY a Reimbursement/EOB upload ever
+  // writes is present (not null) on the row, INCLUDING an explicit zero —
+  // a denied or zero-payment EOB line is still a real reimbursement row, so
+  // a zero value counts as evidence the same as a positive one. False means
+  // every one of those fields is still null, which is exactly what a bare
+  // manual entry or an old pre-fix CMS1500-only insert would look like —
+  // callers must not label that case "matched" without staff confirmation.
+  hasReimbursementEvidence: boolean;
 };
+
+const REIMBURSEMENT_EVIDENCE_COLUMNS = [
+  "insurance_reimbursement",
+  "patient_amount_paid",
+  "patient_amount_due",
+  "oa_claim_number",
+  "check_date",
+  "check_number_virtual_card",
+  "reference_no",
+  "payment_received",
+] as const;
 
 /**
  * Finds existing claims_records rows for this patient that share the exact
@@ -1276,7 +1298,8 @@ export type Cms1500EnrichmentCandidate = {
  * Reimbursement row for an older visit may have been imported before a
  * CMS1500 upload that enriches it arrives. Returns all matches; the caller
  * decides what to do with 0 (no match / upload reimbursement first), 1
- * (auto-match), or 2+ (requires explicit staff selection) results.
+ * (auto-match if hasReimbursementEvidence, else needs confirmation), or 2+
+ * (requires explicit staff selection) results.
  */
 export async function findCms1500EnrichmentCandidates(
   patientId: string,
@@ -1286,7 +1309,12 @@ export async function findCms1500EnrichmentCandidates(
   const dosStr = dateOfService.toISOString().split("T")[0];
   let query = supabase
     .from("claims_records")
-    .select("id, auth_period, charge_amount, insurance_reimbursement, patient_amount_paid, patient_amount_due, visit_number, diagnosis_codes, modifier, units_billed")
+    .select([
+      "id", "auth_period", "charge_amount", "insurance_reimbursement",
+      "patient_amount_paid", "patient_amount_due", "visit_number",
+      "diagnosis_codes", "modifier", "units_billed",
+      ...REIMBURSEMENT_EVIDENCE_COLUMNS,
+    ].join(", "))
     .eq("patient_id", patientId)
     .eq("date_of_service", dosStr);
 
@@ -1308,6 +1336,7 @@ export async function findCms1500EnrichmentCandidates(
     diagnosisCodes: r.diagnosis_codes,
     modifier: r.modifier,
     unitsBilled: r.units_billed,
+    hasReimbursementEvidence: REIMBURSEMENT_EVIDENCE_COLUMNS.some(col => r[col] !== null && r[col] !== undefined),
   }));
 }
 
@@ -1373,10 +1402,37 @@ export async function applyCms1500Enrichment(params: {
 
   if (Object.keys(patch).length === 0) return; // nothing to enrich — idempotent no-op
 
-  const { error } = await supabase.from("claims_records").update(patch).eq("id", params.claimRecordId);
+  // Re-applies the same patient/date/CPT predicate on the UPDATE itself (not
+  // just the pre-check above) and requests the updated row(s) back —
+  // closing the gap between the ownership check and the write (the row
+  // could be deleted, or a concurrent edit could change its date/CPT, in
+  // that window) and detecting the case where Postgres reports no error but
+  // genuinely patched zero rows. Either way this must throw, never return
+  // successfully having silently changed nothing.
+  let updateQuery = supabase
+    .from("claims_records")
+    .update(patch)
+    .eq("id", params.claimRecordId)
+    .eq("patient_id", params.patientId)
+    .eq("date_of_service", dosStr);
+  updateQuery = params.cptCodes ? updateQuery.eq("cpt_codes", params.cptCodes) : updateQuery.is("cpt_codes", null);
+
+  const { data: updated, error } = await updateQuery.select("id");
   if (error) {
     console.error("[Supabase] applyCms1500Enrichment (update):", error);
     throw error;
+  }
+  if (!updated || updated.length === 0) {
+    throw new Error("Selected claim row does not belong to this patient or no longer matches the service date/CPT code.");
+  }
+  if (updated.length > 1) {
+    // patient_id + date_of_service + cpt_codes is the same match key
+    // upsertClaimRecord relies on being unique per row; more than one row
+    // satisfying it here means that invariant broke, not that this call did
+    // something wrong -- surfacing it loudly beats silently patching
+    // multiple rows under one staff-reviewed claimRecordId.
+    console.error(`[Supabase] applyCms1500Enrichment: update matched ${updated.length} rows for claimRecordId ${params.claimRecordId} -- expected exactly 1.`);
+    throw new Error("Update affected more than one row unexpectedly — aborting rather than risk patching the wrong claim.");
   }
 }
 

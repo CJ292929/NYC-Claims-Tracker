@@ -23,7 +23,13 @@ function makeFakeClaimsTable(seed: Row[] = []) {
     let pendingFilter: Partial<Row> = {};
     let pendingCptIsNull = false;
     let isCountHead = false;
+    let pendingUpdate: Record<string, unknown> | null = null;
 
+    // update()/eq()/is() share the SAME filter accumulator as a plain
+    // select -- this lets the real db.ts code chain
+    // .update(patch).eq(...).eq(...).eq(...).select("id") exactly like
+    // Supabase does, re-applying the full patient/date/CPT predicate on the
+    // write itself rather than trusting an earlier separate check.
     const chain: Record<string, (...args: unknown[]) => unknown> = {
       select: (_cols?: string, opts?: { count?: string; head?: boolean }) => {
         if (opts?.head) isCountHead = true;
@@ -46,24 +52,26 @@ function makeFakeClaimsTable(seed: Row[] = []) {
         if (matches.length > 1) throw new Error("maybeSingle() matched more than one row — test setup bug");
         return Promise.resolve({ data: matches[0] ? { id: matches[0].id } : null, error: null });
       },
-      update: (patch: Record<string, unknown>) => ({
-        eq: (_col: string, id: string) => {
-          const row = rows.find(r => r.id === id);
-          if (row) Object.assign(row, patch);
-          return Promise.resolve({ data: null, error: null });
-        },
-      }),
+      update: (patch: Record<string, unknown>) => {
+        pendingUpdate = patch;
+        return chain;
+      },
     };
 
-    // findCms1500EnrichmentCandidates / patientHasAnyClaimRecords don't call
-    // .maybeSingle() -- they await the query object directly (array select or
-    // head-count select). Give the chain a thenable so `await query` resolves.
+    // findCms1500EnrichmentCandidates / patientHasAnyClaimRecords / the
+    // final applyCms1500Enrichment update+select don't call .maybeSingle()
+    // -- they await the query object directly. Give the chain a thenable so
+    // `await query` resolves.
     (chain as any)[Symbol.toPrimitive] = undefined;
     const resolveList = () => {
       const matches = rows.filter(r =>
         Object.entries(pendingFilter).every(([k, v]) => r[k] === v) &&
         (pendingCptIsNull ? r.cpt_codes == null : true)
       );
+      if (pendingUpdate) {
+        for (const r of matches) Object.assign(r, pendingUpdate);
+        return { data: matches.map(r => ({ id: r.id })), error: null };
+      }
       if (isCountHead) return { data: null, error: null, count: matches.length };
       return { data: matches, error: null };
     };
@@ -117,6 +125,48 @@ describe("findCms1500EnrichmentCandidates", () => {
     // must NOT be treated as describing the same service.
     const candidates = await findCms1500EnrichmentCandidates(PATIENT_A, SEP_1, "97110");
     expect(candidates).toHaveLength(0);
+  });
+
+  it("hasReimbursementEvidence is false when every reimbursement-only field is null (looks like a manual/legacy-CMS1500 row, not a confirmed reimbursement row)", async () => {
+    const { from } = makeFakeClaimsTable([
+      {
+        id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110",
+        charge_amount: 100, insurance_reimbursement: null, patient_amount_paid: null, patient_amount_due: null,
+        oa_claim_number: null, check_date: null, check_number_virtual_card: null, reference_no: null, payment_received: null,
+      },
+    ]);
+    tableMock.from = from;
+
+    const [candidate] = await findCms1500EnrichmentCandidates(PATIENT_A, MAY_19, "97110");
+    expect(candidate.hasReimbursementEvidence).toBe(false);
+  });
+
+  it("hasReimbursementEvidence is true when a reimbursement field is an explicit zero -- a denied/zero-payment EOB line is still real evidence", async () => {
+    const { from } = makeFakeClaimsTable([
+      {
+        id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110",
+        charge_amount: 100, insurance_reimbursement: 0, patient_amount_paid: 0, patient_amount_due: 0,
+        oa_claim_number: null, check_date: null, check_number_virtual_card: null, reference_no: null, payment_received: null,
+      },
+    ]);
+    tableMock.from = from;
+
+    const [candidate] = await findCms1500EnrichmentCandidates(PATIENT_A, MAY_19, "97110");
+    expect(candidate.hasReimbursementEvidence).toBe(true);
+  });
+
+  it("hasReimbursementEvidence is true when only a non-money field like oa_claim_number or check_date is present", async () => {
+    const { from } = makeFakeClaimsTable([
+      {
+        id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110",
+        charge_amount: 100, insurance_reimbursement: null, patient_amount_paid: null, patient_amount_due: null,
+        oa_claim_number: "OA-123", check_date: null, check_number_virtual_card: null, reference_no: null, payment_received: null,
+      },
+    ]);
+    tableMock.from = from;
+
+    const [candidate] = await findCms1500EnrichmentCandidates(PATIENT_A, MAY_19, "97110");
+    expect(candidate.hasReimbursementEvidence).toBe(true);
   });
 
   it("a different patient's row is never returned as a candidate", async () => {
@@ -265,4 +315,27 @@ describe("applyCms1500Enrichment", () => {
       applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: SEP_1, cptCodes: "97110", modifier: "GP" })
     ).rejects.toThrow(/does not belong|no longer matches/i);
   });
+
+  it("throws rather than reporting success when the target row is deleted between the ownership check and the write (stale-target race)", async () => {
+    const { from, rows } = makeFakeClaimsTable([
+      { id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110", visit_number: null },
+    ]);
+    let callCount = 0;
+    // applyCms1500Enrichment calls supabase.from("claims_records") twice:
+    // once for the ownership pre-check (passes -- the row still exists),
+    // once for the actual update+select. Simulate a concurrent delete
+    // landing in between -- the update's own re-applied predicate must then
+    // match zero rows, and that must throw, not resolve successfully having
+    // changed nothing.
+    tableMock.from = ((table: string) => {
+      callCount++;
+      if (callCount === 2) rows.length = 0;
+      return from(table);
+    }) as typeof from;
+
+    await expect(
+      applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: MAY_19, cptCodes: "97110", modifier: "GP" })
+    ).rejects.toThrow(/does not belong|no longer matches/i);
+  });
+
 });
