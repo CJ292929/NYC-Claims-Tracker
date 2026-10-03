@@ -18,7 +18,7 @@ import { join } from 'path';
 import { invokeLLM } from './_core/llm';
 import { ENV } from './_core/env';
 import { requireAuthenticatedUser } from './_core/requireAuth';
-import { tryTemplateExtraction, parseCMS1500, type ExtractedClaim, type PatientClaimGroup } from './insuranceTemplates';
+import { tryTemplateExtraction, parseCMS1500, PatientBoundaryError, type ExtractedClaim, type PatientClaimGroup } from './insuranceTemplates';
 import { extractClaimsWithAI, detectInsuranceType, KNOWN_INSURER_NAMES, type ExtractionSource } from './aiClaimExtractor';
 
 // requireAuthenticatedUser (server/_core/requireAuth.ts) runs before multer
@@ -670,7 +670,26 @@ export function registerClaimUploadRoute(app: Express) {
           }
         }
         console.log('[ClaimUpload] Stage 4/7 — Template detection (reimbursement)...');
-        const templateResult = tryTemplateExtraction(reimbursementText, originalname);
+        let templateResult: ReturnType<typeof tryTemplateExtraction>;
+        try {
+          templateResult = tryTemplateExtraction(reimbursementText, originalname);
+        } catch (err) {
+          // A template parser (e.g. parseMeritainEOBWithGroups) determined it
+          // cannot reliably tell two patients' sections apart in this
+          // document. This must stop the request here: never fall through to
+          // AI extraction below (an LLM could still produce a confident-
+          // looking guess that silently misattributes a claim) and never
+          // report success with zero/partial claims -- both would hide the
+          // exact failure this error exists to surface.
+          if (err instanceof PatientBoundaryError) {
+            console.error('[ClaimUpload] Patient boundary extraction failure:', err.message);
+            res.status(422).json({
+              error: 'Patient boundaries could not be determined. Review the document before importing.',
+            });
+            return;
+          }
+          throw err;
+        }
         if (templateResult && templateResult.claims.length > 0) {
           if (hasMissingFields(templateResult.claims, REIMBURSEMENT_CLAIM_FIELDS_TO_BACKFILL, REIMBURSEMENT_LINE_FIELDS_TO_BACKFILL)) {
             try {

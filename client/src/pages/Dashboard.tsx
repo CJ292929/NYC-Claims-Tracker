@@ -15,7 +15,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
-import { findMatchingPatient, fuzzyNameMatch } from '@/lib/nameMatch';
+import { findMatchingPatient, fuzzyNameMatch, classifyPatientMatch } from '@shared/nameMatch';
 import { parseCsvText, parseCsvRow, normalizePatientName, emptyCsvImportSummary, type CsvImportSummary } from '@/lib/csvImport';
 import { matchesPatientFilters } from '@/lib/patientFilters';
 import { routeToNavSection, navSectionToRoute } from '@/lib/navSection';
@@ -453,6 +453,11 @@ export default function Dashboard() {
   // Multi-patient EOB: groups from the server (one group per detected patient)
   const [eobPatientGroups, setEobPatientGroups] = useState<Array<{ patientName: string; claims: any[] }> | null>(null);
   const [isBulkImporting, setIsBulkImporting] = useState(false);
+  // Staff-confirmed patient for a group whose extracted name only produced a
+  // "candidate" (e.g. differs by a spelled-out middle name) rather than a
+  // safe automatic match — keyed by index into eobPatientGroups. Never
+  // populated automatically; only an explicit staff selection sets this.
+  const [manualMatchOverrides, setManualMatchOverrides] = useState<Record<number, string>>({});
   const [bulkImportResults, setBulkImportResults] = useState<Array<{
     patientName: string;
     matched: boolean;
@@ -461,6 +466,7 @@ export default function Dashboard() {
     authPeriod?: number;
     claimsImported: number;
     error?: string;
+    ambiguousCandidates?: number;
   }> | null>(null);
   const [claimFormData, setClaimFormData] = useState({
     placeOfService: '',
@@ -1137,6 +1143,7 @@ export default function Dashboard() {
     setEditingExtractedClaims([]);
     setEobPatientGroups(null);
     setBulkImportResults(null);
+    setManualMatchOverrides({});
     try {
       const formData = new FormData();
       formData.append('file', file);
@@ -1264,8 +1271,11 @@ export default function Dashboard() {
             if (targetClaims.length === 0) {
               console.log('[EOB Upload] No claims in flat response matched active patient; falling back to bulk review.');
               setEobPatientGroups(json.patientGroups);
+              const { candidates } = classifyPatientMatch(activePatient.name, json.patientGroups.map((g: any) => ({ name: g.patientName })));
               toast.error(
-                `No data found for ${activePatient.name} in this file. Detected patients: ${json.patientGroups.map((g: any) => g.patientName).join(', ')} — review below.`
+                candidates.length > 0
+                  ? `No safe match for ${activePatient.name} — but "${candidates[0].name}" in this file looks similar (e.g. a middle name). Review and confirm below before importing.`
+                  : `No data found for ${activePatient.name} in this file. Detected patients: ${json.patientGroups.map((g: any) => g.patientName).join(', ')} — review below.`
               );
               return;
             }
@@ -1356,8 +1366,21 @@ export default function Dashboard() {
             (c: any) => c.patientName && fuzzyNameMatch(c.patientName, activePatient.name)
           );
           if (filtered.length === 0) {
+            // No patientGroups metadata came back from the server for this
+            // response shape, so build an ad-hoc group per distinct name
+            // directly from the flat claims list -- this is what lets the
+            // bulk review UI (and its candidate-confirmation flow for a
+            // middle-name-only difference) render instead of a dead end.
+            const adHocGroups = Array.from(distinctNames).map(name => ({
+              patientName: name as string,
+              claims: json.claims.filter((c: any) => c.patientName === name),
+            }));
+            setEobPatientGroups(adHocGroups);
+            const { candidates } = classifyPatientMatch(activePatient.name, adHocGroups.map(g => ({ name: g.patientName })));
             toast.error(
-              `No data found for ${activePatient.name} in this file. Detected patients: ${Array.from(distinctNames).join(', ')}.`
+              candidates.length > 0
+                ? `No safe match for ${activePatient.name} — but "${candidates[0].name}" in this file looks similar (e.g. a middle name). Review and confirm below before importing.`
+                : `No data found for ${activePatient.name} in this file. Detected patients: ${Array.from(distinctNames).join(', ')} — review below.`
             );
             return;
           }
@@ -1794,7 +1817,7 @@ export default function Dashboard() {
                   <SelectValue placeholder="Select claims status" />
                 </SelectTrigger>
                 <SelectContent>
-                  {CLAIM_STATUS_FILTERS.filter(f => f.value !== 'all' && f.value !== 'none').map(f => (
+                  {CLAIM_STATUS_FILTERS.filter(f => f.value !== 'all').map(f => (
                     <SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>
                   ))}
                 </SelectContent>
@@ -1823,7 +1846,7 @@ export default function Dashboard() {
                     authValidUntil: editPatientAuthValidUntil
                       ? new Date(editPatientAuthValidUntil + 'T00:00:00Z').getTime()
                       : null,
-                    claimsStatus: editPatientClaimsStatus as 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted',
+                    claimsStatus: (editPatientClaimsStatus || 'none') as 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | 'none',
                   });
                   setIsEditPatientOpen(false);
                 } catch {
@@ -1953,7 +1976,7 @@ export default function Dashboard() {
                 setEditPatientInsurance(activePatient.insurance);
                 setEditPatientAuthDate(toInputDate(activePatient.authDate));
                 setEditPatientAuthValidUntil(msToInputDate(activePatient.authValidUntil));
-                setEditPatientClaimsStatus(activePatient.claimsStatus);
+                setEditPatientClaimsStatus(activePatient.claimsStatus || 'none');
                 setIsEditPatientOpen(true);
               }}
               aria-label="Edit patient"
@@ -3353,6 +3376,7 @@ export default function Dashboard() {
             setEditingExtractedClaims([]);
             setEobPatientGroups(null);
             setBulkImportResults(null);
+            setManualMatchOverrides({});
           }
         }}
       >
@@ -3418,9 +3442,13 @@ export default function Dashboard() {
                         {r.matched && r.dashboardName && (
                           <p className="text-xs text-gray-500">Matched: {r.dashboardName} · Auth Period {r.authPeriod}</p>
                         )}
-                        {!r.matched && (
+                        {!r.matched && r.ambiguousCandidates ? (
+                          <p className="text-xs text-amber-700">
+                            {r.ambiguousCandidates} possible match{r.ambiguousCandidates !== 1 ? 'es' : ''} found but not confirmed — skipped
+                          </p>
+                        ) : !r.matched ? (
                           <p className="text-xs text-yellow-700">Not found in dashboard — skipped</p>
-                        )}
+                        ) : null}
                         {r.error && (
                           <p className="text-xs text-red-600">Error: {r.error}</p>
                         )}
@@ -3449,6 +3477,7 @@ export default function Dashboard() {
                         setShowClaimUploadDialog(false);
                         setEobPatientGroups(null);
                         setBulkImportResults(null);
+                        setManualMatchOverrides({});
                       }}
                       className="bg-brand-blue hover:bg-brand-blue-dark text-white"
                     >
@@ -3465,26 +3494,56 @@ export default function Dashboard() {
                   </p>
                   <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-1">
                     {eobPatientGroups.map((group, gIdx) => {
-                      const matchedPatient = findMatchingPatient(group.patientName, patients);
+                      const { confirmed: matchedPatient, candidates } = classifyPatientMatch(group.patientName, patients);
+                      const overriddenId = manualMatchOverrides[gIdx];
+                      const confirmedCandidate = overriddenId ? patients.find(p => p.id === overriddenId) ?? null : null;
+                      const effectiveMatch = matchedPatient ?? confirmedCandidate;
+                      const needsConfirmation = !effectiveMatch && candidates.length > 0;
                       return (
                         <div key={gIdx} className={`rounded-lg border ${
-                          matchedPatient ? 'border-green-300 bg-green-50' : 'border-yellow-300 bg-yellow-50'
+                          effectiveMatch ? 'border-green-300 bg-green-50' : needsConfirmation ? 'border-amber-300 bg-amber-50' : 'border-yellow-300 bg-yellow-50'
                         }`}>
                           <div className="flex items-center justify-between px-4 py-2 border-b border-inherit">
                             <div className="flex items-center gap-2">
-                              {matchedPatient ? (
+                              {effectiveMatch ? (
                                 <span className="text-green-700 font-bold text-sm">✓ {group.patientName}</span>
+                              ) : needsConfirmation ? (
+                                <span className="text-amber-700 font-bold text-sm">? {group.patientName}</span>
                               ) : (
                                 <span className="text-yellow-700 font-bold text-sm">⚠ {group.patientName}</span>
                               )}
                               {matchedPatient ? (
                                 <span className="text-xs text-green-600 bg-green-100 px-2 py-0.5 rounded">Matched in dashboard</span>
+                              ) : confirmedCandidate ? (
+                                <span className="text-xs text-green-600 bg-green-100 px-2 py-0.5 rounded">Confirmed: {confirmedCandidate.name}</span>
+                              ) : needsConfirmation ? (
+                                <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded">Possible match — name differs (e.g. middle name) — confirm below</span>
                               ) : (
                                 <span className="text-xs text-yellow-600 bg-yellow-100 px-2 py-0.5 rounded">Not found — will be skipped</span>
                               )}
                             </div>
                             <span className="text-xs text-gray-500">{group.claims.length} date group{group.claims.length !== 1 ? 's' : ''}</span>
                           </div>
+                          {needsConfirmation && (
+                            <div className="px-4 py-2 border-b border-inherit bg-white/60">
+                              <Label className="text-xs text-amber-800 font-semibold">
+                                This name wasn't an exact/safe match. Confirm which dashboard patient it belongs to, or leave unselected to skip it:
+                              </Label>
+                              <Select
+                                value={overriddenId ?? ''}
+                                onValueChange={(v) => setManualMatchOverrides(prev => ({ ...prev, [gIdx]: v }))}
+                              >
+                                <SelectTrigger className="mt-1 w-full max-w-sm bg-white">
+                                  <SelectValue placeholder="Select patient to confirm match..." />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {candidates.map(c => (
+                                    <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          )}
                           <div className="overflow-x-auto">
                             <table className="w-full text-xs border-collapse">
                               <thead>
@@ -3540,6 +3599,7 @@ export default function Dashboard() {
                         setShowClaimUploadDialog(false);
                         setEobPatientGroups(null);
                         setBulkImportResults(null);
+                        setManualMatchOverrides({});
                       }}
                     >
                       Cancel
@@ -3549,7 +3609,17 @@ export default function Dashboard() {
                       onClick={async () => {
                         setIsBulkImporting(true);
                         try {
-                          await bulkImportFromEOB.mutateAsync({ patientGroups: eobPatientGroups, uploadType: claimUploadType });
+                          await bulkImportFromEOB.mutateAsync({
+                            patientGroups: eobPatientGroups,
+                            uploadType: claimUploadType,
+                            // Explicit staff confirmations for groups that only
+                            // produced an ambiguous "candidate" match (see
+                            // classifyPatientMatch) — never auto-applied.
+                            confirmedMatches: Object.entries(manualMatchOverrides).map(([groupIndex, patientId]) => ({
+                              groupIndex: Number(groupIndex),
+                              patientId,
+                            })),
+                          });
                         } finally {
                           setIsBulkImporting(false);
                         }

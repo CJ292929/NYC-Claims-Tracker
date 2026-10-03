@@ -237,6 +237,9 @@ function toVisitRecord(row) {
     dateAshSubmitted: row.date_ash_submitted ? /* @__PURE__ */ new Date(row.date_ash_submitted + "T00:00:00Z") : null,
     authStatus: row.auth_status ?? "none",
     insuranceCompany: row.insurance_company ?? null,
+    totalInsuranceReimbursement: row.total_insurance_reimbursement ?? null,
+    totalPatientDue: row.total_patient_due ?? null,
+    totalPatientPaid: row.total_patient_paid ?? null,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at)
   };
@@ -397,7 +400,10 @@ async function createVisitRecord(data) {
     date_of_service: data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null,
     new_auth: data.newAuth ?? null,
     date_ash_submitted: data.dateAshSubmitted ? data.dateAshSubmitted.toISOString().split("T")[0] : null,
-    auth_status: data.authStatus ?? "none"
+    auth_status: data.authStatus ?? "none",
+    total_insurance_reimbursement: data.totalInsuranceReimbursement ?? null,
+    total_patient_due: data.totalPatientDue ?? null,
+    total_patient_paid: data.totalPatientPaid ?? null
   }).select("id").single();
   if (error) {
     console.error("[Supabase] createVisitRecord:", error);
@@ -419,6 +425,9 @@ async function updateVisitRecord(id, data) {
     update.date_ash_submitted = data.dateAshSubmitted ? data.dateAshSubmitted.toISOString().split("T")[0] : null;
   }
   if (data.authStatus !== void 0) update.auth_status = data.authStatus;
+  if (data.totalInsuranceReimbursement !== void 0) update.total_insurance_reimbursement = data.totalInsuranceReimbursement;
+  if (data.totalPatientDue !== void 0) update.total_patient_due = data.totalPatientDue;
+  if (data.totalPatientPaid !== void 0) update.total_patient_paid = data.totalPatientPaid;
   const { error } = await supabase.from("visit_records").update(update).eq("id", id);
   if (error) {
     console.error("[Supabase] updateVisitRecord:", error);
@@ -956,9 +965,10 @@ var init_db = __esm({
   }
 });
 
-// server/nameMatch.ts
+// shared/nameMatch.ts
 var nameMatch_exports = {};
 __export(nameMatch_exports, {
+  classifyPatientMatch: () => classifyPatientMatch,
   findMatchingPatient: () => findMatchingPatient,
   fuzzyNameMatch: () => fuzzyNameMatch
 });
@@ -1020,9 +1030,35 @@ function findMatchingPatient(eobName, patients) {
   if (exact) return exact;
   return patients.find((p) => fuzzyNameMatch(eobName, p.name)) ?? null;
 }
+function isNameSubsequence(shorter, longer) {
+  let i = 0;
+  for (const token of longer) {
+    if (token === shorter[i]) i++;
+    if (i === shorter.length) return true;
+  }
+  return shorter.length === 0;
+}
+function isCandidateNameMatch(eobName, dashName) {
+  if (!eobName || !dashName) return false;
+  const tokensEob = tokenize(eobName);
+  const tokensDash = tokenize(dashName);
+  if (tokensEob.length === tokensDash.length) return false;
+  if (tokensEob.length < 2 || tokensDash.length < 2) return false;
+  const [shorter, longer] = tokensEob.length < tokensDash.length ? [tokensEob, tokensDash] : [tokensDash, tokensEob];
+  return isNameSubsequence(shorter, longer);
+}
+function classifyPatientMatch(eobName, patients) {
+  const exactMatches = patients.filter((p) => normalizeName(p.name) === normalizeName(eobName));
+  const safeMatches = exactMatches.length > 0 ? exactMatches : patients.filter((p) => fuzzyNameMatch(eobName, p.name));
+  if (safeMatches.length === 1) return { confirmed: safeMatches[0], candidates: [] };
+  if (safeMatches.length > 1) {
+    return { confirmed: null, candidates: safeMatches };
+  }
+  return { confirmed: null, candidates: patients.filter((p) => isCandidateNameMatch(eobName, p.name)) };
+}
 var NAME_SUFFIXES;
 var init_nameMatch = __esm({
-  "server/nameMatch.ts"() {
+  "shared/nameMatch.ts"() {
     "use strict";
     NAME_SUFFIXES = /* @__PURE__ */ new Set([
       "JR",
@@ -1988,6 +2024,12 @@ async function invokeLLM(params) {
 init_env();
 
 // server/insuranceTemplates.ts
+var PatientBoundaryError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "PatientBoundaryError";
+  }
+};
 function parseDate(raw) {
   if (!raw) return null;
   const clean = raw.trim();
@@ -2025,7 +2067,8 @@ function parseMeritainEOBWithGroups(text) {
   const epcDraftNo = epcDraftMatch ? epcDraftMatch[1].trim() : null;
   const patientClaimsMap = /* @__PURE__ */ new Map();
   const patientSections = text.split(/(?=Patient:\s+[A-Z])/g);
-  for (let section of patientSections) {
+  for (let sIdx = 0; sIdx < patientSections.length; sIdx++) {
+    let section = patientSections[sIdx];
     if (!section.includes("Claim #:")) continue;
     const claimTotalIdx = section.indexOf("Claim Total:");
     if (claimTotalIdx !== -1) {
@@ -2033,6 +2076,12 @@ function parseMeritainEOBWithGroups(text) {
     }
     const nameMatch = section.match(/Patient:\s+([A-Z][A-Z\s]+?)(?=\s{2,}|\n)/);
     const patientName = nameMatch ? nameMatch[1].trim() : "UNKNOWN";
+    const patientHeaderCount = (section.match(/Patient\s*:\s*[A-Z]/g) || []).length;
+    if (patientHeaderCount > 1) {
+      throw new PatientBoundaryError(
+        `Patient boundaries could not be determined (section ${sIdx} contains ${patientHeaderCount} patient headers that should have been split into separate sections).`
+      );
+    }
     const claimMatch = section.match(/Claim #:\s+([A-Z0-9]+)/);
     const claimNo = claimMatch ? claimMatch[1].trim() : null;
     const groupMatch = section.match(/Group Name\/Check:\s+(\S+)/);
@@ -2450,6 +2499,20 @@ function verifyClaimAgainstSourceText(claim, sourceText) {
   checkAmount("Charge", claim.chargeAmount);
   checkAmount("Reimbursement", claim.insuranceReimbursement);
   checkAmount("Patient due", claim.patientAmountDue);
+  if (claim.unitsBilled != null && claim.cptCodes) {
+    const unitsStr = String(Math.round(claim.unitsBilled));
+    const cptCore = claim.cptCodes.match(/^[A-Z]?\d{4,5}/)?.[0] ?? claim.cptCodes;
+    if (!sourceText.includes(unitsStr)) {
+      warnings.push(`Units ${unitsStr} not found in source text`);
+    } else {
+      const coOccurs = sourceText.split("\n").some(
+        (line) => (line.includes(claim.cptCodes) || line.includes(cptCore)) && line.includes(unitsStr)
+      );
+      if (!coOccurs) {
+        warnings.push(`Units ${unitsStr} not found on the same line as CPT "${claim.cptCodes}" \u2014 possible misattribution`);
+      }
+    }
+  }
   const checkStringField = (label, value) => {
     if (!value) return;
     if (!sourceText.includes(value)) {
@@ -2486,7 +2549,7 @@ async function extractClaimsWithAI(source, uploadType) {
 
 *** CRITICAL: You MUST extract the PATIENT NAME for EACH claim, individually. This is required for matching against the clinic's patient database. ***
 
-*** DOCUMENT-TYPE BOUNDARY: This is a Reimbursement/EOB document. Extract payment-side data \u2014 insuranceReimbursement, patientAmountPaid, patientAmountDue, oaClaimNumber (Claim #), checkDate (Check/Payment Date), and checkNumberVirtualCard (Check/EFT) \u2014 plus dateOfService and cptCodes, which double as the key used to identify which existing claim this payment applies to. Many EOBs also print a per-line "Line Level Information" billing table (Billed Amount, DX/Diagnosis Codes, Modifier, Quantity/Units) alongside the payment columns \u2014 when that table is present, ALSO extract chargeAmount, diagnosisCodes, modifier, and unitsBilled from it (see field list below); leave any of those null only when the document genuinely does not print it. NEVER extract placeOfService \u2014 that comes exclusively from CMS-1500 claim forms (Box 24B) and is never printed on a Reimbursement/EOB. ***
+*** DOCUMENT-TYPE BOUNDARY: This is a Reimbursement/EOB document. Extract payment-side data \u2014 insuranceReimbursement, patientAmountPaid, patientAmountDue, oaClaimNumber (Claim #), checkDate (Check/Payment Date), and checkNumberVirtualCard (Check/EFT) \u2014 plus dateOfService and cptCodes, which double as the key used to identify which existing claim this payment applies to. Many EOBs also print a per-line "Line Level Information" billing table (Billed Amount, DX/Diagnosis Codes, Modifier, Quantity/Units) alongside the payment columns \u2014 when that table is present, ALSO extract chargeAmount, diagnosisCodes, modifier, and unitsBilled from it (see field list below); leave any of those null only when the document genuinely does not print it. Do NOT extract placeOfService for this document type \u2014 leave it null even if a "Place of Service" column happens to be visible (some payer portal exports print one), since it is only ever saved from CMS-1500 uploads (Box 24B) and is discarded for Reimbursement/EOB claims regardless of what you extract. ***
 
 Payers lay these documents out very differently \u2014 a table of many patients on one page, a single-patient web-portal export, a per-claim narrative block, etc. Do not assume there is only one patient name at the top of the document: scan the ENTIRE document and re-identify the patient name at each claim/service-line block, since one EOB commonly covers many different patients (e.g. a check remitting payment for a whole clinic's batch of claims).
 
@@ -2512,6 +2575,7 @@ FIELD NAME VARIATIONS \u2014 the same data point is labeled differently across p
 - Charge (chargeAmount) = the provider's ORIGINAL BILLED charge for this line: "Billed Amount", "Charge", "Submitted Charges", "Amount Charged". This is NOT "Allowed Amount"/"Allowable"/"QPA" (the contracted rate) and NOT "Paid"/"Payable" (what insurance actually paid) \u2014 those are separate columns; do not substitute either of them into chargeAmount.
 - Insurance Reimbursement = the amount the payer actually PAID/will pay: "Paid Amount", "Payable Amount", "Plan Paid", "Claim Payment Amount". This is NOT the same as "Allowed Amount"/"Allowable"/"QPA" \u2014 that is only the contractually recognized rate the patient-responsibility math is based on, and is often larger than what was actually paid (especially out-of-network). If both an "Allowed" and a "Paid"/"Payable" column exist, use the "Paid"/"Payable" one.
 - Patient Due = the patient's owed balance under the plan: "Patient Responsibility", "Patient Resp", "Balance Due". Some EOBs instead print separate "Coinsurance Amount", "Copay Amount", and "Deductible Amount" columns without a single combined "Patient Responsibility" figure \u2014 do NOT sum those three yourself and do NOT write any one of them individually into patientAmountDue or patientAmountPaid; leave patientAmountDue null in that case rather than guessing which figure(s) apply, unless an explicit combined "Patient Responsibility"/"Balance Due" label is also present. Some EOBs separately print a "Not Payable"/"Not Covered" column for amounts the plan simply doesn't cover \u2014 that is a different concept from Patient Responsibility (it's often only billable to the patient if a separate balance-billing agreement applies) \u2014 prefer the explicit "Patient Responsibility" figure when both are present.
+- CRITICAL \u2014 a claim/date's own "Totals" row (which sums all of its service lines) is NEVER a per-line patientAmountDue value. If a date has multiple CPT lines and only ONE Patient Due figure is legible per line (e.g. the individual per-line split is unclear from the layout, but a "Totals" row prints one combined figure for the whole date), assign that combined figure only to the FIRST service line for that date and leave patientAmountDue null on the other lines under the same date \u2014 never copy the same total onto every line just because it's the clearest number nearby. Each line's real, distinct value (when legible) always takes priority over substituting the total.
 - "Allowed Amount" and any per-line "Coinsurance Amount" / "Copay Amount" / "Deductible Amount" columns are not captured by any field in this schema \u2014 do not write them into chargeAmount, insuranceReimbursement, patientAmountPaid, or patientAmountDue.
 - Claim Number = "Claim ID", "ICN", "Reference #", "Claim #", "Transaction ID", "Control Number"
 - Check/Payment Date = "Payment Date", "Check Date", "Direct Deposit Date", "EFT Date"
@@ -2722,6 +2786,28 @@ ${source.text}` : [
         const sourceLine = findSourceLineForClaim(claim, source.text);
         if (sourceLine) {
           claim.notes = [claim.notes, `\u{1F4C4} Source: "${sourceLine}"`].filter(Boolean).join(" | ");
+        }
+      }
+    }
+    const byDate = /* @__PURE__ */ new Map();
+    for (const claim of normalizedClaims) {
+      if (claim.patientAmountDue == null || !claim.dateOfService) continue;
+      const key = claim.dateOfService;
+      if (!byDate.has(key)) byDate.set(key, []);
+      byDate.get(key).push(claim);
+    }
+    for (const claimsOnDate of Array.from(byDate.values())) {
+      if (claimsOnDate.length < 2) continue;
+      const seen = /* @__PURE__ */ new Map();
+      for (const claim of claimsOnDate) {
+        const amount = claim.patientAmountDue;
+        const countSoFar = seen.get(amount) ?? 0;
+        seen.set(amount, countSoFar + 1);
+        if (countSoFar > 0) {
+          claim.notes = [
+            claim.notes,
+            `\u26A0\uFE0F Patient Due $${amount.toFixed(2)} matches another CPT line on this date \u2014 likely a single combined figure duplicated across lines, not per-line data. Verify against source.`
+          ].filter(Boolean).join(" | ");
         }
       }
     }
@@ -3151,7 +3237,9 @@ function registerClaimUploadRoute(app2) {
           try {
             const detection = await detectInsuranceType(extractedText);
             console.log(`[ClaimUpload] Stage 3/7 \u2014 Template/type detection: ${detection.insurer} (${detection.documentType}, confidence: ${detection.confidence})`);
-            if (detection.confidence > 0.7 && detection.documentType === "cms1500") {
+            const isKnownInsurer = KNOWN_INSURER_NAMES.some((name2) => detection.insurer.toLowerCase().includes(name2));
+            const confidenceThreshold = isKnownInsurer ? 0.9 : 0.7;
+            if (detection.confidence > confidenceThreshold && detection.documentType === "cms1500") {
               uploadType = "cms1500";
               console.log("[ClaimUpload] Auto-detected CMS1500 format");
             }
@@ -3248,7 +3336,19 @@ function registerClaimUploadRoute(app2) {
           }
         }
         console.log("[ClaimUpload] Stage 4/7 \u2014 Template detection (reimbursement)...");
-        const templateResult = tryTemplateExtraction(reimbursementText, originalname);
+        let templateResult;
+        try {
+          templateResult = tryTemplateExtraction(reimbursementText, originalname);
+        } catch (err) {
+          if (err instanceof PatientBoundaryError) {
+            console.error("[ClaimUpload] Patient boundary extraction failure:", err.message);
+            res.status(422).json({
+              error: "Patient boundaries could not be determined. Review the document before importing."
+            });
+            return;
+          }
+          throw err;
+        }
         if (templateResult && templateResult.claims.length > 0) {
           if (hasMissingFields(templateResult.claims, REIMBURSEMENT_CLAIM_FIELDS_TO_BACKFILL, REIMBURSEMENT_LINE_FIELDS_TO_BACKFILL)) {
             try {
@@ -3432,8 +3532,23 @@ async function notifyOwner(payload) {
 // server/_core/trpc.ts
 import { initTRPC, TRPCError as TRPCError2 } from "@trpc/server";
 import superjson from "superjson";
+import { ZodError } from "zod";
 var t = initTRPC.context().create({
-  transformer: superjson
+  transformer: superjson,
+  // Default tRPC behavior surfaces the raw ZodError (a JSON-ish array of
+  // {code, path, message} issues) as `error.message`, which clients then
+  // show verbatim in toasts. Collapse it into one readable sentence per
+  // field instead.
+  errorFormatter(opts) {
+    const { shape, error } = opts;
+    const zodError = error.cause instanceof ZodError ? error.cause : null;
+    if (!zodError) return shape;
+    const message = zodError.issues.map((issue) => {
+      const field = issue.path.join(".") || "input";
+      return `${field}: ${issue.message}`;
+    }).join("; ");
+    return { ...shape, message: message || shape.message };
+  }
 });
 var router = t.router;
 var publicProcedure = t.procedure;
@@ -3563,7 +3678,10 @@ var visitRecordInput = z2.object({
   newAuth: z2.string().nullable().optional(),
   dateAshSubmitted: z2.string().nullable().optional(),
   // ISO date string "YYYY-MM-DD"
-  authStatus: z2.enum(["none", "pending", "approved", "denied"]).optional()
+  authStatus: z2.enum(["none", "pending", "approved", "denied"]).optional(),
+  totalInsuranceReimbursement: z2.number().nullable().optional(),
+  totalPatientDue: z2.number().nullable().optional(),
+  totalPatientPaid: z2.number().nullable().optional()
 });
 function parseDate2(s) {
   if (!s) return null;
@@ -3897,7 +4015,13 @@ var appRouter = router({
         insurance: z2.string().optional(),
         authDate: z2.string().nullable().optional(),
         authValidUntil: z2.number().nullable().optional(),
-        claimsStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted"]).optional()
+        // "none" is the API-level sentinel for "no claims status set" (see
+        // getPatientById/listPatients in db.ts, which map a NULL claims_status
+        // column to "none"). It is NOT a column value — accepting it here and
+        // translating it to `null` below lets the edit form round-trip an
+        // unset status without that NULL ever being asked to match the
+        // 7-value DB enum, which is what previously threw invalid_value.
+        claimsStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "none"]).optional()
       })
     ).mutation(async ({ input, ctx }) => {
       const { id, authDate, authValidUntil, claimsStatus, ...rest } = input;
@@ -3907,7 +4031,9 @@ var appRouter = router({
         ...rest,
         ...authDate !== void 0 ? { authDate: parseDate2(authDate) } : {},
         ...authValidUntil !== void 0 ? { authValidUntil } : {},
-        ...claimsStatus !== void 0 ? { claimsStatus } : {}
+        // Field omitted entirely → key absent → updatePatient leaves the
+        // column untouched. Field present as "none" → explicit clear (NULL).
+        ...claimsStatus !== void 0 ? { claimsStatus: claimsStatus === "none" ? null : claimsStatus } : {}
       });
       const changes = diffPatientUpdate(before, rest);
       if (changes.length > 0) {
@@ -4244,20 +4370,60 @@ var appRouter = router({
           patientAmountDue: z2.number().nullable().optional(),
           paymentReceived: z2.number().nullable().optional()
         }))
-      }))
+      })),
+      // Staff-confirmed matches for groups whose extracted name only
+      // produced an ambiguous "candidate" in the preview (see
+      // shared/nameMatch.ts classifyPatientMatch) — e.g. a spelled-out
+      // middle name the fuzzy matcher correctly refuses to auto-match.
+      // Index into patientGroups; never used to override a name that
+      // *does* safely fuzzy-match (that path is untouched below).
+      confirmedMatches: z2.array(z2.object({
+        groupIndex: z2.number().int().nonnegative(),
+        patientId: z2.string().uuid()
+      })).optional()
     })).mutation(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
       const allPatients = await getAllPatients();
       const uploadType = input.uploadType ?? "reimbursement";
+      const confirmedMatches = input.confirmedMatches ?? [];
+      const seenGroupIndexes = /* @__PURE__ */ new Set();
+      for (const c of confirmedMatches) {
+        if (c.groupIndex >= input.patientGroups.length) {
+          throw new TRPCError3({
+            code: "BAD_REQUEST",
+            message: `confirmedMatches: groupIndex ${c.groupIndex} does not refer to any group in this import`
+          });
+        }
+        if (seenGroupIndexes.has(c.groupIndex)) {
+          throw new TRPCError3({
+            code: "BAD_REQUEST",
+            message: `confirmedMatches: conflicting duplicate confirmation for groupIndex ${c.groupIndex}`
+          });
+        }
+        seenGroupIndexes.add(c.groupIndex);
+      }
+      const confirmedByIndex = new Map(
+        confirmedMatches.map((c) => [c.groupIndex, c.patientId])
+      );
       const results = [];
-      for (const group of input.patientGroups) {
-        const { findMatchingPatient: findMatchingPatient2 } = await Promise.resolve().then(() => (init_nameMatch(), nameMatch_exports));
-        const matchedPatient = findMatchingPatient2(group.patientName, allPatients);
+      for (let groupIndex = 0; groupIndex < input.patientGroups.length; groupIndex++) {
+        const group = input.patientGroups[groupIndex];
+        const { classifyPatientMatch: classifyPatientMatch2 } = await Promise.resolve().then(() => (init_nameMatch(), nameMatch_exports));
+        const { confirmed: safeMatch, candidates } = classifyPatientMatch2(group.patientName, allPatients);
+        const confirmedId = safeMatch ? null : confirmedByIndex.get(groupIndex) ?? null;
+        const confirmedPatient = confirmedId ? candidates.find((p) => p.id === confirmedId) ?? null : null;
+        const matchedPatient = safeMatch ?? confirmedPatient;
         if (!matchedPatient) {
           results.push({
             patientName: group.patientName,
             matched: false,
-            claimsImported: 0
+            claimsImported: 0,
+            // Distinguishes "nothing in the file resembles a dashboard
+            // patient" from "a likely match exists but requires explicit
+            // staff confirmation" (e.g. a middle-name difference) — the
+            // confirmation UI lives in the client preview; an unconfirmed
+            // candidate is still correctly skipped here, never auto-imported.
+            ...candidates.length > 0 ? { ambiguousCandidates: candidates.length } : {}
           });
           continue;
         }

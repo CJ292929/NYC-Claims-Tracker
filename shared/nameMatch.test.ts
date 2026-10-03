@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { fuzzyNameMatch, findMatchingPatient } from './nameMatch';
+import { fuzzyNameMatch, findMatchingPatient, classifyPatientMatch } from './nameMatch';
 
 describe('fuzzyNameMatch', () => {
   // ── Exact / case-insensitive ─────────────────────────────────────────────
@@ -174,5 +174,87 @@ describe('findMatchingPatient', () => {
     const rosterWithOnlyCollision = [{ id: '5', name: 'AUYEUNG, ANDREW' }];
     const result = findMatchingPatient('ALLISON AUYEUNG', rosterWithOnlyCollision);
     expect(result).toBeNull();
+  });
+});
+
+// ── P4-P1: Cigna import consistency — a spelled-out middle name must never
+//    auto-match (fuzzyNameMatch already refuses it, correctly), but it must
+//    also not be indistinguishable from "no data at all" -- it should surface
+//    as a candidate requiring explicit staff confirmation in both the
+//    single-patient upload flow and the bulk preview, since both now call
+//    this same function. ───────────────────────────────────────────────────
+describe('classifyPatientMatch', () => {
+  it('a safe match is "confirmed" with no candidates', () => {
+    const patients = [{ id: '1', name: 'AUYEUNG, ALLISON' }];
+    const result = classifyPatientMatch('ALLISON AUYEUNG', patients);
+    expect(result.confirmed?.id).toBe('1');
+    expect(result.candidates).toEqual([]);
+  });
+
+  it('a full middle name difference is surfaced as a candidate, not confirmed', () => {
+    const patients = [{ id: '1', name: 'JOHN SMITH' }];
+    const result = classifyPatientMatch('JOHN MICHAEL SMITH', patients);
+    expect(result.confirmed).toBeNull();
+    expect(result.candidates.map(c => c.id)).toEqual(['1']);
+  });
+
+  it('is symmetric regardless of which side carries the extra middle name', () => {
+    const patients = [{ id: '1', name: 'JOHN MICHAEL SMITH' }];
+    const result = classifyPatientMatch('JOHN SMITH', patients);
+    expect(result.confirmed).toBeNull();
+    expect(result.candidates.map(c => c.id)).toEqual(['1']);
+  });
+
+  it('two distinct patients with the same middle-name relationship both surface as candidates (never silently merged into one)', () => {
+    const patients = [
+      { id: '1', name: 'JOHN SMITH' },
+      { id: '2', name: 'JOHN MICHAEL SMITH' },
+    ];
+    // Neither patient is auto-matched to the other -- both remain available
+    // for staff to pick from explicitly, never auto-imported.
+    const result = classifyPatientMatch('JOHN SMITH', patients);
+    expect(result.confirmed?.id).toBe('1'); // exact match wins outright
+    expect(result.candidates).toEqual([]);
+  });
+
+  it('a genuinely different name (no shared first+last anchor) produces no candidates at all', () => {
+    const patients = [{ id: '1', name: 'JOHN SMITH' }];
+    const result = classifyPatientMatch('ALLISON AUYEUNG', patients);
+    expect(result.confirmed).toBeNull();
+    expect(result.candidates).toEqual([]);
+  });
+
+  it('multiple genuine candidates are all returned, requiring staff selection rather than guessing', () => {
+    const patients = [
+      { id: '1', name: 'JOHN MICHAEL SMITH' },
+      { id: '2', name: 'JOHN ANTHONY SMITH' },
+    ];
+    const result = classifyPatientMatch('JOHN SMITH', patients);
+    expect(result.confirmed).toBeNull();
+    expect(result.candidates.map(c => c.id).sort()).toEqual(['1', '2']);
+  });
+
+  // ── P4-P1R: two roster entries with the literal same name (a duplicate
+  //    patient record) must never be silently resolved to "whichever is
+  //    first in the array" -- that's exactly the kind of guess that can
+  //    misattribute a claim's money to the wrong patient record. ───────────
+  it('two patients with the exact same dashboard name are both surfaced as candidates, not auto-confirmed', () => {
+    const patients = [
+      { id: '1', name: 'JOHN SMITH' },
+      { id: '2', name: 'JOHN SMITH' },
+    ];
+    const result = classifyPatientMatch('JOHN SMITH', patients);
+    expect(result.confirmed).toBeNull();
+    expect(result.candidates.map(c => c.id).sort()).toEqual(['1', '2']);
+  });
+
+  it('two patients whose names are duplicates only after normalization are also surfaced as candidates', () => {
+    const patients = [
+      { id: '1', name: 'Smith, John' },
+      { id: '2', name: 'SMITH, JOHN' },
+    ];
+    const result = classifyPatientMatch('JOHN SMITH', patients);
+    expect(result.confirmed).toBeNull();
+    expect(result.candidates.map(c => c.id).sort()).toEqual(['1', '2']);
   });
 });

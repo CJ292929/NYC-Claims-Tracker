@@ -50,6 +50,23 @@ export interface TemplateResult {
   patientGroups?: PatientClaimGroup[]; // per-patient groups (multi-patient files)
 }
 
+/**
+ * Thrown when a template parser cannot reliably tell where one patient's
+ * section ends and the next one's begins (e.g. a malformed/OCR-mangled
+ * "Patient:" header that fails the section-split pattern). Callers MUST
+ * treat this as an extraction failure requiring manual document review —
+ * never catch it and fall back to AI extraction or an "empty success"
+ * response, and never attribute the ambiguous lines to any patient name,
+ * real or synthetic. See parseMeritainEOBWithGroups for the one place this
+ * is currently thrown.
+ */
+export class PatientBoundaryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PatientBoundaryError';
+  }
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /** Parse a date string like "04/24/2026" or "04/24/26" or "04-24-2026" → "2026-04-24" */
@@ -147,7 +164,8 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
   // Split by patient blocks: look for "Patient:   NAME" followed by "Claim #:"
   const patientSections = text.split(/(?=Patient:\s+[A-Z])/g);
 
-  for (let section of patientSections) {
+  for (let sIdx = 0; sIdx < patientSections.length; sIdx++) {
+    let section = patientSections[sIdx];
     if (!section.includes('Claim #:')) continue;
     // Truncate at "Claim Total:" to prevent service lines from leaking into the next patient's section
     const claimTotalIdx = section.indexOf('Claim Total:');
@@ -160,6 +178,33 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
     // physical line as the name, separated by wide column padding).
     const nameMatch = section.match(/Patient:\s+([A-Z][A-Z\s]+?)(?=\s{2,}|\n)/);
     const patientName = nameMatch ? nameMatch[1].trim() : 'UNKNOWN';
+
+    // A well-formed section carries exactly one "Patient:" header -- the one
+    // the split lookahead above matched to start this section. If a SECOND
+    // "Patient<optional space>: NAME" occurrence shows up inside the same
+    // section, a later patient's header failed the strict split pattern
+    // (e.g. an OCR/layout artifact like "Patient :" with a stray space
+    // before the colon) and that patient's block never got separated from
+    // this one -- the section now contains two or more real patients'
+    // service lines with no reliable way to tell which line belongs to
+    // which. (Deliberately counting "Patient:" headers, not "Claim #:"
+    // markers -- one real patient can legitimately have several Claim #s
+    // in their own single well-formed section, one per visit date, and that
+    // must keep working exactly as before; see the patientClaimsMap comment
+    // above.) There's no safe automatic attribution here -- not to
+    // `patientName` (whichever header happens to appear first), and not to
+    // a synthetic placeholder name either, since a fake "patient" in the
+    // preview is itself a form of silently misrepresenting the error. This
+    // throws instead: the caller (tryTemplateExtraction / claimUpload.ts)
+    // must surface it as an explicit extraction failure and stop before
+    // anything reaches the import preview or persistence, never fall back
+    // to AI extraction or an empty "no claims found" success.
+    const patientHeaderCount = (section.match(/Patient\s*:\s*[A-Z]/g) || []).length;
+    if (patientHeaderCount > 1) {
+      throw new PatientBoundaryError(
+        `Patient boundaries could not be determined (section ${sIdx} contains ${patientHeaderCount} patient headers that should have been split into separate sections).`
+      );
+    }
 
     // Extract Claim # — specific to this section/visit (each date group has its own claim #)
     const claimMatch = section.match(/Claim #:\s+([A-Z0-9]+)/);
@@ -607,6 +652,13 @@ const TEMPLATES: InsuranceTemplate[] = [
  * Try to match the extracted text to a known insurance template.
  * Returns the template result if matched, or null if no template matches
  * (caller should fall back to AI extraction).
+ *
+ * Can also throw PatientBoundaryError (propagated from a template's parser,
+ * e.g. parseMeritainEOBWithGroups) when the document's patient sections
+ * can't be reliably told apart. That is NOT a "no template matched" case —
+ * the caller must treat it as a hard extraction failure (surface it to the
+ * user, do not fall back to AI extraction, do not build an empty/partial
+ * result) rather than catching it here.
  */
 export function tryTemplateExtraction(
   text: string,
