@@ -142,6 +142,39 @@ WHERE lower(trim(regexp_replace(src.insurance, '\s+', ' ', 'g'))) <> 'united hea
 ORDER BY lower(btrim(regexp_replace(src.insurance, '\s+', ' ', 'g')))
 ON CONFLICT (normalized_name) DO NOTHING;
 
+-- ─── Lock down direct (PostgREST/browser-role) access ──────────────────────
+-- insurer_catalog is read and written exclusively through server/db.ts using
+-- the service-role Supabase client (see server/supabase.ts — "Never expose
+-- this client or its key to the browser"). There is no browser Supabase
+-- client in this app (client/ never imports @supabase/supabase-js), but that
+-- is not itself a guarantee: anon/authenticated are real Postgres roles that
+-- Supabase's PostgREST layer accepts requests for directly, independent of
+-- what this codebase's browser bundle happens to call. Without RLS, any
+-- holder of the project's anon key (public by design, shipped to Supabase
+-- Studio and every browser Supabase client) could read/write this table
+-- over the REST API, bypassing the adminOrOwnerProcedure gate in
+-- server/routers.ts entirely.
+--
+-- Enabling RLS with zero policies makes the table default-deny for every
+-- role subject to RLS — there is deliberately no anon/authenticated policy
+-- to admit browser-role access, since all legitimate access goes through the
+-- server. service_role is unaffected: Supabase provisions it with BYPASSRLS,
+-- so RLS enablement never blocks the server's own access. FORCE ROW LEVEL
+-- SECURITY is additionally applied so RLS also applies to the table owner —
+-- belt-and-suspenders, since BYPASSRLS roles ignore FORCE regardless.
+--
+-- The REVOKE below removes the ability to even attempt a query as
+-- anon/authenticated/PUBLIC (defense in depth below RLS, and keeps the
+-- table out of what anon/authenticated can see in schema introspection).
+-- The GRANT to service_role is explicit so access does not silently depend
+-- on whatever ALTER DEFAULT PRIVILEGES happens to be configured on the
+-- project — this table's server access is guaranteed by this migration.
+ALTER TABLE public.insurer_catalog ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.insurer_catalog FORCE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.insurer_catalog FROM PUBLIC, anon, authenticated;
+GRANT ALL ON public.insurer_catalog TO service_role;
+
 COMMIT;
 
 -- ============================================================================
