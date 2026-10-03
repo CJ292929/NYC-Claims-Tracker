@@ -366,6 +366,92 @@ function detectCMS1500(text: string, filename?: string): boolean {
   );
 }
 
+/**
+ * Box 21 lists up to 12 diagnosis codes in printed position order (numbered
+ * 1-12 on the current NUCC 02/12 form, lettered A-L on older revisions).
+ * Box 24E's "diagnosis pointer" on each service line references specific
+ * positions in that list -- a line is NOT associated with every diagnosis
+ * in the document, only the one(s) its pointer names. This indexes Box 21's
+ * codes by position so a line's pointer can be resolved to exactly the
+ * code(s) it references.
+ *
+ * Exported for direct unit testing against synthetic Box 21 text; this has
+ * NOT been validated against a real CMS-1500 PDF's pdftotext output.
+ */
+export function parseIndexedDiagnosisCodes(text: string): Map<number, string> {
+  const map = new Map<number, string>();
+  const box21Start = text.search(/DIAGNOSIS\s+OR\s+NATURE\s+OF\s+ILLNESS/i);
+  const box24Start = text.search(/24\.\s*A\.?\s*DATE|DATE\(S\)\s*OF\s*SERVICE/i);
+  const box21End = box24Start >= 0 ? box24Start : text.length;
+  const box21Text = box21Start >= 0 ? text.slice(box21Start, box21End) : text.slice(0, box21End);
+
+  // Prefer an explicit printed label ("1. M54.5", "A M25.561") when present.
+  // (?<![\w.]) instead of \b before the label -- a bare \b would let the
+  // trailing fractional digit of a PRECEDING code (e.g. the "5" in "M54.5")
+  // be misread as the next entry's numeric label.
+  const labeledRe = /(?<![\w.])([1-9]|1[0-2]|[A-L])[.\)]?\s+([A-Z]\d{2,3}\.\d{1,4})\b/g;
+  const labeled: Array<{ idx: number; code: string }> = [];
+  let lm: RegExpExecArray | null;
+  while ((lm = labeledRe.exec(box21Text)) !== null) {
+    const label = lm[1];
+    const idx = /^[A-L]$/.test(label) ? label.charCodeAt(0) - 64 : parseInt(label, 10); // A=1, B=2, ...
+    labeled.push({ idx, code: lm[2] });
+  }
+  if (labeled.length > 0) {
+    for (const { idx, code } of labeled) if (!map.has(idx)) map.set(idx, code);
+    return map;
+  }
+
+  // No surviving label (common after pdftotext -layout strips a disconnected
+  // "1." marker onto its own line) -- fall back to positional order, since
+  // Box 21's codes print top-to-bottom in index order 1,2,3... regardless.
+  const plainRe = /([A-Z]\d{2,3}\.\d{1,4})/g;
+  let i = 0;
+  let pm: RegExpExecArray | null;
+  while ((pm = plainRe.exec(box21Text)) !== null) {
+    i++;
+    if (!map.has(i)) map.set(i, pm[1]);
+  }
+  return map;
+}
+
+/**
+ * Resolves a service line's raw Box 24E pointer text (e.g. "1", "23",
+ * "1,3", "AC") against the indexed Box 21 list. Returns null -- never
+ * "every diagnosis in the document" -- when the token is missing,
+ * unparseable, or every referenced position is out of range for this
+ * document's actual diagnosis list.
+ */
+export function resolveDiagnosisPointer(pointerToken: string | null | undefined, indexed: Map<number, string>): string | null {
+  if (!pointerToken) return null;
+  const tokens = pointerToken.toUpperCase().match(/[1-9]|1[0-2]|[A-L]/g);
+  if (!tokens) return null;
+  const codes: string[] = [];
+  for (const t of tokens) {
+    const idx = /^[A-L]$/.test(t) ? t.charCodeAt(0) - 64 : parseInt(t, 10);
+    const code = indexed.get(idx);
+    if (code && !codes.includes(code)) codes.push(code);
+  }
+  return codes.length > 0 ? codes.join(', ') : null;
+}
+
+/**
+ * Picks the diagnosisCodes value for one CMS1500 service line.
+ *   - Exactly one diagnosis in the whole document → unambiguous, use it for
+ *     every line regardless of pointer (nothing else it could reference).
+ *   - 2+ diagnoses → only the pointer-resolved subset; null (never "all of
+ *     them") when no pointer was found or it didn't resolve to anything
+ *     valid in this document's actual Box 21 list.
+ */
+export function resolveLineDiagnosisCodes(
+  indexed: Map<number, string>,
+  pointerToken: string | null | undefined,
+  allDiagCodesFallback: string | null
+): string | null {
+  if (indexed.size <= 1) return allDiagCodesFallback;
+  return resolveDiagnosisPointer(pointerToken, indexed);
+}
+
 /** Parse a CMS1500 date fragment like "06 10 26" or "06 10 2026" → "2026-06-10" */
 function parseCMS1500Date(mm: string, dd: string, yy: string): string | null {
   const m = mm.trim().padStart(2, '0');
@@ -406,6 +492,10 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
     if (!diagCodes.includes(code)) diagCodes.push(code);
   }
   const allDiagCodes = diagCodes.join(', ');
+  // Indexed by Box 21 position so each service line's Box 24E pointer can be
+  // resolved to the specific diagnosis/diagnoses it references instead of
+  // defaulting to every code in the document (see resolveLineDiagnosisCodes).
+  const indexedDiagnoses = parseIndexedDiagnosisCodes(text);
 
   // ── Extract Date Submitted (Box 31 — physician signature date)
   // In layout mode, appears as "06/15/2026" after "SIGNED" and "DATE" labels
@@ -444,7 +534,19 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
     const fromDate = parseCMS1500Date(cm2[1], cm2[2], cm2[3]);
     const placeOfService = cm2[7];
     const cptCode = cm2[8];
-    const modifier = cm2[9].trim().split(/\s+/)[0];
+    // cm2[9] ("[A-Z0-9 ]+?") can contain the modifier and an inline diagnosis
+    // pointer run together (e.g. "GP 1") depending on how the PDF renderer
+    // spaced that cell; cm2[10] ("[A-Z]{2,6}") catches a letter-style pointer
+    // (older form revisions reference Box 21 by letter, A-L). Neither is a
+    // reliable column position across renderers, so both are only ever
+    // candidate pointer sources -- resolveLineDiagnosisCodes safely falls
+    // back to null (never "every diagnosis") when neither resolves.
+    const modifierTokens = cm2[9].trim().split(/\s+/);
+    const modifier = modifierTokens[0];
+    const inlinePointerCandidate = modifierTokens.length > 1 ? modifierTokens.slice(1).join('') : null;
+    const letterPointerCandidate = /^[A-L]{1,6}$/.test(cm2[10]) ? cm2[10] : null;
+    const pointerToken = inlinePointerCandidate || letterPointerCandidate || null;
+    const lineDiagnosisCodes = resolveLineDiagnosisCodes(indexedDiagnoses, pointerToken, allDiagCodes || null);
     const chargeAmount = parseMoney(cm2[11]);
     const units = parseInt(cm2[12], 10);
     // visitNumber is the service line's printed position in Box 24 (1-6) —
@@ -454,7 +556,7 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
     const dateKey = fromDate || 'no-date';
     if (!dateMap.has(dateKey)) {
       dateMap.set(dateKey, {
-        dateOfService: fromDate, placeOfService, diagnosisCodes: allDiagCodes || null,
+        dateOfService: fromDate, placeOfService, diagnosisCodes: lineDiagnosisCodes,
         claimSubmittedDate: dateSubmitted, visitNumber,
         cptCodes: null, chargeAmount: null, insuranceReimbursement: null,
         patientAmountPaid: null, patientAmountDue: null, unitsBilled: null, modifier: null, cptLines: [],
@@ -466,7 +568,7 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
     dateMap.get(dateKey)!.cptLines.push({
       cptCodes: cptCode, chargeAmount, insuranceReimbursement: null,
       patientAmountPaid: null, patientAmountDue: null, unitsBilled: units, modifier,
-      diagnosisCodes: allDiagCodes || null,
+      diagnosisCodes: lineDiagnosisCodes,
     });
   }
 
@@ -547,6 +649,25 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
       const modMatch = modWindow.match(/\b(GP|59|25|51|76|77|KX|CO|GN|GO|GT|95|AT)\b/);
       if (modMatch) modifier = modMatch[1];
 
+      // Box 24E diagnosis pointer -- best-effort only (pdftotext -layout's
+      // column spacing for this box varies per document/renderer, same as
+      // the charge/units extraction above). Looked for immediately after the
+      // modifier token since that's Box 24E's printed position relative to
+      // Box 24D on the real form; resolveLineDiagnosisCodes safely falls
+      // back to null rather than every diagnosis if this doesn't resolve.
+      let pointerToken: string | null = null;
+      if (modMatch) {
+        let afterModifier = modWindow.slice(modMatch.index! + modMatch[0].length, modMatch.index! + modMatch[0].length + 15);
+        // Stop before Box 24F's charge amount -- without this, a line with NO
+        // pointer at all would misread Box 24G's units digit (e.g. the "1" in
+        // "350.00 1") as if it were the pointer.
+        const chargeBoundary = afterModifier.match(/\d+\.\d{2}/);
+        if (chargeBoundary) afterModifier = afterModifier.slice(0, chargeBoundary.index);
+        const pointerMatch = afterModifier.match(/\b([1-9](?:,?[1-9]){0,3})\b/);
+        if (pointerMatch) pointerToken = pointerMatch[1];
+      }
+      const lineDiagnosisCodes = resolveLineDiagnosisCodes(indexedDiagnoses, pointerToken, allDiagCodes || null);
+
       // Extract charge amount + units. Both can land on the line BEFORE, ON, or
       // AFTER the CPT code's own line — the exact vertical position of these form
       // fields in pdftotext -layout output varies per row, not just per document
@@ -588,7 +709,7 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
       const dateKey = fromDate || 'no-date';
       if (!dateMap.has(dateKey)) {
         dateMap.set(dateKey, {
-          dateOfService: fromDate, placeOfService, diagnosisCodes: allDiagCodes || null,
+          dateOfService: fromDate, placeOfService, diagnosisCodes: lineDiagnosisCodes,
           claimSubmittedDate: dateSubmitted, visitNumber,
           cptCodes: null, chargeAmount: null, insuranceReimbursement: null,
           patientAmountPaid: null, patientAmountDue: null, unitsBilled: null, modifier: null, cptLines: [],
@@ -597,7 +718,7 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
       dateMap.get(dateKey)!.cptLines.push({
         cptCodes: cptCode, chargeAmount, insuranceReimbursement: null,
         patientAmountPaid: null, patientAmountDue: null,
-        unitsBilled: units, modifier, diagnosisCodes: allDiagCodes || null,
+        unitsBilled: units, modifier, diagnosisCodes: lineDiagnosisCodes,
       });
     }
   }

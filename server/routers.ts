@@ -44,6 +44,10 @@ import {
   listInsurerCatalog,
   getInsurerCatalogEntryByNormalizedName,
   createInsurerCatalogEntry,
+  findCms1500EnrichmentCandidates,
+  patientHasAnyClaimRecords,
+  applyCms1500Enrichment,
+  type Cms1500EnrichmentCandidate as Cms1500EnrichmentCandidateDTO,
 } from "./db";
 import type { ClinicUser } from "../drizzle/schema";
 import { sdk } from "./_core/sdk";
@@ -889,6 +893,106 @@ export const appRouter = router({
       }),
 
     /**
+     * CMS1500 enrichment, step 1 — preview only, no writes.
+     *
+     * For each CMS1500 line (identified by its date of service + CPT
+     * code(s)), finds existing claim rows for this patient across EVERY auth
+     * period (never just their latest) and classifies the result:
+     *   - 0 candidates -> 'no_match' (or 'no_claims' if the patient has no
+     *     claim rows at all, meaning the reimbursement file was never
+     *     uploaded)
+     *   - 1 candidate WITH reimbursement evidence (see
+     *     Cms1500EnrichmentCandidate.hasReimbursementEvidence) -> 'matched',
+     *     safe to auto-apply
+     *   - 1 candidate with NO reimbursement evidence -> 'matched_unconfirmed'
+     *     — claims_records has no provenance column, so a lone match could
+     *     be a manual entry or a legacy/pre-fix CMS1500-only row rather than
+     *     an actual reimbursement row; this is disclosed to staff and
+     *     requires an explicit confirmation click before it's included in
+     *     the commit, never auto-applied like a confirmed 'matched' line
+     *   - 2+ candidates -> 'needs_selection' (staff must pick which row)
+     */
+    cms1500EnrichmentPreview: normalProtectedProcedure
+      .input(z.object({
+        patientId: z.string().uuid(),
+        lines: z.array(z.object({
+          lineKey: z.string(),
+          dateOfService: z.string().nullable(),
+          cptCodes: z.string().nullable(),
+        })),
+      }))
+      .mutation(async ({ input }) => {
+        const hasAnyClaims = await patientHasAnyClaimRecords(input.patientId);
+        const results = await Promise.all(input.lines.map(async (line) => {
+          const dos = parseDate(line.dateOfService);
+          if (!dos) {
+            return { lineKey: line.lineKey, status: 'invalid_date' as const, candidates: [] as Cms1500EnrichmentCandidateDTO[] };
+          }
+          const candidates = await findCms1500EnrichmentCandidates(input.patientId, dos, line.cptCodes ?? null);
+          if (candidates.length === 0) {
+            const status: 'no_match' | 'no_claims' = hasAnyClaims ? 'no_match' : 'no_claims';
+            return { lineKey: line.lineKey, status, candidates: [] as Cms1500EnrichmentCandidateDTO[] };
+          }
+          if (candidates.length === 1) {
+            const status: 'matched' | 'matched_unconfirmed' = candidates[0].hasReimbursementEvidence ? 'matched' : 'matched_unconfirmed';
+            return { lineKey: line.lineKey, status, candidates, claimRecordId: candidates[0].id };
+          }
+          return { lineKey: line.lineKey, status: 'needs_selection' as const, candidates };
+        }));
+        return { hasAnyClaims, results };
+      }),
+
+    /**
+     * CMS1500 enrichment, step 2 — commit.
+     *
+     * Only patches visit_number / diagnosis_codes / modifier / units_billed
+     * on the specific row identified by `claimRecordId` for each line (the
+     * auto-matched id from the preview, or the id staff explicitly selected
+     * for an ambiguous line). Re-validates ownership + compatibility
+     * server-side before writing — never inserts a new row, never touches
+     * charge_amount or any payment field. Lines the client never resolved
+     * (no_match/no_claims/needs_selection without a pick) are simply absent
+     * from `lines` and so are never sent here at all.
+     */
+    cms1500EnrichmentCommit: normalProtectedProcedure
+      .input(z.object({
+        patientId: z.string().uuid(),
+        lines: z.array(z.object({
+          lineKey: z.string(),
+          claimRecordId: z.string().uuid(),
+          dateOfService: z.string().nullable(),
+          cptCodes: z.string().nullable(),
+          visitNumber: z.number().nullable().optional(),
+          diagnosisCodes: z.string().nullable().optional(),
+          modifier: z.string().nullable().optional(),
+          unitsBilled: z.number().nullable().optional(),
+        })),
+      }))
+      .mutation(async ({ input }) => {
+        const results: Array<{ lineKey: string; status: 'saved' | 'failed'; error?: string }> = [];
+        for (const line of input.lines) {
+          try {
+            const dos = parseDate(line.dateOfService);
+            if (!dos) throw new Error('Invalid or missing date of service.');
+            await applyCms1500Enrichment({
+              claimRecordId: line.claimRecordId,
+              patientId: input.patientId,
+              dateOfService: dos,
+              cptCodes: line.cptCodes ?? null,
+              visitNumber: line.visitNumber ?? null,
+              diagnosisCodes: line.diagnosisCodes ?? null,
+              modifier: line.modifier ?? null,
+              unitsBilled: line.unitsBilled ?? null,
+            });
+            results.push({ lineKey: line.lineKey, status: 'saved' });
+          } catch (err: any) {
+            results.push({ lineKey: line.lineKey, status: 'failed', error: err?.message ?? 'Unknown error' });
+          }
+        }
+        return { results };
+      }),
+
+    /**
      * Bulk import claims from a multi-patient EOB file.
      * Matches patient names (case-insensitive) against dashboard patients,
      * finds each patient's latest auth period, and saves all their claims.
@@ -988,6 +1092,25 @@ export const appRouter = router({
           claimsImported: number;
           error?: string;
           ambiguousCandidates?: number;
+          // cms1500-only: lines skipped because no reimbursement row exists yet
+          // to enrich, or because multiple candidate rows require the staff
+          // member to resolve the match explicitly via the single-patient
+          // CMS1500 enrichment flow (cms1500EnrichmentPreview/Commit) instead.
+          skippedNoMatch?: number;
+          skippedNoReimbursementUploaded?: number;
+          skippedNeedsSelection?: number;
+          skippedUnconfirmedProvenance?: number;
+          // Per-line detail for every cms1500 line skipped above -- never
+          // just a count. Lets staff see exactly which dates/CPTs need
+          // attention and routes them to the single-patient CMS1500 review
+          // (cms1500EnrichmentPreview/Commit), which supports both the
+          // multi-candidate selection and the unconfirmed-provenance
+          // confirmation this bulk flow can't offer inline.
+          skippedCms1500Lines?: Array<{
+            dateOfService: string | null;
+            cptCodes: string | null;
+            reason: 'no_match' | 'no_reimbursement_uploaded' | 'needs_selection' | 'unconfirmed_provenance' | 'invalid_date';
+          }>;
         }> = [];
 
         for (let groupIndex = 0; groupIndex < input.patientGroups.length; groupIndex++) {
@@ -1041,83 +1164,131 @@ export const appRouter = router({
           // Save all claims for this patient
           // Each date group may have cptLines (one record per CPT code) or be a flat claim
           let claimsImported = 0;
+          let skippedNoMatch = 0;
+          let skippedNoReimbursementUploaded = 0;
+          let skippedNeedsSelection = 0;
+          let skippedUnconfirmedProvenance = 0;
+          const skippedCms1500Lines: Array<{ dateOfService: string | null; cptCodes: string | null; reason: 'no_match' | 'no_reimbursement_uploaded' | 'needs_selection' | 'unconfirmed_provenance' | 'invalid_date' }> = [];
           try {
-            for (const claim of group.claims) {
-              const lines = claim.cptLines && claim.cptLines.length > 0
-                ? claim.cptLines
-                : [{ // fallback: treat the claim itself as a single line
-                    cptCodes: claim.cptCodes ?? null,
-                    chargeAmount: claim.chargeAmount ?? null,
-                    insuranceReimbursement: claim.insuranceReimbursement ?? null,
-                    patientAmountPaid: claim.patientAmountPaid ?? null,
-                    patientAmountDue: claim.patientAmountDue ?? null,
-                    unitsBilled: claim.unitsBilled ?? null,
-                    modifier: claim.modifier ?? null,
-                    diagnosisCodes: claim.diagnosisCodes ?? null,
-                  }];
+            if (uploadType === 'cms1500') {
+              // CMS1500 never creates or writes a financial row. Each line is
+              // matched against existing claims_records across every auth
+              // period this patient has (never just maxPeriod) by exact date
+              // of service + CPT code; only visit #/diagnosis/modifier/units
+              // are ever patched, and only when exactly one candidate row is
+              // found. 0 candidates -> skipped (no reimbursement row to
+              // enrich yet); 2+ candidates -> skipped here too, since this
+              // bulk/multi-patient flow has no per-line selection UI — staff
+              // must resolve those via the single-patient CMS1500 enrichment
+              // flow (cms1500EnrichmentPreview/Commit), which does support it.
+              const hasAnyClaims = await patientHasAnyClaimRecords(matchedPatient.id);
+              for (const claim of group.claims) {
+                const lines = claim.cptLines && claim.cptLines.length > 0
+                  ? claim.cptLines
+                  : [{
+                      cptCodes: claim.cptCodes ?? null,
+                      unitsBilled: claim.unitsBilled ?? null,
+                      modifier: claim.modifier ?? null,
+                      diagnosisCodes: claim.diagnosisCodes ?? null,
+                    }];
+                const dos = parseDate(claim.dateOfService);
+                for (const line of lines) {
+                  if (!dos) {
+                    skippedNoMatch++;
+                    skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'invalid_date' });
+                    continue;
+                  }
+                  const candidates = await findCms1500EnrichmentCandidates(matchedPatient.id, dos, line.cptCodes ?? null);
+                  if (candidates.length === 0) {
+                    if (hasAnyClaims) {
+                      skippedNoMatch++;
+                      skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'no_match' });
+                    } else {
+                      skippedNoReimbursementUploaded++;
+                      skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'no_reimbursement_uploaded' });
+                    }
+                    continue;
+                  }
+                  if (candidates.length > 1) {
+                    skippedNeedsSelection++;
+                    skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'needs_selection' });
+                    continue;
+                  }
+                  if (!candidates[0].hasReimbursementEvidence) {
+                    // claims_records has no provenance column -- a lone
+                    // match with none of the reimbursement-only fields ever
+                    // set could be a manual entry or a legacy/pre-fix
+                    // CMS1500-only row rather than an actual reimbursement
+                    // row. This bulk flow has no per-line confirmation UI,
+                    // so it skips rather than guessing; staff can confirm it
+                    // explicitly via the single-patient CMS1500 flow.
+                    skippedUnconfirmedProvenance++;
+                    skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'unconfirmed_provenance' });
+                    continue;
+                  }
+                  await applyCms1500Enrichment({
+                    claimRecordId: candidates[0].id,
+                    patientId: matchedPatient.id,
+                    dateOfService: dos,
+                    cptCodes: line.cptCodes ?? null,
+                    visitNumber: claim.visitNumber ?? null,
+                    diagnosisCodes: line.diagnosisCodes ?? null,
+                    modifier: line.modifier ?? null,
+                    unitsBilled: line.unitsBilled ?? null,
+                  });
+                  claimsImported++;
+                }
+              }
+            } else {
+              for (const claim of group.claims) {
+                const lines = claim.cptLines && claim.cptLines.length > 0
+                  ? claim.cptLines
+                  : [{ // fallback: treat the claim itself as a single line
+                      cptCodes: claim.cptCodes ?? null,
+                      chargeAmount: claim.chargeAmount ?? null,
+                      insuranceReimbursement: claim.insuranceReimbursement ?? null,
+                      patientAmountPaid: claim.patientAmountPaid ?? null,
+                      patientAmountDue: claim.patientAmountDue ?? null,
+                      unitsBilled: claim.unitsBilled ?? null,
+                      modifier: claim.modifier ?? null,
+                      diagnosisCodes: claim.diagnosisCodes ?? null,
+                    }];
 
-              for (const line of lines) {
-                // Payment fields (Ins. Reimb., Pt Paid, Pt Due, Claim #, Check
-                // Date/EFT) only ever come from a Reimbursement upload; a few
-                // CMS-1500 form fields (place of service, visit #, date
-                // submitted) only ever come from a CMS1500 upload. Line-item
-                // billing detail (units/diagnosis/modifier/charge) can come
-                // from either, so it's saved unconditionally below.
-                const isReimb = uploadType === 'reimbursement';
-                const isCms = uploadType === 'cms1500';
-
-                // CPT code is always used as the match key (even for reimbursement uploads)
-                // so that a reimbursement upload can find and patch an existing CMS1500 row.
-                // For reimbursement, the EOB service lines include CPT codes — we use them
-                // for matching but only write them to the DB if this is a CMS1500 upload.
-                const cptForMatch = line.cptCodes ?? null;
-
-                await upsertClaimRecord({
-                  patientId: matchedPatient.id,
-                  authPeriod: maxPeriod,
-                  // ── Match key fields (always provided) ─────────────────────────────
-                  dateOfService: parseDate(claim.dateOfService), // always save DOS for identification
-                  cptCodes: cptForMatch,                         // always used for matching; written for both types
-                  // ── Fields for BOTH upload types ──────────────────────────────
-                  claimStatus: claim.claimStatus ?? 'submitted',
-                  // ── Reimbursement Insurance upload fields ─────────────────────
-                  // Saves: Insurance Reimbursement, Pt Paid, Pt Due,
-                  //        Claim #, Check/Payment Date, Check/EFT
-                  oaClaimNumber: isReimb ? (claim.oaClaimNumber ?? null) : null,           // Claim #
-                  insuranceReimbursement: isReimb ? (line.insuranceReimbursement ?? null) : null,
-                  patientAmountPaid: isReimb ? (line.patientAmountPaid ?? null) : null,    // Pt Paid
-                  patientAmountDue: isReimb ? (line.patientAmountDue ?? null) : null,      // Pt Due
-                  checkDate: isReimb ? parseDate(claim.checkDate) : null,                  // Check/Payment Date
-                  checkNumberVirtualCard: isReimb ? (claim.checkNumberVirtualCard ?? null) : null, // Check/EFT
-                  referenceNo: isReimb ? (claim.referenceNo ?? null) : null,
-                  insuranceBilled: isReimb ? (claim.insuranceBilled ?? null) : null,
-                  paymentReceived: isReimb ? (line.insuranceReimbursement ?? null) : null,
-                  // ── CMS1500-exclusive form fields ──────────────────────────────
-                  // Place of service, visit #, date submitted, and the BCBS
-                  // reference number come from specific CMS-1500 boxes and are
-                  // never printed on a payer-issued EOB.
-                  placeOfService: isCms ? (claim.placeOfService ?? null) : null,
-                  visitNumber: isCms ? (claim.visitNumber ?? null) : null,
-                  claimSubmittedDate: isCms ? parseDate(claim.claimSubmittedDate) : null,
-                  expireBcbsClaimNumber: isCms ? (claim.expireBcbsClaimNumber ?? null) : null,
-                  // ── Line-item billing detail (both upload types) ───────────────
-                  // Units, Diagnosis, Modifier, and Charge come from CMS-1500
-                  // Box 24 on a CMS1500 upload, but many EOBs also print their
-                  // own per-line "Line Level Information" table with the same
-                  // data (Quantity, DX Codes, Modifier, Billed Amount) — carry
-                  // it through regardless of upload type; upsertClaimRecord only
-                  // patches non-null fields, so a reimbursement upload can't
-                  // blank out a value a prior CMS1500 upload already saved.
-                  unitsBilled: line.unitsBilled ?? null,
-                  diagnosisCodes: line.diagnosisCodes ?? null,
-                  modifier: line.modifier ?? null,
-                  chargeAmount: line.chargeAmount ?? null,
-                  // ── Shared optional fields ────────────────────────────────────
-                  dateReceived: parseDate(claim.dateReceived),
-                  dateOfAppeal: parseDate(claim.dateOfAppeal),
-                  lmn: claim.lmn ?? null,
-                });
-                claimsImported++;
+                for (const line of lines) {
+                  // Reimbursement is the ONLY upload type this branch handles
+                  // now (cms1500 is handled entirely above) — it owns charge
+                  // and every payment field, and establishes new claim rows.
+                  await upsertClaimRecord({
+                    patientId: matchedPatient.id,
+                    authPeriod: maxPeriod,
+                    dateOfService: parseDate(claim.dateOfService),
+                    cptCodes: line.cptCodes ?? null,
+                    claimStatus: claim.claimStatus ?? 'submitted',
+                    oaClaimNumber: claim.oaClaimNumber ?? null,
+                    insuranceReimbursement: line.insuranceReimbursement ?? null,
+                    patientAmountPaid: line.patientAmountPaid ?? null,
+                    patientAmountDue: line.patientAmountDue ?? null,
+                    checkDate: parseDate(claim.checkDate),
+                    checkNumberVirtualCard: claim.checkNumberVirtualCard ?? null,
+                    referenceNo: claim.referenceNo ?? null,
+                    insuranceBilled: claim.insuranceBilled ?? null,
+                    paymentReceived: line.insuranceReimbursement ?? null,
+                    placeOfService: null,
+                    visitNumber: null,
+                    claimSubmittedDate: null,
+                    expireBcbsClaimNumber: null,
+                    // Line-item billing detail (units/diagnosis/modifier/charge)
+                    // many EOBs also print alongside their payment columns.
+                    unitsBilled: line.unitsBilled ?? null,
+                    diagnosisCodes: line.diagnosisCodes ?? null,
+                    modifier: line.modifier ?? null,
+                    chargeAmount: line.chargeAmount ?? null,
+                    dateReceived: parseDate(claim.dateReceived),
+                    dateOfAppeal: parseDate(claim.dateOfAppeal),
+                    lmn: claim.lmn ?? null,
+                  });
+                  claimsImported++;
+                }
               }
             }
             results.push({
@@ -1127,6 +1298,11 @@ export const appRouter = router({
               dashboardName: matchedPatient.name,
               authPeriod: maxPeriod,
               claimsImported,
+              ...(skippedNoMatch > 0 ? { skippedNoMatch } : {}),
+              ...(skippedNoReimbursementUploaded > 0 ? { skippedNoReimbursementUploaded } : {}),
+              ...(skippedNeedsSelection > 0 ? { skippedNeedsSelection } : {}),
+              ...(skippedUnconfirmedProvenance > 0 ? { skippedUnconfirmedProvenance } : {}),
+              ...(skippedCms1500Lines.length > 0 ? { skippedCms1500Lines } : {}),
             });
           } catch (err: any) {
             results.push({
