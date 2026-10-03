@@ -184,9 +184,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS insurer_catalog_normalized_name_key ON public.
 -- server/db.ts. RLS is enabled with no anon/authenticated policies (default
 -- deny), and PostgREST-reachable roles are stripped of table privileges
 -- outright, so the Supabase REST API can't read or write this table
--- directly regardless of what key a caller holds.
+-- directly regardless of what key a caller holds. NOT forced, so the table
+-- owner (e.g. Supabase SQL Editor) keeps direct operational access.
 ALTER TABLE public.insurer_catalog ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.insurer_catalog FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.insurer_catalog NO FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON public.insurer_catalog FROM PUBLIC, anon, authenticated;
 GRANT ALL ON public.insurer_catalog TO service_role;
 
