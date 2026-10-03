@@ -165,10 +165,14 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_patient ON public.audit_logs(patient_i
 -- aliases preserves pre-rename display names (e.g. "United Healthcare
 -- Medicare" for "United Healthcare Medicare Advantage") so existing
 -- patient/claim rows stored under the old name still resolve to this entry.
+-- normalized_name is DB-GENERATED from name (never application-supplied) so
+-- no insert path can ever persist a name/normalized_name pair that disagree.
 CREATE TABLE IF NOT EXISTS public.insurer_catalog (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL,
-  normalized_name text NOT NULL,
+  normalized_name text GENERATED ALWAYS AS (
+    lower(btrim(regexp_replace(name, '\s+', ' ', 'g')))
+  ) STORED,
   aliases text[] NOT NULL DEFAULT '{}',
   created_at timestamptz NOT NULL DEFAULT now()
 );

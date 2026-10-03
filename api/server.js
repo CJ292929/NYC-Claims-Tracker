@@ -953,7 +953,7 @@ async function getInsurerCatalogEntryByNormalizedName(normalizedName) {
   return data ? toInsurerCatalogEntry(data) : void 0;
 }
 async function createInsurerCatalogEntry(params) {
-  const { data, error } = await supabase.from("insurer_catalog").insert({ name: params.name, normalized_name: params.normalizedName }).select().single();
+  const { data, error } = await supabase.from("insurer_catalog").insert({ name: params.name }).select().single();
   if (error) {
     console.error("[Supabase] createInsurerCatalogEntry:", error);
     throw error;
@@ -4123,7 +4123,7 @@ var appRouter = router({
         throw new TRPCError3({ code: "CONFLICT", message: "This insurance company already exists" });
       }
       try {
-        return await createInsurerCatalogEntry({ name: input.name, normalizedName });
+        return await createInsurerCatalogEntry({ name: input.name });
       } catch (err) {
         if (err?.code === "23505") {
           throw new TRPCError3({ code: "CONFLICT", message: "This insurance company already exists" });

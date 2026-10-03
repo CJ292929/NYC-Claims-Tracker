@@ -237,8 +237,9 @@ export interface Database {
       };
       insurer_catalog: {
         Row: InsurerCatalogRow;
-        Insert: Omit<InsurerCatalogRow, "id" | "aliases" | "created_at">;
-        Update: Partial<Omit<InsurerCatalogRow, "id" | "created_at">>;
+        // normalized_name is a GENERATED column — never supplied on insert/update.
+        Insert: Omit<InsurerCatalogRow, "id" | "normalized_name" | "aliases" | "created_at">;
+        Update: Partial<Omit<InsurerCatalogRow, "id" | "normalized_name" | "created_at">>;
       };
     };
     Views: {

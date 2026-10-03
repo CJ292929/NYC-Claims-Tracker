@@ -574,7 +574,7 @@ export const appRouter = router({
         }
 
         try {
-          return await createInsurerCatalogEntry({ name: input.name, normalizedName });
+          return await createInsurerCatalogEntry({ name: input.name });
         } catch (err: unknown) {
           // Backstop against a race between the uniqueness check above and
           // the insert — the DB's UNIQUE(normalized_name) index is the real

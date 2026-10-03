@@ -1383,17 +1383,20 @@ export async function getInsurerCatalogEntryByNormalizedName(
   return data ? toInsurerCatalogEntry(data) : undefined;
 }
 
-/** Throws (with a Postgres `code` of "23505") if normalizedName already
- *  exists — the DB's UNIQUE(normalized_name) index is the real guard against
- *  a race between two simultaneous submissions; callers should treat that
- *  error as "duplicate", not a generic failure. */
+/** Throws (with a Postgres `code` of "23505") if this name's normalized
+ *  form already exists — the DB's UNIQUE(normalized_name) index is the real
+ *  guard against a race between two simultaneous submissions; callers
+ *  should treat that error as "duplicate", not a generic failure.
+ *
+ *  normalized_name is NOT passed here — it's a GENERATED column (see the
+ *  insurer_catalog migration), computed by the DB from `name` itself, so
+ *  this call can never persist a name/normalized_name pair that disagree. */
 export async function createInsurerCatalogEntry(params: {
   name: string;
-  normalizedName: string;
 }): Promise<InsurerCatalogEntry> {
   const { data, error } = await supabase
     .from("insurer_catalog")
-    .insert({ name: params.name, normalized_name: params.normalizedName })
+    .insert({ name: params.name })
     .select()
     .single();
 

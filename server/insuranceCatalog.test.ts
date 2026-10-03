@@ -145,9 +145,10 @@ describe("insurance.create — access control", () => {
     });
     const result = await ownerCaller().insurance.create(validInput);
     expect(result.name).toBe("Aegis One Inc.");
+    // normalized_name is DB-generated (not application-supplied) — see
+    // db.ts createInsurerCatalogEntry — so only `name` is ever passed here.
     expect(dbMock.createInsurerCatalogEntry).toHaveBeenCalledWith({
       name: "Aegis One Inc.",
-      normalizedName: "aegis one inc.",
     });
   });
 
@@ -193,7 +194,6 @@ describe("insurance.create — validation and duplicates", () => {
     await ownerCaller().insurance.create({ name: "  Hanover  " });
     expect(dbMock.createInsurerCatalogEntry).toHaveBeenCalledWith({
       name: "Hanover",
-      normalizedName: "hanover",
     });
   });
 
