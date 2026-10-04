@@ -6,12 +6,13 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
@@ -368,6 +369,10 @@ export default function Dashboard() {
   /** Delete confirmation dialog */
   const [deletePatientId, setDeletePatientId] = useState<string | null>(null);
   const [deletePatientName, setDeletePatientName] = useState<string>('');
+  /** Delete claim confirmation dialog */
+  const [deleteClaimTarget, setDeleteClaimTarget] = useState<{
+    id: string; patientId: string; dateOfService: string | null; cptCodes: string | null;
+  } | null>(null);
   // Patient selected within the Patient Records workspace's own snapshot
   // pane — deliberately separate from selectedPatientId (which still backs
   // the Dashboard KPI/Analytics fallback and the Visits/Claims detail
@@ -811,6 +816,17 @@ export default function Dashboard() {
       setEditingCell(null);
     },
     onError: (e) => toast.error(`Failed to update claim: ${e.message}`),
+  });
+
+  const deleteClaim = trpc.claims.delete.useMutation({
+    onSuccess: () => {
+      utils.claims.getByPatientAndPeriod.invalidate();
+      utils.claims.getFollowUpClaims.invalidate();
+      utils.claims.getStatusCounts.invalidate();
+      toast.success('Claim record deleted');
+      setDeleteClaimTarget(null);
+    },
+    onError: (e) => toast.error(`Failed to delete claim: ${e.message}`),
   });
 
   const upsertClaim = trpc.claims.upsert.useMutation();
@@ -2112,6 +2128,38 @@ export default function Dashboard() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <AlertDialog open={deleteClaimTarget !== null} onOpenChange={(open) => { if (!open) setDeleteClaimTarget(null); }}>
+        <AlertDialogContent className="bg-white">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-brand-blue text-xl">Delete Claim?</AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground">
+              Service date: <strong>{deleteClaimTarget?.dateOfService ? formatCalendarDate(deleteClaimTarget.dateOfService) : '—'}</strong>
+              {' · '}
+              CPT codes: <strong>{deleteClaimTarget?.cptCodes || '—'}</strong>
+              <br /><br />
+              This will permanently delete this claim record.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="border-brand-cream-dark text-brand-blue hover:bg-brand-cream">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (deleteClaimTarget !== null) {
+                  deleteClaim.mutate({ id: deleteClaimTarget.id, patientId: deleteClaimTarget.patientId });
+                }
+              }}
+              disabled={deleteClaim.isPending}
+              className="bg-red-600 hover:bg-red-700 text-white font-semibold"
+            >
+              {deleteClaim.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Trash2 className="w-4 h-4 mr-2" />}
+              Delete Claim
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 
@@ -3001,8 +3049,12 @@ export default function Dashboard() {
                             { key: 'checkNumberVirtualCard', label: 'Check/EFT #', align: 'left' },
                             { key: 'dateOfAppeal', label: 'Appeal Date', align: 'left' },
                             { key: 'referenceNo', label: 'Appeal Ref #', align: 'left' },
+                            // Not a data field — never hideable, never part of CSV export or
+                            // totals math. Only rendered when canManageStaff (admin/owner),
+                            // mirroring the server's adminOrOwnerProcedure gate on claims.delete.
+                            ...(canManageStaff ? [{ key: 'actions', label: '', align: 'center' as const }] : []),
                           ];
-                          const visibleClaimsColumns = claimsTableColumns.filter(c => !hide(c.key));
+                          const visibleClaimsColumns = claimsTableColumns.filter(c => c.key === 'actions' || !hide(c.key));
 
                           // Per-date-of-service sums for the bottom "Totals" row — mirrors the
                           // source EOB's own layout (a Totals row under each date's line items).
@@ -3028,7 +3080,7 @@ export default function Dashboard() {
                             return (
                               <tr key={`${keyPrefix}-totals-${dateKey}`} className="bg-gray-50/80 font-semibold border-b border-gray-300 text-xs">
                                 {visibleClaimsColumns.map((col, i) => (
-                                  <td key={col.key} className={`border border-gray-200 px-1 py-1 ${col.key in MONEY_TOTAL_FIELDS ? 'text-right text-gray-800' : ''}`}>
+                                  <td key={col.key} className={`border border-gray-200 px-1 py-1 ${col.key in MONEY_TOTAL_FIELDS ? 'text-right text-gray-800' : ''} ${col.key === 'actions' ? 'sticky right-0 bg-gray-50/80 z-10' : ''}`}>
                                     {i === 0
                                       ? <span className="text-gray-500 italic">Totals</span>
                                       : col.key in MONEY_TOTAL_FIELDS
@@ -3155,6 +3207,33 @@ export default function Dashboard() {
                                         </button>
                                       )
                                     )}
+                                    {canManageStaff && (
+                                      <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                          <button
+                                            type="button"
+                                            aria-label="Claim row actions"
+                                            className="p-1.5 rounded hover:bg-gray-200 text-gray-500 shrink-0"
+                                          >
+                                            <MoreVertical className="w-4 h-4" />
+                                          </button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent align="end">
+                                          <DropdownMenuItem
+                                            variant="destructive"
+                                            onClick={() => setDeleteClaimTarget({
+                                              id: claim.id,
+                                              patientId: claim.patient_id,
+                                              dateOfService: claim.date_of_service,
+                                              cptCodes: claim.cpt_codes,
+                                            })}
+                                          >
+                                            <Trash2 className="w-4 h-4" />
+                                            Delete Claim
+                                          </DropdownMenuItem>
+                                        </DropdownMenuContent>
+                                      </DropdownMenu>
+                                    )}
                                   </div>
 
                                   {/* Billing */}
@@ -3233,7 +3312,12 @@ export default function Dashboard() {
                                 <thead>
                                   <tr className="bg-brand-cream border-b border-brand-cream-dark">
                                     {visibleClaimsColumns.map(c => (
-                                      <th key={c.key} className={`border border-brand-cream-dark px-2 py-2 text-${c.align} font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap`}>{c.label}</th>
+                                      <th
+                                        key={c.key}
+                                        className={`border border-brand-cream-dark px-2 py-2 text-${c.align} font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap ${c.key === 'actions' ? 'sticky right-0 bg-brand-cream z-10' : ''}`}
+                                      >
+                                        {c.key === 'actions' ? 'Actions' : c.label}
+                                      </th>
                                     ))}
                                   </tr>
                                 </thead>
@@ -3391,6 +3475,35 @@ export default function Dashboard() {
                                         {!hide('checkNumberVirtualCard') && <EditableText field="checkNumberVirtualCard" value={claim.check_number_virtual_card} />}
                                         {!hide('dateOfAppeal') && <EditableDate field="dateOfAppeal" value={claim.date_of_appeal} />}
                                         {!hide('referenceNo') && <EditableText field="referenceNo" value={claim.reference_no} />}
+                                        {canManageStaff && (
+                                          <td className="border border-gray-200 px-1 py-1 text-center sticky right-0 bg-white hover:bg-brand-cream/50 z-10">
+                                            <DropdownMenu>
+                                              <DropdownMenuTrigger asChild>
+                                                <button
+                                                  type="button"
+                                                  aria-label="Claim row actions"
+                                                  className="p-1 rounded hover:bg-gray-200 text-gray-500"
+                                                >
+                                                  <MoreVertical className="w-4 h-4" />
+                                                </button>
+                                              </DropdownMenuTrigger>
+                                              <DropdownMenuContent align="end">
+                                                <DropdownMenuItem
+                                                  variant="destructive"
+                                                  onClick={() => setDeleteClaimTarget({
+                                                    id: claim.id,
+                                                    patientId: claim.patient_id,
+                                                    dateOfService: claim.date_of_service,
+                                                    cptCodes: claim.cpt_codes,
+                                                  })}
+                                                >
+                                                  <Trash2 className="w-4 h-4" />
+                                                  Delete Claim
+                                                </DropdownMenuItem>
+                                              </DropdownMenuContent>
+                                            </DropdownMenu>
+                                          </td>
+                                        )}
                                       </tr>
                                     );
                                     return isLastOfDateGroup

@@ -29,7 +29,9 @@ import {
   getClaimsByPatientAndPeriod,
   createClaimRecord,
   updateClaimRecord,
-  deleteClaimRecord,
+  deleteClaimRecordWithAudit,
+  ClaimRecordNotFoundError,
+  ClaimRecordPatientMismatchError,
   upsertClaimRecord,
   classifyClaimFollowUp,
   sortByFollowUpUrgency,
@@ -826,10 +828,25 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    delete: normalProtectedProcedure
-      .input(z.object({ id: z.string().uuid() }))
-      .mutation(async ({ input }) => {
-        await deleteClaimRecord(input.id);
+    delete: adminOrOwnerProcedure
+      .input(z.object({ id: z.string().uuid(), patientId: z.string().uuid() }))
+      .mutation(async ({ input, ctx }) => {
+        const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+        try {
+          await deleteClaimRecordWithAudit({
+            claimId: input.id,
+            patientId: input.patientId,
+            actorId,
+          });
+        } catch (err) {
+          if (err instanceof ClaimRecordNotFoundError) {
+            throw new TRPCError({ code: "NOT_FOUND", message: "Claim record not found. It may have already been deleted." });
+          }
+          if (err instanceof ClaimRecordPatientMismatchError) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "This claim does not belong to the selected patient." });
+          }
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to delete claim record. No changes were made." });
+        }
         return { success: true };
       }),
 
