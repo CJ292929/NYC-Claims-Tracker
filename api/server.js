@@ -888,36 +888,20 @@ async function updateClaimRecord(id, data) {
 }
 async function deleteClaimRecordWithAudit(params) {
   const { claimId, patientId, actorId } = params;
-  const { data: claim, error: fetchError } = await supabase.from("claims_records").select("id, patient_id").eq("id", claimId).maybeSingle();
-  if (fetchError) {
-    console.error("[Supabase] deleteClaimRecordWithAudit (fetch):", fetchError);
-    throw fetchError;
-  }
-  if (!claim) {
-    throw new ClaimRecordNotFoundError(claimId);
-  }
-  if (claim.patient_id !== patientId) {
-    throw new ClaimRecordPatientMismatchError(claimId, patientId);
-  }
-  const { data: auditRow, error: auditError } = await supabase.from("audit_logs").insert({
-    patient_id: patientId,
-    actor_id: actorId,
-    action: "CLAIM_RECORD_DELETE",
-    old_value: claimId,
-    new_value: null
-  }).select("id").single();
-  if (auditError) {
-    console.error("[Supabase] deleteClaimRecordWithAudit (audit insert):", auditError);
-    throw auditError;
-  }
-  const { error: deleteError } = await supabase.from("claims_records").delete().eq("id", claimId);
-  if (deleteError) {
-    console.error("[Supabase] deleteClaimRecordWithAudit (delete):", deleteError);
-    const { error: compensateError } = await supabase.from("audit_logs").delete().eq("id", auditRow.id);
-    if (compensateError) {
-      console.error("[Supabase] deleteClaimRecordWithAudit (compensating audit delete):", compensateError);
+  const { error } = await supabase.rpc("delete_claim_record_with_audit", {
+    p_claim_id: claimId,
+    p_patient_id: patientId,
+    p_actor_id: actorId
+  });
+  if (error) {
+    if (error.code === "P0010") {
+      throw new ClaimRecordNotFoundError(claimId);
     }
-    throw deleteError;
+    if (error.code === "P0011") {
+      throw new ClaimRecordPatientMismatchError(claimId, patientId);
+    }
+    console.error("[Supabase] deleteClaimRecordWithAudit (rpc):", error);
+    throw error;
   }
 }
 async function findCms1500EnrichmentCandidates(patientId, dateOfService, cptCodes) {

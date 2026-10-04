@@ -1253,18 +1253,17 @@ export class ClaimRecordPatientMismatchError extends Error {
 }
 
 /**
- * Deletes exactly one claims_records row after re-validating server-side that
- * it exists and belongs to the given patient, and records an audit_logs entry
- * for the deletion. audit_logs has no claims_records FK (see
- * supabase/migrations/20260923000000_audit_logs.sql) so true cross-table
- * atomicity would need a DB-side function — out of scope without a migration.
- * Instead this orders the two writes so every failure mode is safe:
- *   1. Audit row is written FIRST. If it fails, the claim is never deleted.
- *   2. Claim is deleted second. If that fails, the just-written audit row is
- *      removed (best-effort compensation) before the error is rethrown, so a
- *      failed deletion is never left with an audit entry describing it.
- * Only clinical-free identifying data (the claim id) goes into old_value —
- * no charge amounts, diagnosis codes, or other clinical fields.
+ * Deletes exactly one claims_records row and records its audit_logs entry
+ * in a single database transaction via the delete_claim_record_with_audit
+ * Postgres function (see
+ * supabase/migrations/20261004010000_delete_claim_record_with_audit_fn.sql).
+ * The function locks the row, re-validates it exists and belongs to the
+ * given patient, then deletes it and inserts the audit row together — any
+ * failure (including a mismatch/not-found check) rolls back both writes, so
+ * there is never a dangling audit entry for a deletion that didn't happen or
+ * a deletion with no audit trail. Only clinical-free identifying data (the
+ * claim id) goes into old_value — no charge amounts, diagnosis codes, or
+ * other clinical fields.
  */
 export async function deleteClaimRecordWithAudit(params: {
   claimId: string;
@@ -1273,57 +1272,21 @@ export async function deleteClaimRecordWithAudit(params: {
 }): Promise<void> {
   const { claimId, patientId, actorId } = params;
 
-  const { data: claim, error: fetchError } = await supabase
-    .from("claims_records")
-    .select("id, patient_id")
-    .eq("id", claimId)
-    .maybeSingle();
+  const { error } = await supabase.rpc("delete_claim_record_with_audit", {
+    p_claim_id: claimId,
+    p_patient_id: patientId,
+    p_actor_id: actorId,
+  });
 
-  if (fetchError) {
-    console.error("[Supabase] deleteClaimRecordWithAudit (fetch):", fetchError);
-    throw fetchError;
-  }
-  if (!claim) {
-    throw new ClaimRecordNotFoundError(claimId);
-  }
-  if ((claim as { patient_id: string }).patient_id !== patientId) {
-    throw new ClaimRecordPatientMismatchError(claimId, patientId);
-  }
-
-  const { data: auditRow, error: auditError } = await supabase
-    .from("audit_logs")
-    .insert({
-      patient_id: patientId,
-      actor_id: actorId,
-      action: "CLAIM_RECORD_DELETE",
-      old_value: claimId,
-      new_value: null,
-    })
-    .select("id")
-    .single();
-
-  if (auditError) {
-    console.error("[Supabase] deleteClaimRecordWithAudit (audit insert):", auditError);
-    throw auditError;
-  }
-
-  const { error: deleteError } = await supabase
-    .from("claims_records")
-    .delete()
-    .eq("id", claimId);
-
-  if (deleteError) {
-    console.error("[Supabase] deleteClaimRecordWithAudit (delete):", deleteError);
-    // Compensate: remove the audit row we just wrote so no record claims a
-    // deletion that never happened. Best-effort — log and continue either way.
-    const { error: compensateError } = await supabase
-      .from("audit_logs")
-      .delete()
-      .eq("id", (auditRow as { id: string }).id);
-    if (compensateError) {
-      console.error("[Supabase] deleteClaimRecordWithAudit (compensating audit delete):", compensateError);
+  if (error) {
+    if ((error as { code?: string }).code === "P0010") {
+      throw new ClaimRecordNotFoundError(claimId);
     }
-    throw deleteError;
+    if ((error as { code?: string }).code === "P0011") {
+      throw new ClaimRecordPatientMismatchError(claimId, patientId);
+    }
+    console.error("[Supabase] deleteClaimRecordWithAudit (rpc):", error);
+    throw error;
   }
 }
 
