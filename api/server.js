@@ -153,9 +153,12 @@ var init_authUrgency = __esm({
 // server/db.ts
 var db_exports = {};
 __export(db_exports, {
+  ClaimRecordNotFoundError: () => ClaimRecordNotFoundError,
+  ClaimRecordPatientMismatchError: () => ClaimRecordPatientMismatchError,
   FOLLOW_UP_STALE_DAYS: () => FOLLOW_UP_STALE_DAYS,
   adminResetClinicUserPassword: () => adminResetClinicUserPassword,
   aggregateClaimStatusCounts: () => aggregateClaimStatusCounts,
+  applyCms1500Enrichment: () => applyCms1500Enrichment,
   approveAndCreateNewBatch: () => approveAndCreateNewBatch,
   archiveClinicUser: () => archiveClinicUser,
   bulkCreateVisitRecords: () => bulkCreateVisitRecords,
@@ -167,11 +170,12 @@ __export(db_exports, {
   createInsurerCatalogEntry: () => createInsurerCatalogEntry,
   createPatient: () => createPatient,
   createVisitRecord: () => createVisitRecord,
-  deleteClaimRecord: () => deleteClaimRecord,
+  deleteClaimRecordWithAudit: () => deleteClaimRecordWithAudit,
   deletePatient: () => deletePatient,
   determineActiveAuthPeriod: () => determineActiveAuthPeriod,
   determineMarkAsRequestedTargetRow: () => determineMarkAsRequestedTargetRow,
   diffPatientUpdate: () => diffPatientUpdate,
+  findCms1500EnrichmentCandidates: () => findCms1500EnrichmentCandidates,
   getAllPatients: () => getAllPatients,
   getAuthAlertSummaries: () => getAuthAlertSummaries,
   getClaimsByPatientAndPeriod: () => getClaimsByPatientAndPeriod,
@@ -186,6 +190,7 @@ __export(db_exports, {
   getVisitsByPatientId: () => getVisitsByPatientId,
   listClinicUsers: () => listClinicUsers,
   listInsurerCatalog: () => listInsurerCatalog,
+  patientHasAnyClaimRecords: () => patientHasAnyClaimRecords,
   reactivateClinicUser: () => reactivateClinicUser,
   setPatientActive: () => setPatientActive,
   sortByFollowUpUrgency: () => sortByFollowUpUrgency,
@@ -881,11 +886,98 @@ async function updateClaimRecord(id, data) {
     throw error;
   }
 }
-async function deleteClaimRecord(id) {
-  const { error } = await supabase.from("claims_records").delete().eq("id", id);
+async function deleteClaimRecordWithAudit(params) {
+  const { claimId, patientId, actorId } = params;
+  const { error } = await supabase.rpc("delete_claim_record_with_audit", {
+    p_claim_id: claimId,
+    p_patient_id: patientId,
+    p_actor_id: actorId
+  });
   if (error) {
-    console.error("[Supabase] deleteClaimRecord:", error);
+    if (error.code === "P0010") {
+      throw new ClaimRecordNotFoundError(claimId);
+    }
+    if (error.code === "P0011") {
+      throw new ClaimRecordPatientMismatchError(claimId, patientId);
+    }
+    console.error("[Supabase] deleteClaimRecordWithAudit (rpc):", error);
     throw error;
+  }
+}
+async function findCms1500EnrichmentCandidates(patientId, dateOfService, cptCodes) {
+  const dosStr = dateOfService.toISOString().split("T")[0];
+  let query = supabase.from("claims_records").select([
+    "id",
+    "auth_period",
+    "charge_amount",
+    "insurance_reimbursement",
+    "patient_amount_paid",
+    "patient_amount_due",
+    "visit_number",
+    "diagnosis_codes",
+    "modifier",
+    "units_billed",
+    ...REIMBURSEMENT_EVIDENCE_COLUMNS
+  ].join(", ")).eq("patient_id", patientId).eq("date_of_service", dosStr);
+  query = cptCodes ? query.eq("cpt_codes", cptCodes) : query.is("cpt_codes", null);
+  const { data, error } = await query;
+  if (error) {
+    console.error("[Supabase] findCms1500EnrichmentCandidates:", error);
+    throw error;
+  }
+  return (data ?? []).map((r) => ({
+    id: r.id,
+    authPeriod: r.auth_period,
+    chargeAmount: r.charge_amount,
+    insuranceReimbursement: r.insurance_reimbursement,
+    patientAmountPaid: r.patient_amount_paid,
+    patientAmountDue: r.patient_amount_due,
+    visitNumber: r.visit_number,
+    diagnosisCodes: r.diagnosis_codes,
+    modifier: r.modifier,
+    unitsBilled: r.units_billed,
+    hasReimbursementEvidence: REIMBURSEMENT_EVIDENCE_COLUMNS.some((col) => r[col] !== null && r[col] !== void 0)
+  }));
+}
+async function patientHasAnyClaimRecords(patientId) {
+  const { count, error } = await supabase.from("claims_records").select("id", { count: "exact", head: true }).eq("patient_id", patientId);
+  if (error) {
+    console.error("[Supabase] patientHasAnyClaimRecords:", error);
+    throw error;
+  }
+  return (count ?? 0) > 0;
+}
+async function applyCms1500Enrichment(params) {
+  const dosStr = params.dateOfService.toISOString().split("T")[0];
+  let ownershipQuery = supabase.from("claims_records").select("id").eq("id", params.claimRecordId).eq("patient_id", params.patientId).eq("date_of_service", dosStr);
+  ownershipQuery = params.cptCodes ? ownershipQuery.eq("cpt_codes", params.cptCodes) : ownershipQuery.is("cpt_codes", null);
+  const { data: owned, error: ownErr } = await ownershipQuery.maybeSingle();
+  if (ownErr) {
+    console.error("[Supabase] applyCms1500Enrichment (ownership check):", ownErr);
+    throw ownErr;
+  }
+  if (!owned) {
+    throw new Error("Selected claim row does not belong to this patient or no longer matches the service date/CPT code.");
+  }
+  const patch = {};
+  if (params.visitNumber != null) patch.visit_number = params.visitNumber;
+  if (params.diagnosisCodes != null) patch.diagnosis_codes = params.diagnosisCodes;
+  if (params.modifier != null) patch.modifier = params.modifier;
+  if (params.unitsBilled != null) patch.units_billed = params.unitsBilled;
+  if (Object.keys(patch).length === 0) return;
+  let updateQuery = supabase.from("claims_records").update(patch).eq("id", params.claimRecordId).eq("patient_id", params.patientId).eq("date_of_service", dosStr);
+  updateQuery = params.cptCodes ? updateQuery.eq("cpt_codes", params.cptCodes) : updateQuery.is("cpt_codes", null);
+  const { data: updated, error } = await updateQuery.select("id");
+  if (error) {
+    console.error("[Supabase] applyCms1500Enrichment (update):", error);
+    throw error;
+  }
+  if (!updated || updated.length === 0) {
+    throw new Error("Selected claim row does not belong to this patient or no longer matches the service date/CPT code.");
+  }
+  if (updated.length > 1) {
+    console.error(`[Supabase] applyCms1500Enrichment: update matched ${updated.length} rows for claimRecordId ${params.claimRecordId} -- expected exactly 1.`);
+    throw new Error("Update affected more than one row unexpectedly \u2014 aborting rather than risk patching the wrong claim.");
   }
 }
 async function upsertClaimRecord(data) {
@@ -960,7 +1052,7 @@ async function createInsurerCatalogEntry(params) {
   }
   return toInsurerCatalogEntry(data);
 }
-var FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS;
+var FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, REIMBURSEMENT_EVIDENCE_COLUMNS;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
@@ -996,6 +1088,28 @@ var init_db = __esm({
       "pended",
       "rejected",
       "resubmitted"
+    ];
+    ClaimRecordNotFoundError = class extends Error {
+      constructor(id) {
+        super(`Claim record ${id} not found`);
+        this.name = "ClaimRecordNotFoundError";
+      }
+    };
+    ClaimRecordPatientMismatchError = class extends Error {
+      constructor(id, expectedPatientId) {
+        super(`Claim record ${id} does not belong to patient ${expectedPatientId}`);
+        this.name = "ClaimRecordPatientMismatchError";
+      }
+    };
+    REIMBURSEMENT_EVIDENCE_COLUMNS = [
+      "insurance_reimbursement",
+      "patient_amount_paid",
+      "patient_amount_due",
+      "oa_claim_number",
+      "check_date",
+      "check_number_virtual_card",
+      "reference_no",
+      "payment_received"
     ];
   }
 });
@@ -2215,6 +2329,49 @@ function parseMeritainEOBWithGroups(text) {
   }
   return result;
 }
+function parseIndexedDiagnosisCodes(text) {
+  const map = /* @__PURE__ */ new Map();
+  const box21Start = text.search(/DIAGNOSIS\s+OR\s+NATURE\s+OF\s+ILLNESS/i);
+  const box24Start = text.search(/24\.\s*A\.?\s*DATE|DATE\(S\)\s*OF\s*SERVICE/i);
+  const box21End = box24Start >= 0 ? box24Start : text.length;
+  const box21Text = box21Start >= 0 ? text.slice(box21Start, box21End) : text.slice(0, box21End);
+  const labeledRe = /(?<![\w.])([1-9]|1[0-2]|[A-L])[.\)]?\s+([A-Z]\d{2,3}\.\d{1,4})\b/g;
+  const labeled = [];
+  let lm;
+  while ((lm = labeledRe.exec(box21Text)) !== null) {
+    const label = lm[1];
+    const idx = /^[A-L]$/.test(label) ? label.charCodeAt(0) - 64 : parseInt(label, 10);
+    labeled.push({ idx, code: lm[2] });
+  }
+  if (labeled.length > 0) {
+    for (const { idx, code } of labeled) if (!map.has(idx)) map.set(idx, code);
+    return map;
+  }
+  const plainRe = /([A-Z]\d{2,3}\.\d{1,4})/g;
+  let i = 0;
+  let pm;
+  while ((pm = plainRe.exec(box21Text)) !== null) {
+    i++;
+    if (!map.has(i)) map.set(i, pm[1]);
+  }
+  return map;
+}
+function resolveDiagnosisPointer(pointerToken, indexed) {
+  if (!pointerToken) return null;
+  const tokens = pointerToken.toUpperCase().match(/[1-9]|1[0-2]|[A-L]/g);
+  if (!tokens) return null;
+  const codes = [];
+  for (const t2 of tokens) {
+    const idx = /^[A-L]$/.test(t2) ? t2.charCodeAt(0) - 64 : parseInt(t2, 10);
+    const code = indexed.get(idx);
+    if (code && !codes.includes(code)) codes.push(code);
+  }
+  return codes.length > 0 ? codes.join(", ") : null;
+}
+function resolveLineDiagnosisCodes(indexed, pointerToken, allDiagCodesFallback) {
+  if (indexed.size <= 1) return allDiagCodesFallback;
+  return resolveDiagnosisPointer(pointerToken, indexed);
+}
 function parseCMS1500Date(mm, dd, yy) {
   const m = mm.trim().padStart(2, "0");
   const d = dd.trim().padStart(2, "0");
@@ -2243,6 +2400,7 @@ function parseCMS1500(text) {
     if (!diagCodes.includes(code)) diagCodes.push(code);
   }
   const allDiagCodes = diagCodes.join(", ");
+  const indexedDiagnoses = parseIndexedDiagnosisCodes(text);
   let dateSubmitted = null;
   const signedDateMatch = text.match(/SIGNED\s+SOF[\s\S]{0,200}DATE[\s\S]{0,50}(\d{2}\/\d{2}\/\d{4})/);
   if (signedDateMatch) {
@@ -2264,7 +2422,12 @@ function parseCMS1500(text) {
     const fromDate = parseCMS1500Date(cm2[1], cm2[2], cm2[3]);
     const placeOfService = cm2[7];
     const cptCode = cm2[8];
-    const modifier = cm2[9].trim().split(/\s+/)[0];
+    const modifierTokens = cm2[9].trim().split(/\s+/);
+    const modifier = modifierTokens[0];
+    const inlinePointerCandidate = modifierTokens.length > 1 ? modifierTokens.slice(1).join("") : null;
+    const letterPointerCandidate = /^[A-L]{1,6}$/.test(cm2[10]) ? cm2[10] : null;
+    const pointerToken = inlinePointerCandidate || letterPointerCandidate || null;
+    const lineDiagnosisCodes = resolveLineDiagnosisCodes(indexedDiagnoses, pointerToken, allDiagCodes || null);
     const chargeAmount = parseMoney(cm2[11]);
     const units = parseInt(cm2[12], 10);
     const visitNumber = clampVisitNumber(compactRowCounter);
@@ -2273,7 +2436,7 @@ function parseCMS1500(text) {
       dateMap.set(dateKey, {
         dateOfService: fromDate,
         placeOfService,
-        diagnosisCodes: allDiagCodes || null,
+        diagnosisCodes: lineDiagnosisCodes,
         claimSubmittedDate: dateSubmitted,
         visitNumber,
         cptCodes: null,
@@ -2300,7 +2463,7 @@ function parseCMS1500(text) {
       patientAmountDue: null,
       unitsBilled: units,
       modifier,
-      diagnosisCodes: allDiagCodes || null
+      diagnosisCodes: lineDiagnosisCodes
     });
   }
   if (dateMap.size === 0) {
@@ -2351,6 +2514,15 @@ function parseCMS1500(text) {
       const modWindow = lines2.slice(i, Math.min(lines2.length - 1, i + 5)).join(" ");
       const modMatch = modWindow.match(/\b(GP|59|25|51|76|77|KX|CO|GN|GO|GT|95|AT)\b/);
       if (modMatch) modifier = modMatch[1];
+      let pointerToken = null;
+      if (modMatch) {
+        let afterModifier = modWindow.slice(modMatch.index + modMatch[0].length, modMatch.index + modMatch[0].length + 15);
+        const chargeBoundary = afterModifier.match(/\d+\.\d{2}/);
+        if (chargeBoundary) afterModifier = afterModifier.slice(0, chargeBoundary.index);
+        const pointerMatch = afterModifier.match(/\b([1-9](?:,?[1-9]){0,3})\b/);
+        if (pointerMatch) pointerToken = pointerMatch[1];
+      }
+      const lineDiagnosisCodes = resolveLineDiagnosisCodes(indexedDiagnoses, pointerToken, allDiagCodes || null);
       let chargeAmount = null;
       let units = null;
       const rowWindowStart = Math.max(0, i - 2);
@@ -2376,7 +2548,7 @@ function parseCMS1500(text) {
         dateMap.set(dateKey, {
           dateOfService: fromDate,
           placeOfService,
-          diagnosisCodes: allDiagCodes || null,
+          diagnosisCodes: lineDiagnosisCodes,
           claimSubmittedDate: dateSubmitted,
           visitNumber,
           cptCodes: null,
@@ -2397,7 +2569,7 @@ function parseCMS1500(text) {
         patientAmountDue: null,
         unitsBilled: units,
         modifier,
-        diagnosisCodes: allDiagCodes || null
+        diagnosisCodes: lineDiagnosisCodes
       });
     }
   }
@@ -4337,8 +4509,23 @@ var appRouter = router({
       });
       return { success: true };
     }),
-    delete: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
-      await deleteClaimRecord(input.id);
+    delete: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid(), patientId: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
+      const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+      try {
+        await deleteClaimRecordWithAudit({
+          claimId: input.id,
+          patientId: input.patientId,
+          actorId
+        });
+      } catch (err) {
+        if (err instanceof ClaimRecordNotFoundError) {
+          throw new TRPCError3({ code: "NOT_FOUND", message: "Claim record not found. It may have already been deleted." });
+        }
+        if (err instanceof ClaimRecordPatientMismatchError) {
+          throw new TRPCError3({ code: "BAD_REQUEST", message: "This claim does not belong to the selected patient." });
+        }
+        throw new TRPCError3({ code: "INTERNAL_SERVER_ERROR", message: "Failed to delete claim record. No changes were made." });
+      }
       return { success: true };
     }),
     upsert: normalProtectedProcedure.input(z2.object({
@@ -4396,6 +4583,100 @@ var appRouter = router({
         lmn: input.lmn ?? null
       });
       return { success: true };
+    }),
+    /**
+     * CMS1500 enrichment, step 1 — preview only, no writes.
+     *
+     * For each CMS1500 line (identified by its date of service + CPT
+     * code(s)), finds existing claim rows for this patient across EVERY auth
+     * period (never just their latest) and classifies the result:
+     *   - 0 candidates -> 'no_match' (or 'no_claims' if the patient has no
+     *     claim rows at all, meaning the reimbursement file was never
+     *     uploaded)
+     *   - 1 candidate WITH reimbursement evidence (see
+     *     Cms1500EnrichmentCandidate.hasReimbursementEvidence) -> 'matched',
+     *     safe to auto-apply
+     *   - 1 candidate with NO reimbursement evidence -> 'matched_unconfirmed'
+     *     — claims_records has no provenance column, so a lone match could
+     *     be a manual entry or a legacy/pre-fix CMS1500-only row rather than
+     *     an actual reimbursement row; this is disclosed to staff and
+     *     requires an explicit confirmation click before it's included in
+     *     the commit, never auto-applied like a confirmed 'matched' line
+     *   - 2+ candidates -> 'needs_selection' (staff must pick which row)
+     */
+    cms1500EnrichmentPreview: normalProtectedProcedure.input(z2.object({
+      patientId: z2.string().uuid(),
+      lines: z2.array(z2.object({
+        lineKey: z2.string(),
+        dateOfService: z2.string().nullable(),
+        cptCodes: z2.string().nullable()
+      }))
+    })).mutation(async ({ input }) => {
+      const hasAnyClaims = await patientHasAnyClaimRecords(input.patientId);
+      const results = await Promise.all(input.lines.map(async (line) => {
+        const dos = parseDate2(line.dateOfService);
+        if (!dos) {
+          return { lineKey: line.lineKey, status: "invalid_date", candidates: [] };
+        }
+        const candidates = await findCms1500EnrichmentCandidates(input.patientId, dos, line.cptCodes ?? null);
+        if (candidates.length === 0) {
+          const status = hasAnyClaims ? "no_match" : "no_claims";
+          return { lineKey: line.lineKey, status, candidates: [] };
+        }
+        if (candidates.length === 1) {
+          const status = candidates[0].hasReimbursementEvidence ? "matched" : "matched_unconfirmed";
+          return { lineKey: line.lineKey, status, candidates, claimRecordId: candidates[0].id };
+        }
+        return { lineKey: line.lineKey, status: "needs_selection", candidates };
+      }));
+      return { hasAnyClaims, results };
+    }),
+    /**
+     * CMS1500 enrichment, step 2 — commit.
+     *
+     * Only patches visit_number / diagnosis_codes / modifier / units_billed
+     * on the specific row identified by `claimRecordId` for each line (the
+     * auto-matched id from the preview, or the id staff explicitly selected
+     * for an ambiguous line). Re-validates ownership + compatibility
+     * server-side before writing — never inserts a new row, never touches
+     * charge_amount or any payment field. Lines the client never resolved
+     * (no_match/no_claims/needs_selection without a pick) are simply absent
+     * from `lines` and so are never sent here at all.
+     */
+    cms1500EnrichmentCommit: normalProtectedProcedure.input(z2.object({
+      patientId: z2.string().uuid(),
+      lines: z2.array(z2.object({
+        lineKey: z2.string(),
+        claimRecordId: z2.string().uuid(),
+        dateOfService: z2.string().nullable(),
+        cptCodes: z2.string().nullable(),
+        visitNumber: z2.number().nullable().optional(),
+        diagnosisCodes: z2.string().nullable().optional(),
+        modifier: z2.string().nullable().optional(),
+        unitsBilled: z2.number().nullable().optional()
+      }))
+    })).mutation(async ({ input }) => {
+      const results = [];
+      for (const line of input.lines) {
+        try {
+          const dos = parseDate2(line.dateOfService);
+          if (!dos) throw new Error("Invalid or missing date of service.");
+          await applyCms1500Enrichment({
+            claimRecordId: line.claimRecordId,
+            patientId: input.patientId,
+            dateOfService: dos,
+            cptCodes: line.cptCodes ?? null,
+            visitNumber: line.visitNumber ?? null,
+            diagnosisCodes: line.diagnosisCodes ?? null,
+            modifier: line.modifier ?? null,
+            unitsBilled: line.unitsBilled ?? null
+          });
+          results.push({ lineKey: line.lineKey, status: "saved" });
+        } catch (err) {
+          results.push({ lineKey: line.lineKey, status: "failed", error: err?.message ?? "Unknown error" });
+        }
+      }
+      return { results };
     }),
     /**
      * Bulk import claims from a multi-patient EOB file.
@@ -4504,76 +4785,107 @@ var appRouter = router({
         const { data: periodRows } = await supabase2.from("visit_records").select("auth_period").eq("patient_id", matchedPatient.id);
         const maxPeriod = periodRows && periodRows.length > 0 ? Math.max(...periodRows.map((r) => r.auth_period ?? 1)) : 1;
         let claimsImported = 0;
+        let skippedNoMatch = 0;
+        let skippedNoReimbursementUploaded = 0;
+        let skippedNeedsSelection = 0;
+        let skippedUnconfirmedProvenance = 0;
+        const skippedCms1500Lines = [];
         try {
-          for (const claim of group.claims) {
-            const lines = claim.cptLines && claim.cptLines.length > 0 ? claim.cptLines : [{
-              // fallback: treat the claim itself as a single line
-              cptCodes: claim.cptCodes ?? null,
-              chargeAmount: claim.chargeAmount ?? null,
-              insuranceReimbursement: claim.insuranceReimbursement ?? null,
-              patientAmountPaid: claim.patientAmountPaid ?? null,
-              patientAmountDue: claim.patientAmountDue ?? null,
-              unitsBilled: claim.unitsBilled ?? null,
-              modifier: claim.modifier ?? null,
-              diagnosisCodes: claim.diagnosisCodes ?? null
-            }];
-            for (const line of lines) {
-              const isReimb = uploadType === "reimbursement";
-              const isCms = uploadType === "cms1500";
-              const cptForMatch = line.cptCodes ?? null;
-              await upsertClaimRecord({
-                patientId: matchedPatient.id,
-                authPeriod: maxPeriod,
-                // ── Match key fields (always provided) ─────────────────────────────
-                dateOfService: parseDate2(claim.dateOfService),
-                // always save DOS for identification
-                cptCodes: cptForMatch,
-                // always used for matching; written for both types
-                // ── Fields for BOTH upload types ──────────────────────────────
-                claimStatus: claim.claimStatus ?? "submitted",
-                // ── Reimbursement Insurance upload fields ─────────────────────
-                // Saves: Insurance Reimbursement, Pt Paid, Pt Due,
-                //        Claim #, Check/Payment Date, Check/EFT
-                oaClaimNumber: isReimb ? claim.oaClaimNumber ?? null : null,
-                // Claim #
-                insuranceReimbursement: isReimb ? line.insuranceReimbursement ?? null : null,
-                patientAmountPaid: isReimb ? line.patientAmountPaid ?? null : null,
-                // Pt Paid
-                patientAmountDue: isReimb ? line.patientAmountDue ?? null : null,
-                // Pt Due
-                checkDate: isReimb ? parseDate2(claim.checkDate) : null,
-                // Check/Payment Date
-                checkNumberVirtualCard: isReimb ? claim.checkNumberVirtualCard ?? null : null,
-                // Check/EFT
-                referenceNo: isReimb ? claim.referenceNo ?? null : null,
-                insuranceBilled: isReimb ? claim.insuranceBilled ?? null : null,
-                paymentReceived: isReimb ? line.insuranceReimbursement ?? null : null,
-                // ── CMS1500-exclusive form fields ──────────────────────────────
-                // Place of service, visit #, date submitted, and the BCBS
-                // reference number come from specific CMS-1500 boxes and are
-                // never printed on a payer-issued EOB.
-                placeOfService: isCms ? claim.placeOfService ?? null : null,
-                visitNumber: isCms ? claim.visitNumber ?? null : null,
-                claimSubmittedDate: isCms ? parseDate2(claim.claimSubmittedDate) : null,
-                expireBcbsClaimNumber: isCms ? claim.expireBcbsClaimNumber ?? null : null,
-                // ── Line-item billing detail (both upload types) ───────────────
-                // Units, Diagnosis, Modifier, and Charge come from CMS-1500
-                // Box 24 on a CMS1500 upload, but many EOBs also print their
-                // own per-line "Line Level Information" table with the same
-                // data (Quantity, DX Codes, Modifier, Billed Amount) — carry
-                // it through regardless of upload type; upsertClaimRecord only
-                // patches non-null fields, so a reimbursement upload can't
-                // blank out a value a prior CMS1500 upload already saved.
-                unitsBilled: line.unitsBilled ?? null,
-                diagnosisCodes: line.diagnosisCodes ?? null,
-                modifier: line.modifier ?? null,
-                chargeAmount: line.chargeAmount ?? null,
-                // ── Shared optional fields ────────────────────────────────────
-                dateReceived: parseDate2(claim.dateReceived),
-                dateOfAppeal: parseDate2(claim.dateOfAppeal),
-                lmn: claim.lmn ?? null
-              });
-              claimsImported++;
+          if (uploadType === "cms1500") {
+            const hasAnyClaims = await patientHasAnyClaimRecords(matchedPatient.id);
+            for (const claim of group.claims) {
+              const lines = claim.cptLines && claim.cptLines.length > 0 ? claim.cptLines : [{
+                cptCodes: claim.cptCodes ?? null,
+                unitsBilled: claim.unitsBilled ?? null,
+                modifier: claim.modifier ?? null,
+                diagnosisCodes: claim.diagnosisCodes ?? null
+              }];
+              const dos = parseDate2(claim.dateOfService);
+              for (const line of lines) {
+                if (!dos) {
+                  skippedNoMatch++;
+                  skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: "invalid_date" });
+                  continue;
+                }
+                const candidates2 = await findCms1500EnrichmentCandidates(matchedPatient.id, dos, line.cptCodes ?? null);
+                if (candidates2.length === 0) {
+                  if (hasAnyClaims) {
+                    skippedNoMatch++;
+                    skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: "no_match" });
+                  } else {
+                    skippedNoReimbursementUploaded++;
+                    skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: "no_reimbursement_uploaded" });
+                  }
+                  continue;
+                }
+                if (candidates2.length > 1) {
+                  skippedNeedsSelection++;
+                  skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: "needs_selection" });
+                  continue;
+                }
+                if (!candidates2[0].hasReimbursementEvidence) {
+                  skippedUnconfirmedProvenance++;
+                  skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: "unconfirmed_provenance" });
+                  continue;
+                }
+                await applyCms1500Enrichment({
+                  claimRecordId: candidates2[0].id,
+                  patientId: matchedPatient.id,
+                  dateOfService: dos,
+                  cptCodes: line.cptCodes ?? null,
+                  visitNumber: claim.visitNumber ?? null,
+                  diagnosisCodes: line.diagnosisCodes ?? null,
+                  modifier: line.modifier ?? null,
+                  unitsBilled: line.unitsBilled ?? null
+                });
+                claimsImported++;
+              }
+            }
+          } else {
+            for (const claim of group.claims) {
+              const lines = claim.cptLines && claim.cptLines.length > 0 ? claim.cptLines : [{
+                // fallback: treat the claim itself as a single line
+                cptCodes: claim.cptCodes ?? null,
+                chargeAmount: claim.chargeAmount ?? null,
+                insuranceReimbursement: claim.insuranceReimbursement ?? null,
+                patientAmountPaid: claim.patientAmountPaid ?? null,
+                patientAmountDue: claim.patientAmountDue ?? null,
+                unitsBilled: claim.unitsBilled ?? null,
+                modifier: claim.modifier ?? null,
+                diagnosisCodes: claim.diagnosisCodes ?? null
+              }];
+              for (const line of lines) {
+                await upsertClaimRecord({
+                  patientId: matchedPatient.id,
+                  authPeriod: maxPeriod,
+                  dateOfService: parseDate2(claim.dateOfService),
+                  cptCodes: line.cptCodes ?? null,
+                  claimStatus: claim.claimStatus ?? "submitted",
+                  oaClaimNumber: claim.oaClaimNumber ?? null,
+                  insuranceReimbursement: line.insuranceReimbursement ?? null,
+                  patientAmountPaid: line.patientAmountPaid ?? null,
+                  patientAmountDue: line.patientAmountDue ?? null,
+                  checkDate: parseDate2(claim.checkDate),
+                  checkNumberVirtualCard: claim.checkNumberVirtualCard ?? null,
+                  referenceNo: claim.referenceNo ?? null,
+                  insuranceBilled: claim.insuranceBilled ?? null,
+                  paymentReceived: line.insuranceReimbursement ?? null,
+                  placeOfService: null,
+                  visitNumber: null,
+                  claimSubmittedDate: null,
+                  expireBcbsClaimNumber: null,
+                  // Line-item billing detail (units/diagnosis/modifier/charge)
+                  // many EOBs also print alongside their payment columns.
+                  unitsBilled: line.unitsBilled ?? null,
+                  diagnosisCodes: line.diagnosisCodes ?? null,
+                  modifier: line.modifier ?? null,
+                  chargeAmount: line.chargeAmount ?? null,
+                  dateReceived: parseDate2(claim.dateReceived),
+                  dateOfAppeal: parseDate2(claim.dateOfAppeal),
+                  lmn: claim.lmn ?? null
+                });
+                claimsImported++;
+              }
             }
           }
           results.push({
@@ -4582,7 +4894,12 @@ var appRouter = router({
             patientId: matchedPatient.id,
             dashboardName: matchedPatient.name,
             authPeriod: maxPeriod,
-            claimsImported
+            claimsImported,
+            ...skippedNoMatch > 0 ? { skippedNoMatch } : {},
+            ...skippedNoReimbursementUploaded > 0 ? { skippedNoReimbursementUploaded } : {},
+            ...skippedNeedsSelection > 0 ? { skippedNeedsSelection } : {},
+            ...skippedUnconfirmedProvenance > 0 ? { skippedUnconfirmedProvenance } : {},
+            ...skippedCms1500Lines.length > 0 ? { skippedCms1500Lines } : {}
           });
         } catch (err) {
           results.push({

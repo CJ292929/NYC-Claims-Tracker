@@ -1238,10 +1238,54 @@ export async function updateClaimRecord(
   }
 }
 
-export async function deleteClaimRecord(id: string): Promise<void> {
-  const { error } = await supabase.from("claims_records").delete().eq("id", id);
+export class ClaimRecordNotFoundError extends Error {
+  constructor(id: string) {
+    super(`Claim record ${id} not found`);
+    this.name = "ClaimRecordNotFoundError";
+  }
+}
+
+export class ClaimRecordPatientMismatchError extends Error {
+  constructor(id: string, expectedPatientId: string) {
+    super(`Claim record ${id} does not belong to patient ${expectedPatientId}`);
+    this.name = "ClaimRecordPatientMismatchError";
+  }
+}
+
+/**
+ * Deletes exactly one claims_records row and records its audit_logs entry
+ * in a single database transaction via the delete_claim_record_with_audit
+ * Postgres function (see
+ * supabase/migrations/20261004010000_delete_claim_record_with_audit_fn.sql).
+ * The function locks the row, re-validates it exists and belongs to the
+ * given patient, then deletes it and inserts the audit row together — any
+ * failure (including a mismatch/not-found check) rolls back both writes, so
+ * there is never a dangling audit entry for a deletion that didn't happen or
+ * a deletion with no audit trail. Only clinical-free identifying data (the
+ * claim id) goes into old_value — no charge amounts, diagnosis codes, or
+ * other clinical fields.
+ */
+export async function deleteClaimRecordWithAudit(params: {
+  claimId: string;
+  patientId: string;
+  actorId: string | null;
+}): Promise<void> {
+  const { claimId, patientId, actorId } = params;
+
+  const { error } = await supabase.rpc("delete_claim_record_with_audit", {
+    p_claim_id: claimId,
+    p_patient_id: patientId,
+    p_actor_id: actorId,
+  });
+
   if (error) {
-    console.error("[Supabase] deleteClaimRecord:", error);
+    if ((error as { code?: string }).code === "P0010") {
+      throw new ClaimRecordNotFoundError(claimId);
+    }
+    if ((error as { code?: string }).code === "P0011") {
+      throw new ClaimRecordPatientMismatchError(claimId, patientId);
+    }
+    console.error("[Supabase] deleteClaimRecordWithAudit (rpc):", error);
     throw error;
   }
 }

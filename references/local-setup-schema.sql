@@ -191,6 +191,52 @@ ALTER TABLE public.insurer_catalog NO FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON public.insurer_catalog FROM PUBLIC, anon, authenticated;
 GRANT ALL ON public.insurer_catalog TO service_role;
 
+-- ─── delete_claim_record_with_audit (P4-P12R: atomic claim delete + audit) ─
+-- Locks the target claims_records row, validates it exists and belongs to
+-- the given patient, then deletes it and writes the audit_logs entry in the
+-- same transaction — both succeed or both roll back. Called exclusively via
+-- supabase.rpc() from the service-role client in server/db.ts. See
+-- supabase/migrations/20261004010000_delete_claim_record_with_audit_fn.sql
+-- for the full rationale (locking/concurrency behavior, SECURITY DEFINER +
+-- fixed search_path, and the service_role-only execute grant).
+CREATE OR REPLACE FUNCTION public.delete_claim_record_with_audit(
+  p_claim_id uuid,
+  p_patient_id uuid,
+  p_actor_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  v_patient_id uuid;
+BEGIN
+  SELECT patient_id INTO v_patient_id
+  FROM public.claims_records
+  WHERE id = p_claim_id
+  FOR UPDATE;
+
+  IF v_patient_id IS NULL THEN
+    RAISE EXCEPTION 'claim_record_not_found: % ', p_claim_id
+      USING ERRCODE = 'P0010';
+  END IF;
+
+  IF v_patient_id <> p_patient_id THEN
+    RAISE EXCEPTION 'claim_record_patient_mismatch: % does not belong to %', p_claim_id, p_patient_id
+      USING ERRCODE = 'P0011';
+  END IF;
+
+  INSERT INTO public.audit_logs (patient_id, actor_id, action, old_value, new_value)
+  VALUES (p_patient_id, p_actor_id, 'CLAIM_RECORD_DELETE', p_claim_id::text, NULL);
+
+  DELETE FROM public.claims_records WHERE id = p_claim_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.delete_claim_record_with_audit(uuid, uuid, uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.delete_claim_record_with_audit(uuid, uuid, uuid) TO service_role;
+
 -- ─── auto-update updated_at on row changes ─────────────────────────────────
 CREATE OR REPLACE FUNCTION public.set_updated_at()
 RETURNS trigger AS $$
