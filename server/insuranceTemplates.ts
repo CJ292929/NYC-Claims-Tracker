@@ -144,6 +144,29 @@ export interface DateClaimGroup extends ExtractedClaim {
     modifier: string | null;
     diagnosisCodes: string | null;
   }>;
+  /**
+   * Set when a payer's EOB only discloses ONE combined Plan Paid / Patient
+   * Responsibility figure for an entire multi-CPT-line claim block, with no
+   * per-line breakdown printed (e.g. Globe Life — see parseGlobeLifeEOB
+   * below). claims_records has no claim-level money column: bulkImportFromEOB
+   * (server/routers.ts) persists one row per cptLine, each with its own
+   * insuranceReimbursement. Writing this shared total onto any cptLine would
+   * either duplicate it once per line (overstating the real payment by 2-4x)
+   * or require fabricating a per-line split that isn't in the source
+   * document — both are unsafe. Every cptLine's insuranceReimbursement /
+   * patientAmountDue is left null instead, and the true totals are carried
+   * here, UNWRITTEN, purely so the upload response can surface an explicit
+   * "needs manual review" notice to staff rather than silently losing the
+   * amount. See claimUpload.ts's reimbursementReviewNeeded and the P4-P13
+   * PR description for the narrow schema change (a nullable claim-group
+   * total — e.g. a new table keyed by claim/EOB block — that would let a
+   * future pass resolve this safely instead of just flagging it).
+   */
+  unresolvedClaimTotal?: {
+    planPaid: number;
+    patientResponsibility: number | null;
+    cptCount: number;
+  } | null;
 }
 
 /** Parse Meritain EOB and return claims grouped by patient name, then by date */
@@ -337,6 +360,246 @@ export function parseMeritainEOBWithGroups(text: string): Array<{ patientName: s
     result.push({ patientName, claims: Array.from(dateMap.values()) });
   }
 
+  return result;
+}
+
+// ─── Globe Life Insurance Co. of New York EOP/EOB Template ─────────────────
+
+/**
+ * Globe Life Insurance Co. of New York — "Explanation of Payment"
+ *
+ * The user-facing/spoken name "Global Life Insurance" is an alias of this
+ * canonical payer name (see the insurer_catalog seed migration) — distinct
+ * from any other, unrelated insurer; detection below matches the document's
+ * own "Globe Life" branding, never the user's wording directly.
+ *
+ * Detection: "Globe Life" in text, combined with an EOP-specific anchor
+ * ("Medicare Control #", "Explanation of Payment", or "Payee ID") so a
+ * stray "Globe Life" mention elsewhere doesn't misfire this template.
+ *
+ * Structure (per the real sample this template was built against):
+ *   - Document header: Check Number, Payment Date ("September 30, 2026"),
+ *     Payee ID — shared by every claim block in the file.
+ *   - Per-patient, per-claim blocks: "Patient:  NAME", Patient Acct #,
+ *     Medicare ID, Provider, Policy #, "Medicare Control #:  NUMBER"
+ *     (the per-claim identifier), Interest.
+ *   - Service line table rows, one per CPT:
+ *       MM/DD/YY-MM/DD/YY  CPT (MODIFIERS)  $Billed  $MedicareAllowed  $Adjustments  ReasonCode
+ *     Plan Paid and Patient Resp are NOT printed per line — only the block's
+ *     own "Totals" row carries them (5 figures: Billed, Medicare Allowed,
+ *     Adjustments, Plan Paid, Patient Resp). A block can continue across a
+ *     page break (its service lines split by a "Page X of Y" footer/header)
+ *     before reaching its own Totals row.
+ */
+function detectGlobeLife(text: string): boolean {
+  return (
+    /globe life/i.test(text) &&
+    (/medicare control #/i.test(text) || /explanation of payment/i.test(text) || /payee id/i.test(text))
+  );
+}
+
+/** Parse a Globe Life header date like "September 30, 2026" -> "2026-09-30" */
+function parseGlobeLifeHeaderDate(raw: string): string | null {
+  const months: Record<string, string> = {
+    january: '01', february: '02', march: '03', april: '04', may: '05', june: '06',
+    july: '07', august: '08', september: '09', october: '10', november: '11', december: '12',
+  };
+  const m = raw.trim().match(/^([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})$/);
+  if (!m) return null;
+  const month = months[m[1].toLowerCase()];
+  if (!month) return null;
+  return `${m[3]}-${month}-${m[2].padStart(2, '0')}`;
+}
+
+function parseGlobeLifeEOB(text: string): ExtractedClaim[] {
+  return parseGlobeLifeEOBWithGroups(text).flatMap(g => g.claims.flatMap((c): ExtractedClaim[] => {
+    const { cptLines, unresolvedClaimTotal: _unresolvedClaimTotal, ...base } = c;
+    if (cptLines.length === 0) return [base];
+    return cptLines.map(line => ({ ...base, ...line }));
+  }));
+}
+
+/**
+ * Globe Life's text extraction groups field LABELS together on consecutive
+ * lines, separately from their VALUES a few lines later (confirmed against
+ * two independent claim blocks in the real sample) — e.g. "Check Number:"
+ * and "Payment Date:" both appear before either one's actual value. A
+ * same-line "Label: value" match is tried first (in case a different
+ * renderer/mode keeps them adjacent); when that fails, this searches the
+ * next `maxLines` lines after the label for the first line matching
+ * `valuePattern`, skipping over any other labels/values in between.
+ */
+function findValueNearLabel(text: string, label: RegExp, valuePattern: RegExp, maxLines = 8): string | null {
+  const sameLine = text.match(new RegExp(label.source + '[ \\t]+(' + valuePattern.source + ')'));
+  if (sameLine) return sameLine[1].trim();
+
+  const labelMatch = text.match(label);
+  if (!labelMatch || labelMatch.index === undefined) return null;
+  const after = text.slice(labelMatch.index + labelMatch[0].length);
+  const lines = after.split('\n').slice(0, maxLines);
+  for (const line of lines) {
+    const m = line.trim().match(new RegExp('^(' + valuePattern.source + ')$'));
+    if (m) return m[1].trim();
+  }
+  return null;
+}
+
+export function parseGlobeLifeEOBWithGroups(text: string): Array<{ patientName: string; claims: DateClaimGroup[] }> {
+  const checkNumber = findValueNearLabel(text, /Check Number:/, /\d{6,}/);
+  const paymentDateRaw = findValueNearLabel(text, /Payment Date:/, /[A-Za-z]+ \d{1,2},\s*\d{4}/);
+  const docPaymentDate = paymentDateRaw ? parseGlobeLifeHeaderDate(paymentDateRaw) : null;
+
+  const patientClaimsMap = new Map<string, DateClaimGroup[]>();
+
+  // Split into per-claim-block sections. The patient's name prints as its
+  // own line immediately above the "Patient Acct #:" label (not inline
+  // after a "Patient:" label — that label's VALUE is this name but its
+  // TEXT position is this block's label group, per the column-scrambling
+  // described above) -- the same patient legitimately repeats this once per
+  // claim block (one per Medicare Control #), same as Meritain's "Claim #:"
+  // groups.
+  // Split boundary: deliberately strict (name line, a single newline, then
+  // the label — no blank line tolerated) so a near-miss header (e.g. an
+  // extra blank line from an OCR/layout artifact) fails to split and is
+  // instead caught by the more tolerant validateHeaderRe guard below —
+  // same two-pattern strategy as Meritain's PatientBoundaryError guard.
+  const blockStartRe = /^[A-Z][A-Z .,'-]{3,}\n[ \t]*Patient Acct #:/m;
+  const validateHeaderRe = /^[A-Z][A-Z .,'-]{3,}\s*\n\s*Patient Acct #:/gm;
+  const patientSections = text.split(new RegExp('(?=' + blockStartRe.source + ')', 'm'));
+
+  for (let sIdx = 0; sIdx < patientSections.length; sIdx++) {
+    let section = patientSections[sIdx];
+    if (!/medicare control #/i.test(section)) continue;
+    // Truncate at this block's own "Totals" row so service lines never leak
+    // into the next block (mirrors Meritain's "Claim Total:" truncation).
+    const totalsIdx = section.search(/\bTotals\b/);
+    const totalsLine = totalsIdx !== -1 ? section.slice(totalsIdx, section.indexOf('\n', totalsIdx) + 1 || undefined) : '';
+    if (totalsIdx !== -1) {
+      const afterTotalsLineEnd = section.indexOf('\n', totalsIdx);
+      section = section.slice(0, afterTotalsLineEnd !== -1 ? afterTotalsLineEnd : undefined);
+    }
+
+    const nameMatch = section.match(/^([A-Z][A-Z .,'-]{3,}?)\s*\n\s*Patient Acct #:/m);
+    const patientName = nameMatch ? nameMatch[1].trim() : 'UNKNOWN';
+
+    // Same ambiguous-boundary guard as Meritain — see PatientBoundaryError's
+    // docstring. A second block-start header surviving inside one section
+    // means an earlier block failed to split cleanly and there is no safe
+    // way to attribute its lines to either patient.
+    const blockHeaderCount = (section.match(validateHeaderRe) || []).length;
+    if (blockHeaderCount > 1) {
+      throw new PatientBoundaryError(
+        `Patient boundaries could not be determined (section ${sIdx} contains ${blockHeaderCount} patient headers that should have been split into separate sections).`
+      );
+    }
+
+    // This block's own identifier -- min-length 10 rules out short in-table
+    // numbers (CPT codes, 2-digit date fragments) that could otherwise be
+    // found first while scanning forward from the label.
+    const claimNo = findValueNearLabel(section, /Medicare Control #:/, /\d{10,}/);
+
+    if (!patientClaimsMap.has(patientName)) {
+      patientClaimsMap.set(patientName, []);
+    }
+    const patientClaims = patientClaimsMap.get(patientName)!;
+
+    // Service line: MM/DD/YY-MM/DD/YY  CPT  (MODIFIERS)  $Billed  $Allowed  $Adjustments  ReasonCode
+    // $Allowed (Medicare Allowed) and $Adjustments are NOT the plan payment
+    // -- see the module docstring above and the DateClaimGroup.
+    // unresolvedClaimTotal doc comment. Only Billed is safe to carry per line.
+    const serviceLinePattern = /(\d{1,2}\/\d{1,2}\/\d{2,4})-(\d{1,2}\/\d{1,2}\/\d{2,4})\s+([A-Z0-9]+)\s+\(([A-Z0-9,]+)\)\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})\s+([A-Z]{1,3}-\d+)/g;
+    const dateMap = new Map<string, DateClaimGroup>();
+    const datesSeen = new Set<string>();
+    let lineMatch: RegExpExecArray | null;
+    while ((lineMatch = serviceLinePattern.exec(section)) !== null) {
+      const parsedDate = parseDate(lineMatch[1]);
+      const cptCode = lineMatch[3];
+      const modifier = lineMatch[4] || null;
+      const billed = parseMoney(lineMatch[5]);
+      const dateKey = parsedDate || 'no-date';
+      datesSeen.add(dateKey);
+      if (!dateMap.has(dateKey)) {
+        dateMap.set(dateKey, {
+          dateOfService: parsedDate,
+          cptCodes: null,
+          chargeAmount: null,
+          // Deliberately null, never invented from Medicare Allowed /
+          // Adjustments / the block Totals row -- see unresolvedClaimTotal.
+          insuranceReimbursement: null,
+          patientAmountPaid: null,
+          patientAmountDue: null,
+          insuranceBilled: null,
+          oaClaimNumber: claimNo,
+          claimStatus: 'submitted',
+          checkDate: docPaymentDate,
+          dateReceived: docPaymentDate,
+          referenceNo: null,
+          checkNumberVirtualCard: checkNumber,
+          visitNumber: null,
+          placeOfService: null,
+          unitsBilled: null,
+          diagnosisCodes: null,
+          claimSubmittedDate: null,
+          expireBcbsClaimNumber: null,
+          paymentReceived: null,
+          lmn: null,
+          dateOfAppeal: null,
+          notes: null,
+          cptLines: [],
+          unresolvedClaimTotal: null,
+        });
+      }
+      dateMap.get(dateKey)!.cptLines.push({
+        cptCodes: cptCode,
+        chargeAmount: billed,
+        insuranceReimbursement: null,
+        patientAmountPaid: null,
+        patientAmountDue: null,
+        unitsBilled: null,
+        modifier,
+        diagnosisCodes: null,
+      });
+    }
+
+    const groups = Array.from(dateMap.values());
+    for (const group of groups) {
+      if (group.cptLines.length > 0) {
+        group.cptCodes = group.cptLines.map(l => l.cptCodes).filter(Boolean).join(', ') || null;
+        group.chargeAmount = group.cptLines.reduce((sum, l) => sum + (l.chargeAmount ?? 0), 0);
+      }
+    }
+
+    // The block's own Totals row ($Billed $Allowed $Adjustments $PlanPaid
+    // $PatientResp) is the ONLY place Plan Paid/Patient Resp appear. It's
+    // scoped to the whole block, not to any individual date -- attach it as
+    // an explicit unresolved review marker ONLY when every service line in
+    // this block shares one date (true of the real sample this was built
+    // against), since that's the only case where "this block's total"
+    // unambiguously means "this one date group's total". A block spanning
+    // multiple dates gets no attachment at all (not attached to the wrong
+    // date, not attached to all of them) -- it's simply absent from
+    // unresolvedClaimTotal and so never silently resolved either.
+    const totalsMatch = totalsLine.match(/Totals\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})/);
+    if (totalsMatch && groups.length === 1 && datesSeen.size === 1) {
+      const planPaid = parseMoney(totalsMatch[4]);
+      const patientResp = parseMoney(totalsMatch[5]);
+      if (planPaid !== null) {
+        groups[0].unresolvedClaimTotal = {
+          planPaid,
+          patientResponsibility: patientResp,
+          cptCount: groups[0].cptLines.length,
+        };
+      }
+    }
+
+    patientClaims.push(...groups);
+  }
+
+  const result: Array<{ patientName: string; claims: DateClaimGroup[] }> = [];
+  for (const [patientName, claims] of Array.from(patientClaimsMap.entries())) {
+    if (claims.length === 0) continue;
+    result.push({ patientName, claims });
+  }
   return result;
 }
 
@@ -762,6 +1025,11 @@ const TEMPLATES: InsuranceTemplate[] = [
       (filename ? /^epp_/i.test(filename) : false),
     parse: parseMeritainEOB,
   },
+  {
+    name: 'Globe Life Insurance EOB',
+    detect: detectGlobeLife,
+    parse: parseGlobeLifeEOB,
+  },
   // Add more templates here as new insurers are onboarded:
   // { name: 'Aetna EOB', detect: detectAetna, parse: parseAetnaEOB },
   // { name: 'BCBS Remittance', detect: detectBCBS, parse: parseBCBSRemittance },
@@ -788,10 +1056,13 @@ export function tryTemplateExtraction(
   for (const template of TEMPLATES) {
     if (template.detect(text, filename)) {
       const claims = template.parse(text);
-      // For Meritain, also return per-patient groups
+      // For templates with per-patient/per-date grouping, also return
+      // per-patient groups (used by the multi-patient bulk import preview).
       let patientGroups: PatientClaimGroup[] | undefined;
       if (template.name === 'Meritain Health EOB') {
         patientGroups = parseMeritainEOBWithGroups(text);
+      } else if (template.name === 'Globe Life Insurance EOB') {
+        patientGroups = parseGlobeLifeEOBWithGroups(text);
       }
       return {
         templateName: template.name,

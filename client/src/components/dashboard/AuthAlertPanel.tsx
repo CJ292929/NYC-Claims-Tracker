@@ -78,7 +78,10 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
   // see Dashboard.tsx's insuranceList — so this dialog's choices never
   // drift out of sync with the rest of the dashboard.
   const { data: insurerCatalog = [] } = trpc.insurance.list.useQuery();
-  const insuranceList = insurerCatalog.map(entry => entry.name);
+  // New Authorization's insurance picker is a new-selection UI — only active
+  // insurers appear (the "(current)" fallback below still preserves the
+  // patient's existing value even if it was since deactivated).
+  const insuranceList = insurerCatalog.filter(entry => entry.isActive).map(entry => entry.name);
   const [requestingId, setRequestingId] = useState<string | null>(null);
 
   // New Authorization dialog state

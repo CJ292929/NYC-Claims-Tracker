@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical, Settings } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
@@ -355,6 +355,8 @@ export default function Dashboard() {
   const [showAddPatient, setShowAddPatient] = useState(false);
   const [showAddInsurance, setShowAddInsurance] = useState(false);
   const [newInsuranceName, setNewInsuranceName] = useState('');
+  const [showManageInsurance, setShowManageInsurance] = useState(false);
+  const [insurerPendingDelete, setInsurerPendingDelete] = useState<{ id: string; name: string } | null>(null);
   const [selectedInsurance, setSelectedInsurance] = useState<string>('Aetna');
   const [newPatientName, setNewPatientName] = useState('');
   const [newPatientInsurance, setNewPatientInsurance] = useState('Aetna');
@@ -561,7 +563,24 @@ export default function Dashboard() {
   // panel, and AuthAlertPanel's "New Authorization" dialog all read from
   // this same list so none of them can drift out of sync with another.
   const { data: insurerCatalog = [] } = trpc.insurance.list.useQuery();
+  // Filters/counts use the FULL catalog (active + inactive) — a deactivated
+  // insurer's existing patients must stay filterable/countable (P4-P13).
   const insuranceList = useMemo(() => insurerCatalog.map(entry => entry.name), [insurerCatalog]);
+  // New-selection dropdowns (Add/Edit Patient) show active insurers only —
+  // see activeInsuranceNamesFor below for the Edit dialog's extra rule that
+  // preserves a patient's current (possibly now-inactive) insurer.
+  const activeInsuranceNames = useMemo(
+    () => insurerCatalog.filter(entry => entry.isActive).map(entry => entry.name),
+    [insurerCatalog]
+  );
+  /** Active insurer names, plus `currentValue` itself if it's set and not
+   *  already active — so opening Edit Patient on a patient whose insurer was
+   *  since deactivated still shows/preserves that value instead of silently
+   *  blanking it out when the form is saved. */
+  const activeInsuranceNamesFor = (currentValue: string) =>
+    currentValue && !activeInsuranceNames.includes(currentValue)
+      ? [...activeInsuranceNames, currentValue]
+      : activeInsuranceNames;
 
   // The patient explicitly selected via selectedPatientId — unlike activePatient
   // below, this has NO fallback to patients[0], so it's only truthy when a
@@ -698,6 +717,26 @@ export default function Dashboard() {
     }
     createInsurer.mutate({ name: newInsuranceName });
   };
+
+  // Soft-delete only — see insurance.delete in server/routers.ts. Never
+  // touches patient/visit/claim rows; just hides this entry from future
+  // new-selection dropdowns.
+  const deleteInsurer = trpc.insurance.delete.useMutation({
+    onSuccess: () => {
+      utils.insurance.list.invalidate();
+      toast.success('Insurance company removed from new-selection lists');
+      setInsurerPendingDelete(null);
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  const reactivateInsurer = trpc.insurance.reactivate.useMutation({
+    onSuccess: () => {
+      utils.insurance.list.invalidate();
+      toast.success('Insurance company reactivated');
+    },
+    onError: (e) => toast.error(e.message),
+  });
 
   const createVisit = trpc.visits.create.useMutation({
     onSuccess: () => {
@@ -1277,6 +1316,22 @@ export default function Dashboard() {
       if (!res.ok) throw new Error(json.error ?? 'Extraction failed');
 
       setDetectedTemplate(json.templateUsed ?? '');
+
+      // Some payers (e.g. Globe Life) print only ONE combined Plan Paid for
+      // several CPT lines, with no per-line breakdown — the extractor never
+      // writes that amount onto any line (would either duplicate it per
+      // line or require fabricating a split), so it's surfaced here as an
+      // explicit manual-review notice instead of silently not appearing
+      // anywhere. See reimbursementReviewNeeded in claimUpload.ts.
+      if (json.reimbursementReviewNeeded?.length > 0) {
+        const totalPlanPaid = json.reimbursementReviewNeeded.reduce((sum: number, r: { planPaid: number }) => sum + r.planPaid, 0);
+        toast.warning(
+          `${json.reimbursementReviewNeeded.length} claim block${json.reimbursementReviewNeeded.length !== 1 ? 's' : ''} ` +
+          `need manual Plan Paid review — the payer reported $${totalPlanPaid.toFixed(2)} combined across multiple service ` +
+          `lines with no per-line breakdown. Not saved to any line; confirm the real allocation before relying on these amounts.`,
+          { duration: 15000 }
+        );
+      }
 
       // ── Multi-patient mode: server returned patientGroups ──────────────────
       if (json.patientGroups && json.patientGroups.length > 0) {
@@ -2024,7 +2079,7 @@ export default function Dashboard() {
                   <SelectValue placeholder="Select insurance company" />
                 </SelectTrigger>
                 <SelectContent>
-                  {insuranceList.map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
+                  {activeInsuranceNamesFor(editPatientInsurance).map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -2926,15 +2981,15 @@ export default function Dashboard() {
                               <Download className="h-4 w-4" />
                               Export
                             </Button>
-                            {/* Reimbursement Insurance Upload button */}
+                            {/* Insurance Reimbursement Upload button */}
                             <label
                               htmlFor={`claim-upload-reimb-${period}`}
                               className="cursor-pointer inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap"
-                              title="Upload Reimbursement Insurance EOB (PDF/CSV) to auto-fill insurance reimbursement, CPT codes, charge amounts"
+                              title="Upload Insurance Reimbursement EOB (PDF/CSV) to auto-fill insurance reimbursement, CPT codes, charge amounts"
                             >
                               {isExtractingClaims && claimUploadPeriod === period && claimUploadType === 'reimbursement'
                                 ? <><Loader2 className="h-4 w-4 animate-spin" /> Extracting…</>
-                                : <><Upload className="h-4 w-4" /> Reimbursement Insurance Upload</>
+                                : <><Upload className="h-4 w-4" /> Insurance Reimbursement Upload</>
                               }
                             </label>
                             <input
@@ -3723,7 +3778,7 @@ export default function Dashboard() {
                 ? 'Bulk EOB Import — Multiple Patients'
                 : claimUploadType === 'cms1500'
                   ? 'CMS1500 Upload — Review Extracted Claims'
-                  : 'Reimbursement Insurance Upload — Review Extracted Claims'
+                  : 'Insurance Reimbursement Upload — Review Extracted Claims'
               }
             </DialogTitle>
             <DialogDescription>
@@ -4360,7 +4415,7 @@ export default function Dashboard() {
                 <SelectValue placeholder="Select insurance company" />
               </SelectTrigger>
               <SelectContent>
-                {insuranceList.map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
+                {activeInsuranceNames.map(ins => <SelectItem key={ins} value={ins}>{ins}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
@@ -4431,6 +4486,109 @@ export default function Dashboard() {
     </Dialog>
   );
 
+  /** Manage Insurance Companies — admin/owner only (gated client-side by
+   *  canManageStaff, matching addInsuranceAction above; enforced server-side
+   *  by adminOrOwnerProcedure on insurance.delete/reactivate). Lists every
+   *  catalog entry (active + inactive, via insurerCatalog — NOT the
+   *  active-only activeInsuranceNames) so a deactivated insurer stays
+   *  visible/manageable here even though it no longer appears in
+   *  new-selection dropdowns elsewhere. */
+  const manageInsuranceAction = (
+    <Dialog open={showManageInsurance} onOpenChange={setShowManageInsurance}>
+      <DialogTrigger asChild>
+        <Button size="sm" variant="outline" className="gap-1.5">
+          <Settings className="w-4 h-4" />
+          <span className="hidden sm:inline">Manage Insurance Companies</span>
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="bg-white max-h-[80vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="text-brand-blue">Manage Insurance Companies</DialogTitle>
+          <DialogDescription>
+            Removing a company hides it from new patient/claim forms. It never deletes or changes any
+            existing patient, visit, or claim already stored under that name.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-1 max-h-[55vh] overflow-y-auto pr-1">
+          {insurerCatalog.length === 0 && (
+            <p className="text-sm text-muted-foreground py-4 text-center">No insurance companies yet.</p>
+          )}
+          {insurerCatalog.map(entry => (
+            <div
+              key={entry.id}
+              className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2 ${entry.isActive ? 'border-brand-cream-dark' : 'border-brand-cream-dark bg-muted/40'}`}
+            >
+              <div className="min-w-0">
+                <p className={`text-sm font-medium truncate ${entry.isActive ? 'text-foreground' : 'text-muted-foreground line-through'}`}>
+                  {entry.name}
+                </p>
+                {!entry.isActive && (
+                  <p className="text-xs text-muted-foreground">Removed — hidden from new selections</p>
+                )}
+              </div>
+              {entry.isActive ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0 gap-1.5 text-destructive hover:text-destructive"
+                  onClick={() => setInsurerPendingDelete({ id: entry.id, name: entry.name })}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Delete
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0 gap-1.5"
+                  disabled={reactivateInsurer.isPending}
+                  onClick={() => reactivateInsurer.mutate({ id: entry.id })}
+                >
+                  {reactivateInsurer.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                  Reactivate
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+
+  const deleteInsurerConfirmDialog = (
+    <AlertDialog open={insurerPendingDelete !== null} onOpenChange={(open) => { if (!open) setInsurerPendingDelete(null); }}>
+      <AlertDialogContent className="bg-white">
+        <AlertDialogHeader>
+          <AlertDialogTitle className="text-brand-blue text-xl">Delete Insurance Company?</AlertDialogTitle>
+          <AlertDialogDescription className="text-muted-foreground">
+            {insurerPendingDelete && (
+              <>
+                "{insurerPendingDelete.name}" will no longer appear as an option when adding or editing
+                patients. Existing patients, visits, and claims already using this name are not changed
+                and remain filterable. You can reactivate it later from this same dialog.
+              </>
+            )}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel className="border-brand-cream-dark text-brand-blue hover:bg-brand-cream" disabled={deleteInsurer.isPending}>
+            Cancel
+          </AlertDialogCancel>
+          <AlertDialogAction
+            className="bg-destructive hover:bg-destructive/90 text-white"
+            disabled={deleteInsurer.isPending}
+            onClick={() => {
+              if (insurerPendingDelete) deleteInsurer.mutate({ id: insurerPendingDelete.id });
+            }}
+          >
+            {deleteInsurer.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+            Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+
   const bulkUploadTrigger = (
     <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setShowUploadDialog(true)}>
       <Upload className="w-4 h-4" />
@@ -4480,7 +4638,7 @@ export default function Dashboard() {
         canManageStaff={canManageStaff}
         topbarTitle="Patient Records"
         topbarSubtitle="Find and select a patient to view their information"
-        topbarActions={<div className="flex flex-wrap items-center gap-2">{addPatientAction}{canManageStaff && addInsuranceAction}</div>}
+        topbarActions={<div className="flex flex-wrap items-center gap-2">{addPatientAction}{canManageStaff && addInsuranceAction}{canManageStaff && manageInsuranceAction}</div>}
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6">
           {filterChipsElement}
@@ -4514,6 +4672,7 @@ export default function Dashboard() {
         </div>
         {bulkUploadDialog}
         {patientActionDialogs}
+        {deleteInsurerConfirmDialog}
       </DashboardShell>
     );
   }

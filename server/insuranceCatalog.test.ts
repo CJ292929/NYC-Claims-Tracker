@@ -15,7 +15,10 @@ const { dbMock } = vi.hoisted(() => ({
   dbMock: {
     listInsurerCatalog: vi.fn(),
     getInsurerCatalogEntryByNormalizedName: vi.fn(),
+    getInsurerCatalogEntryById: vi.fn(),
     createInsurerCatalogEntry: vi.fn(),
+    deactivateInsurerCatalogEntry: vi.fn(),
+    reactivateInsurerCatalogEntry: vi.fn(),
   },
 }));
 
@@ -108,6 +111,17 @@ const CATALOG_ROW = {
   name: "Aetna",
   aliases: [] as string[],
   createdAt: new Date("2026-01-01T00:00:00Z"),
+  isActive: true,
+  deactivatedAt: null as Date | null,
+  reactivatedAt: null as Date | null,
+};
+
+const INACTIVE_CATALOG_ROW = {
+  ...CATALOG_ROW,
+  id: "55555555-5555-4555-8555-555555555555",
+  name: "Old Insurer Co",
+  isActive: false,
+  deactivatedAt: new Date("2026-02-01T00:00:00Z"),
 };
 
 beforeEach(() => {
@@ -210,5 +224,80 @@ describe("insurance.create — validation and duplicates", () => {
     dbMock.getInsurerCatalogEntryByNormalizedName.mockResolvedValue(undefined);
     dbMock.createInsurerCatalogEntry.mockRejectedValue({ code: "23505", message: "duplicate key value" });
     await expect(ownerCaller().insurance.create({ name: "Aetna" })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("re-adding a deliberately-deleted (inactive) name reactivates the existing row instead of inserting a duplicate", async () => {
+    dbMock.getInsurerCatalogEntryByNormalizedName.mockResolvedValue(INACTIVE_CATALOG_ROW);
+    dbMock.reactivateInsurerCatalogEntry.mockResolvedValue({ ...INACTIVE_CATALOG_ROW, isActive: true, reactivatedAt: new Date() });
+    const result = await ownerCaller().insurance.create({ name: "old insurer co" });
+    expect(dbMock.reactivateInsurerCatalogEntry).toHaveBeenCalledWith(INACTIVE_CATALOG_ROW.id, expect.anything());
+    expect(dbMock.createInsurerCatalogEntry).not.toHaveBeenCalled();
+    expect(result.isActive).toBe(true);
+  });
+});
+
+describe("insurance.delete — soft delete (P4-P13)", () => {
+  beforeEach(() => {
+    dbMock.getInsurerCatalogEntryById.mockResolvedValue(CATALOG_ROW);
+    dbMock.deactivateInsurerCatalogEntry.mockResolvedValue({ ...CATALOG_ROW, isActive: false, deactivatedAt: new Date() });
+  });
+
+  it("owner admin can deactivate an insurer", async () => {
+    const result = await ownerCaller().insurance.delete({ id: CATALOG_ROW.id });
+    expect(result.isActive).toBe(false);
+    expect(dbMock.deactivateInsurerCatalogEntry).toHaveBeenCalledWith(CATALOG_ROW.id, expect.anything());
+  });
+
+  it("clinic admin can deactivate an insurer", async () => {
+    await expect(clinicAdminCaller().insurance.delete({ id: CATALOG_ROW.id })).resolves.toMatchObject({ isActive: false });
+  });
+
+  it("clinic staff (non-admin) is denied", async () => {
+    await expect(clinicStaffCaller().insurance.delete({ id: CATALOG_ROW.id })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(dbMock.deactivateInsurerCatalogEntry).not.toHaveBeenCalled();
+  });
+
+  it("unauthenticated caller is denied", async () => {
+    await expect(callerFor(null).insurance.delete({ id: CATALOG_ROW.id })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    expect(dbMock.deactivateInsurerCatalogEntry).not.toHaveBeenCalled();
+  });
+
+  it("404s on an unknown id instead of writing", async () => {
+    dbMock.getInsurerCatalogEntryById.mockResolvedValue(undefined);
+    await expect(ownerCaller().insurance.delete({ id: CATALOG_ROW.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(dbMock.deactivateInsurerCatalogEntry).not.toHaveBeenCalled();
+  });
+
+  it("never touches patient/visit/claim data — only calls the catalog deactivate helper", async () => {
+    await ownerCaller().insurance.delete({ id: CATALOG_ROW.id });
+    expect(dbMock.deactivateInsurerCatalogEntry).toHaveBeenCalledTimes(1);
+    expect(dbMock.createInsurerCatalogEntry).not.toHaveBeenCalled();
+  });
+});
+
+describe("insurance.reactivate — deliberate restore (P4-P13)", () => {
+  beforeEach(() => {
+    dbMock.getInsurerCatalogEntryById.mockResolvedValue(INACTIVE_CATALOG_ROW);
+    dbMock.reactivateInsurerCatalogEntry.mockResolvedValue({ ...INACTIVE_CATALOG_ROW, isActive: true, reactivatedAt: new Date() });
+  });
+
+  it("owner admin can reactivate an insurer", async () => {
+    const result = await ownerCaller().insurance.reactivate({ id: INACTIVE_CATALOG_ROW.id });
+    expect(result.isActive).toBe(true);
+  });
+
+  it("clinic staff (non-admin) is denied", async () => {
+    await expect(clinicStaffCaller().insurance.reactivate({ id: INACTIVE_CATALOG_ROW.id })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(dbMock.reactivateInsurerCatalogEntry).not.toHaveBeenCalled();
+  });
+
+  it("unauthenticated caller is denied", async () => {
+    await expect(callerFor(null).insurance.reactivate({ id: INACTIVE_CATALOG_ROW.id })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
+  it("404s on an unknown id instead of writing", async () => {
+    dbMock.getInsurerCatalogEntryById.mockResolvedValue(undefined);
+    await expect(ownerCaller().insurance.reactivate({ id: INACTIVE_CATALOG_ROW.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(dbMock.reactivateInsurerCatalogEntry).not.toHaveBeenCalled();
   });
 });

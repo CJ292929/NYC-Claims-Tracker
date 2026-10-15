@@ -715,13 +715,35 @@ export function registerClaimUploadRoute(app: Express) {
           templateResult.patientGroups?.forEach((group: PatientClaimGroup) => {
             enforceFieldBoundary(group.claims, 'reimbursement');
           });
-          console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${templateResult.claims.length} claim(s) via template "${templateResult.templateName}"`);
+          // Some templates (currently Globe Life) can find a claim block
+          // where the payer only discloses ONE combined Plan Paid for
+          // several CPT lines, with no line-level breakdown printed. Those
+          // amounts are deliberately never written onto any claims_records
+          // row (see DateClaimGroup.unresolvedClaimTotal in
+          // insuranceTemplates.ts for why) -- surfaced here instead so
+          // staff see an explicit "needs manual review" notice rather than
+          // the payment silently not showing up anywhere.
+          const reimbursementReviewNeeded = (templateResult.patientGroups ?? [])
+            .flatMap((group: PatientClaimGroup) =>
+              (group.claims as Array<ExtractedClaim & { unresolvedClaimTotal?: { planPaid: number; patientResponsibility: number | null; cptCount: number } | null }>)
+                .filter(c => c.unresolvedClaimTotal)
+                .map(c => ({
+                  patientName: group.patientName,
+                  dateOfService: c.dateOfService ?? null,
+                  cptCodes: c.cptCodes ?? null,
+                  planPaid: c.unresolvedClaimTotal!.planPaid,
+                  patientResponsibility: c.unresolvedClaimTotal!.patientResponsibility,
+                  cptCount: c.unresolvedClaimTotal!.cptCount,
+                }))
+            );
+          console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${templateResult.claims.length} claim(s) via template "${templateResult.templateName}"${reimbursementReviewNeeded.length > 0 ? ` (${reimbursementReviewNeeded.length} claim block(s) need manual Plan Paid review)` : ''}`);
           res.json({
             claims: templateResult.claims,
             patientGroups: templateResult.patientGroups ?? null,
             extractedLength: extractedText.length,
             templateUsed: templateResult.templateName,
             uploadType: 'reimbursement',
+            reimbursementReviewNeeded: reimbursementReviewNeeded.length > 0 ? reimbursementReviewNeeded : undefined,
           });
           return;
         }
