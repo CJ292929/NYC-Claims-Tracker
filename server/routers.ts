@@ -45,7 +45,10 @@ import {
   reactivateClinicUser,
   listInsurerCatalog,
   getInsurerCatalogEntryByNormalizedName,
+  getInsurerCatalogEntryById,
   createInsurerCatalogEntry,
+  deactivateInsurerCatalogEntry,
+  reactivateInsurerCatalogEntry,
   findCms1500EnrichmentCandidates,
   patientHasAnyClaimRecords,
   applyCms1500Enrichment,
@@ -571,12 +574,19 @@ export const appRouter = router({
           }),
         })
       )
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const normalizedName = normalizeInsurerName(input.name);
 
         const existing = await getInsurerCatalogEntryByNormalizedName(normalizedName);
         if (existing) {
-          throw new TRPCError({ code: "CONFLICT", message: "This insurance company already exists" });
+          if (existing.isActive) {
+            throw new TRPCError({ code: "CONFLICT", message: "This insurance company already exists" });
+          }
+          // Re-adding a deliberately-deleted name: reactivate the same row
+          // instead of inserting a duplicate (normalized_name stays unique
+          // across active+inactive rows — see the P4-P13 migration).
+          const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+          return await reactivateInsurerCatalogEntry(existing.id, actorId);
         }
 
         try {
@@ -590,6 +600,36 @@ export const appRouter = router({
           }
           throw err;
         }
+      }),
+
+    // Soft delete (P4-P13) — admin/owner only. Hides the entry from
+    // new-selection dropdowns without touching any patient/visit/claim
+    // record (those store the insurer name as free text, not an FK into
+    // this table) and without deleting the catalog row itself.
+    delete: adminOrOwnerProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .mutation(async ({ input, ctx }) => {
+        const existing = await getInsurerCatalogEntryById(input.id);
+        if (!existing) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Insurance company not found" });
+        }
+        const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+        return await deactivateInsurerCatalogEntry(input.id, actorId);
+      }),
+
+    // Deliberate reactivation (P4-P13) from the Manage Insurance Companies
+    // dialog — distinct from insurance.create's own reactivate-on-conflict
+    // path above, for an admin who wants to bring an entry back without
+    // retyping its exact name.
+    reactivate: adminOrOwnerProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .mutation(async ({ input, ctx }) => {
+        const existing = await getInsurerCatalogEntryById(input.id);
+        if (!existing) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Insurance company not found" });
+        }
+        const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+        return await reactivateInsurerCatalogEntry(input.id, actorId);
       }),
   }),
 

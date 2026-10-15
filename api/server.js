@@ -170,6 +170,7 @@ __export(db_exports, {
   createInsurerCatalogEntry: () => createInsurerCatalogEntry,
   createPatient: () => createPatient,
   createVisitRecord: () => createVisitRecord,
+  deactivateInsurerCatalogEntry: () => deactivateInsurerCatalogEntry,
   deleteClaimRecordWithAudit: () => deleteClaimRecordWithAudit,
   deletePatient: () => deletePatient,
   determineActiveAuthPeriod: () => determineActiveAuthPeriod,
@@ -182,6 +183,7 @@ __export(db_exports, {
   getClinicUserById: () => getClinicUserById,
   getClinicUserByUsername: () => getClinicUserByUsername,
   getCompletedPatients: () => getCompletedPatients,
+  getInsurerCatalogEntryById: () => getInsurerCatalogEntryById,
   getInsurerCatalogEntryByNormalizedName: () => getInsurerCatalogEntryByNormalizedName,
   getLatestVisitIdForPatient: () => getLatestVisitIdForPatient,
   getMarkAsRequestedTargetVisitId: () => getMarkAsRequestedTargetVisitId,
@@ -192,6 +194,7 @@ __export(db_exports, {
   listInsurerCatalog: () => listInsurerCatalog,
   patientHasAnyClaimRecords: () => patientHasAnyClaimRecords,
   reactivateClinicUser: () => reactivateClinicUser,
+  reactivateInsurerCatalogEntry: () => reactivateInsurerCatalogEntry,
   setPatientActive: () => setPatientActive,
   sortByFollowUpUrgency: () => sortByFollowUpUrgency,
   touchClinicUserLastLogin: () => touchClinicUserLastLogin,
@@ -275,7 +278,10 @@ function toInsurerCatalogEntry(row) {
     id: row.id,
     name: row.name,
     aliases: row.aliases ?? [],
-    createdAt: new Date(row.created_at)
+    createdAt: new Date(row.created_at),
+    isActive: row.is_active ?? true,
+    deactivatedAt: row.deactivated_at ? new Date(row.deactivated_at) : null,
+    reactivatedAt: row.reactivated_at ? new Date(row.reactivated_at) : null
   };
 }
 async function upsertUser(user) {
@@ -1048,6 +1054,30 @@ async function createInsurerCatalogEntry(params) {
   const { data, error } = await supabase.from("insurer_catalog").insert({ name: params.name }).select().single();
   if (error) {
     console.error("[Supabase] createInsurerCatalogEntry:", error);
+    throw error;
+  }
+  return toInsurerCatalogEntry(data);
+}
+async function getInsurerCatalogEntryById(id) {
+  const { data, error } = await supabase.from("insurer_catalog").select("*").eq("id", id).maybeSingle();
+  if (error) {
+    console.error("[Supabase] getInsurerCatalogEntryById:", error);
+    return void 0;
+  }
+  return data ? toInsurerCatalogEntry(data) : void 0;
+}
+async function deactivateInsurerCatalogEntry(id, actorId) {
+  const { data, error } = await supabase.from("insurer_catalog").update({ is_active: false, deactivated_at: (/* @__PURE__ */ new Date()).toISOString(), deactivated_by: actorId }).eq("id", id).select().single();
+  if (error) {
+    console.error("[Supabase] deactivateInsurerCatalogEntry:", error);
+    throw error;
+  }
+  return toInsurerCatalogEntry(data);
+}
+async function reactivateInsurerCatalogEntry(id, actorId) {
+  const { data, error } = await supabase.from("insurer_catalog").update({ is_active: true, reactivated_at: (/* @__PURE__ */ new Date()).toISOString(), reactivated_by: actorId }).eq("id", id).select().single();
+  if (error) {
+    console.error("[Supabase] reactivateInsurerCatalogEntry:", error);
     throw error;
   }
   return toInsurerCatalogEntry(data);
@@ -2329,6 +2359,161 @@ function parseMeritainEOBWithGroups(text) {
   }
   return result;
 }
+function detectGlobeLife(text) {
+  return /globe life/i.test(text) && (/medicare control #/i.test(text) || /explanation of payment/i.test(text) || /payee id/i.test(text));
+}
+function parseGlobeLifeHeaderDate(raw) {
+  const months = {
+    january: "01",
+    february: "02",
+    march: "03",
+    april: "04",
+    may: "05",
+    june: "06",
+    july: "07",
+    august: "08",
+    september: "09",
+    october: "10",
+    november: "11",
+    december: "12"
+  };
+  const m = raw.trim().match(/^([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})$/);
+  if (!m) return null;
+  const month = months[m[1].toLowerCase()];
+  if (!month) return null;
+  return `${m[3]}-${month}-${m[2].padStart(2, "0")}`;
+}
+function parseGlobeLifeEOB(text) {
+  return parseGlobeLifeEOBWithGroups(text).flatMap((g) => g.claims.flatMap((c) => {
+    const { cptLines, unresolvedClaimTotal: _unresolvedClaimTotal, ...base } = c;
+    if (cptLines.length === 0) return [base];
+    return cptLines.map((line) => ({ ...base, ...line }));
+  }));
+}
+function findValueNearLabel(text, label, valuePattern, maxLines = 8) {
+  const sameLine = text.match(new RegExp(label.source + "[ \\t]+(" + valuePattern.source + ")"));
+  if (sameLine) return sameLine[1].trim();
+  const labelMatch = text.match(label);
+  if (!labelMatch || labelMatch.index === void 0) return null;
+  const after = text.slice(labelMatch.index + labelMatch[0].length);
+  const lines = after.split("\n").slice(0, maxLines);
+  for (const line of lines) {
+    const m = line.trim().match(new RegExp("^(" + valuePattern.source + ")$"));
+    if (m) return m[1].trim();
+  }
+  return null;
+}
+function parseGlobeLifeEOBWithGroups(text) {
+  const checkNumber = findValueNearLabel(text, /Check Number:/, /\d{6,}/);
+  const paymentDateRaw = findValueNearLabel(text, /Payment Date:/, /[A-Za-z]+ \d{1,2},\s*\d{4}/);
+  const docPaymentDate = paymentDateRaw ? parseGlobeLifeHeaderDate(paymentDateRaw) : null;
+  const patientClaimsMap = /* @__PURE__ */ new Map();
+  const blockStartRe = /^[A-Z][A-Z .,'-]{3,}\n[ \t]*Patient Acct #:/m;
+  const validateHeaderRe = /^[A-Z][A-Z .,'-]{3,}\s*\n\s*Patient Acct #:/gm;
+  const patientSections = text.split(new RegExp("(?=" + blockStartRe.source + ")", "m"));
+  for (let sIdx = 0; sIdx < patientSections.length; sIdx++) {
+    let section = patientSections[sIdx];
+    if (!/medicare control #/i.test(section)) continue;
+    const totalsIdx = section.search(/\bTotals\b/);
+    const totalsLine = totalsIdx !== -1 ? section.slice(totalsIdx, section.indexOf("\n", totalsIdx) + 1 || void 0) : "";
+    if (totalsIdx !== -1) {
+      const afterTotalsLineEnd = section.indexOf("\n", totalsIdx);
+      section = section.slice(0, afterTotalsLineEnd !== -1 ? afterTotalsLineEnd : void 0);
+    }
+    const nameMatch = section.match(/^([A-Z][A-Z .,'-]{3,}?)\s*\n\s*Patient Acct #:/m);
+    const patientName = nameMatch ? nameMatch[1].trim() : "UNKNOWN";
+    const blockHeaderCount = (section.match(validateHeaderRe) || []).length;
+    if (blockHeaderCount > 1) {
+      throw new PatientBoundaryError(
+        `Patient boundaries could not be determined (section ${sIdx} contains ${blockHeaderCount} patient headers that should have been split into separate sections).`
+      );
+    }
+    const claimNo = findValueNearLabel(section, /Medicare Control #:/, /\d{10,}/);
+    if (!patientClaimsMap.has(patientName)) {
+      patientClaimsMap.set(patientName, []);
+    }
+    const patientClaims = patientClaimsMap.get(patientName);
+    const serviceLinePattern = /(\d{1,2}\/\d{1,2}\/\d{2,4})-(\d{1,2}\/\d{1,2}\/\d{2,4})\s+([A-Z0-9]+)\s+\(([A-Z0-9,]+)\)\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})\s+([A-Z]{1,3}-\d+)/g;
+    const dateMap = /* @__PURE__ */ new Map();
+    const datesSeen = /* @__PURE__ */ new Set();
+    let lineMatch;
+    while ((lineMatch = serviceLinePattern.exec(section)) !== null) {
+      const parsedDate = parseDate(lineMatch[1]);
+      const cptCode = lineMatch[3];
+      const modifier = lineMatch[4] || null;
+      const billed = parseMoney(lineMatch[5]);
+      const dateKey = parsedDate || "no-date";
+      datesSeen.add(dateKey);
+      if (!dateMap.has(dateKey)) {
+        dateMap.set(dateKey, {
+          dateOfService: parsedDate,
+          cptCodes: null,
+          chargeAmount: null,
+          // Deliberately null, never invented from Medicare Allowed /
+          // Adjustments / the block Totals row -- see unresolvedClaimTotal.
+          insuranceReimbursement: null,
+          patientAmountPaid: null,
+          patientAmountDue: null,
+          insuranceBilled: null,
+          oaClaimNumber: claimNo,
+          claimStatus: "submitted",
+          checkDate: docPaymentDate,
+          dateReceived: docPaymentDate,
+          referenceNo: null,
+          checkNumberVirtualCard: checkNumber,
+          visitNumber: null,
+          placeOfService: null,
+          unitsBilled: null,
+          diagnosisCodes: null,
+          claimSubmittedDate: null,
+          expireBcbsClaimNumber: null,
+          paymentReceived: null,
+          lmn: null,
+          dateOfAppeal: null,
+          notes: null,
+          cptLines: [],
+          unresolvedClaimTotal: null
+        });
+      }
+      dateMap.get(dateKey).cptLines.push({
+        cptCodes: cptCode,
+        chargeAmount: billed,
+        insuranceReimbursement: null,
+        patientAmountPaid: null,
+        patientAmountDue: null,
+        unitsBilled: null,
+        modifier,
+        diagnosisCodes: null
+      });
+    }
+    const groups = Array.from(dateMap.values());
+    for (const group of groups) {
+      if (group.cptLines.length > 0) {
+        group.cptCodes = group.cptLines.map((l) => l.cptCodes).filter(Boolean).join(", ") || null;
+        group.chargeAmount = group.cptLines.reduce((sum, l) => sum + (l.chargeAmount ?? 0), 0);
+      }
+    }
+    const totalsMatch = totalsLine.match(/Totals\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})/);
+    if (totalsMatch && groups.length === 1 && datesSeen.size === 1) {
+      const planPaid = parseMoney(totalsMatch[4]);
+      const patientResp = parseMoney(totalsMatch[5]);
+      if (planPaid !== null) {
+        groups[0].unresolvedClaimTotal = {
+          planPaid,
+          patientResponsibility: patientResp,
+          cptCount: groups[0].cptLines.length
+        };
+      }
+    }
+    patientClaims.push(...groups);
+  }
+  const result = [];
+  for (const [patientName, claims] of Array.from(patientClaimsMap.entries())) {
+    if (claims.length === 0) continue;
+    result.push({ patientName, claims });
+  }
+  return result;
+}
 function parseIndexedDiagnosisCodes(text) {
   const map = /* @__PURE__ */ new Map();
   const box21Start = text.search(/DIAGNOSIS\s+OR\s+NATURE\s+OF\s+ILLNESS/i);
@@ -2591,6 +2776,11 @@ var TEMPLATES = [
     name: "Meritain Health EOB",
     detect: (text, filename) => detectMeritain(text) || (filename ? /^epp_/i.test(filename) : false),
     parse: parseMeritainEOB
+  },
+  {
+    name: "Globe Life Insurance EOB",
+    detect: detectGlobeLife,
+    parse: parseGlobeLifeEOB
   }
   // Add more templates here as new insurers are onboarded:
   // { name: 'Aetna EOB', detect: detectAetna, parse: parseAetnaEOB },
@@ -2605,6 +2795,8 @@ function tryTemplateExtraction(text, filename) {
       let patientGroups;
       if (template.name === "Meritain Health EOB") {
         patientGroups = parseMeritainEOBWithGroups(text);
+      } else if (template.name === "Globe Life Insurance EOB") {
+        patientGroups = parseGlobeLifeEOBWithGroups(text);
       }
       return {
         templateName: template.name,
@@ -3576,13 +3768,24 @@ function registerClaimUploadRoute(app2) {
           templateResult.patientGroups?.forEach((group) => {
             enforceFieldBoundary(group.claims, "reimbursement");
           });
-          console.log(`[ClaimUpload] Stage 7/7 \u2014 Database save pending: ${templateResult.claims.length} claim(s) via template "${templateResult.templateName}"`);
+          const reimbursementReviewNeeded = (templateResult.patientGroups ?? []).flatMap(
+            (group) => group.claims.filter((c) => c.unresolvedClaimTotal).map((c) => ({
+              patientName: group.patientName,
+              dateOfService: c.dateOfService ?? null,
+              cptCodes: c.cptCodes ?? null,
+              planPaid: c.unresolvedClaimTotal.planPaid,
+              patientResponsibility: c.unresolvedClaimTotal.patientResponsibility,
+              cptCount: c.unresolvedClaimTotal.cptCount
+            }))
+          );
+          console.log(`[ClaimUpload] Stage 7/7 \u2014 Database save pending: ${templateResult.claims.length} claim(s) via template "${templateResult.templateName}"${reimbursementReviewNeeded.length > 0 ? ` (${reimbursementReviewNeeded.length} claim block(s) need manual Plan Paid review)` : ""}`);
           res.json({
             claims: templateResult.claims,
             patientGroups: templateResult.patientGroups ?? null,
             extractedLength: extractedText.length,
             templateUsed: templateResult.templateName,
-            uploadType: "reimbursement"
+            uploadType: "reimbursement",
+            reimbursementReviewNeeded: reimbursementReviewNeeded.length > 0 ? reimbursementReviewNeeded : void 0
           });
           return;
         }
@@ -4288,11 +4491,15 @@ var appRouter = router({
           message: "Insurance company name is required"
         })
       })
-    ).mutation(async ({ input }) => {
+    ).mutation(async ({ input, ctx }) => {
       const normalizedName = normalizeInsurerName(input.name);
       const existing = await getInsurerCatalogEntryByNormalizedName(normalizedName);
       if (existing) {
-        throw new TRPCError3({ code: "CONFLICT", message: "This insurance company already exists" });
+        if (existing.isActive) {
+          throw new TRPCError3({ code: "CONFLICT", message: "This insurance company already exists" });
+        }
+        const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+        return await reactivateInsurerCatalogEntry(existing.id, actorId);
       }
       try {
         return await createInsurerCatalogEntry({ name: input.name });
@@ -4302,6 +4509,30 @@ var appRouter = router({
         }
         throw err;
       }
+    }),
+    // Soft delete (P4-P13) — admin/owner only. Hides the entry from
+    // new-selection dropdowns without touching any patient/visit/claim
+    // record (those store the insurer name as free text, not an FK into
+    // this table) and without deleting the catalog row itself.
+    delete: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
+      const existing = await getInsurerCatalogEntryById(input.id);
+      if (!existing) {
+        throw new TRPCError3({ code: "NOT_FOUND", message: "Insurance company not found" });
+      }
+      const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+      return await deactivateInsurerCatalogEntry(input.id, actorId);
+    }),
+    // Deliberate reactivation (P4-P13) from the Manage Insurance Companies
+    // dialog — distinct from insurance.create's own reactivate-on-conflict
+    // path above, for an admin who wants to bring an entry back without
+    // retyping its exact name.
+    reactivate: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
+      const existing = await getInsurerCatalogEntryById(input.id);
+      if (!existing) {
+        throw new TRPCError3({ code: "NOT_FOUND", message: "Insurance company not found" });
+      }
+      const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+      return await reactivateInsurerCatalogEntry(input.id, actorId);
     })
   }),
   // ── Visit Records ────────────────────────────────────────────────────────────

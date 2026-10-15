@@ -167,6 +167,13 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_patient ON public.audit_logs(patient_i
 -- patient/claim rows stored under the old name still resolve to this entry.
 -- normalized_name is DB-GENERATED from name (never application-supplied) so
 -- no insert path can ever persist a name/normalized_name pair that disagree.
+-- is_active + deactivated/reactivated at/by (P4-P13): soft-delete so
+-- removing an insurer from new-selection dropdowns never deletes or
+-- rewrites the row (insurance values on patients/visits/claims are free
+-- text, not an FK into this table, and must keep resolving for historical
+-- data). No actor-audit table fits here (audit_logs is patient-scoped via a
+-- NOT NULL FK) — the trail lives on the row itself, this table's own
+-- existing created_at convention extended to deactivate/reactivate.
 CREATE TABLE IF NOT EXISTS public.insurer_catalog (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL,
@@ -174,11 +181,21 @@ CREATE TABLE IF NOT EXISTS public.insurer_catalog (
     lower(btrim(regexp_replace(name, '\s+', ' ', 'g')))
   ) STORED,
   aliases text[] NOT NULL DEFAULT '{}',
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  is_active boolean NOT NULL DEFAULT true,
+  deactivated_at timestamptz,
+  deactivated_by uuid,
+  reactivated_at timestamptz,
+  reactivated_by uuid
 );
 
 -- Case/whitespace-insensitive uniqueness: "Aetna" / "aetna " / "AETNA" must collide.
+-- Enforced across active AND inactive rows, so a deactivated entry still
+-- blocks a duplicate insert -- insurance.create reactivates it instead.
 CREATE UNIQUE INDEX IF NOT EXISTS insurer_catalog_normalized_name_key ON public.insurer_catalog (normalized_name);
+
+-- New-selection dropdowns only ever query active rows.
+CREATE INDEX IF NOT EXISTS insurer_catalog_active_name_idx ON public.insurer_catalog (name) WHERE is_active;
 
 -- Server-only: accessed exclusively via the service-role client in
 -- server/db.ts. RLS is enabled with no anon/authenticated policies (default

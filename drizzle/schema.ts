@@ -97,6 +97,12 @@ export interface InsurerCatalogEntry {
   name: string;
   aliases: string[];        // previously-used display names for this same product
   createdAt: Date;
+  /** Soft-delete flag (P4-P13). Inactive entries are hidden from new-selection
+   *  dropdowns but remain readable/filterable so historical patient/claim
+   *  records stored under this name keep resolving correctly. */
+  isActive: boolean;
+  deactivatedAt: Date | null;
+  reactivatedAt: Date | null;
 }
 
 // ─── ClaimRecord ──────────────────────────────────────────────────────────────

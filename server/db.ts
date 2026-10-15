@@ -95,6 +95,9 @@ function toInsurerCatalogEntry(row: any): InsurerCatalogEntry {
     name: row.name,
     aliases: row.aliases ?? [],
     createdAt: new Date(row.created_at),
+    isActive: row.is_active ?? true,
+    deactivatedAt: row.deactivated_at ? new Date(row.deactivated_at) : null,
+    reactivatedAt: row.reactivated_at ? new Date(row.reactivated_at) : null,
   };
 }
 
@@ -1636,6 +1639,66 @@ export async function createInsurerCatalogEntry(params: {
 
   if (error) {
     console.error("[Supabase] createInsurerCatalogEntry:", error);
+    throw error;
+  }
+  return toInsurerCatalogEntry(data);
+}
+
+export async function getInsurerCatalogEntryById(id: string): Promise<InsurerCatalogEntry | undefined> {
+  const { data, error } = await supabase
+    .from("insurer_catalog")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] getInsurerCatalogEntryById:", error);
+    return undefined;
+  }
+  return data ? toInsurerCatalogEntry(data) : undefined;
+}
+
+/** Soft delete (P4-P13) — flips is_active to false. Never deletes the row or
+ *  touches name/aliases/normalized_name, so patient/visit/claim records
+ *  already storing this insurer's name keep resolving against it. Callers
+ *  (insurance.delete) are responsible for the admin/owner authorization
+ *  check; this function does not re-check it. */
+export async function deactivateInsurerCatalogEntry(
+  id: string,
+  actorId: string | null
+): Promise<InsurerCatalogEntry> {
+  const { data, error } = await supabase
+    .from("insurer_catalog")
+    .update({ is_active: false, deactivated_at: new Date().toISOString(), deactivated_by: actorId })
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error("[Supabase] deactivateInsurerCatalogEntry:", error);
+    throw error;
+  }
+  return toInsurerCatalogEntry(data);
+}
+
+/** Deliberate reactivation (P4-P13) — used both by the Manage Insurance
+ *  Companies dialog's own "Reactivate" action and by insurance.create when
+ *  the submitted name's normalized form matches an existing INACTIVE row
+ *  (re-adding a deleted name should restore that one row, never insert a
+ *  second row that would collide with its still-unique normalized_name). */
+export async function reactivateInsurerCatalogEntry(
+  id: string,
+  actorId: string | null
+): Promise<InsurerCatalogEntry> {
+  const { data, error } = await supabase
+    .from("insurer_catalog")
+    .update({ is_active: true, reactivated_at: new Date().toISOString(), reactivated_by: actorId })
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error("[Supabase] reactivateInsurerCatalogEntry:", error);
     throw error;
   }
   return toInsurerCatalogEntry(data);

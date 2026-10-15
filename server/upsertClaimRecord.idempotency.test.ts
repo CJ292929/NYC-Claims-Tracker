@@ -105,6 +105,36 @@ describe("upsertClaimRecord idempotency", () => {
     expect(rows[0].insurance_reimbursement).toBe(80);
   });
 
+  // P4-P13: documents a real structural side effect of the idempotency match
+  // key above, investigated as a candidate explanation for a reported UHC
+  // import where one of two same-day 97530 lines didn't show up in the
+  // tracker. This is NOT a fix — the (patient, period, date, cpt_codes) key
+  // is deliberate (see the P4-P1 Cigna re-import requirement this file
+  // covers above) and changing it risks reintroducing duplicate-row
+  // double-counting for every other insurer that already relies on it. It's
+  // recorded here as a verified, reproducible mechanism so a future pass
+  // with the actual UHC source PDF can confirm whether this is what
+  // happened and, if so, design a narrower fix (e.g. a disambiguating line
+  // index in the match key) without this test regressing in the meantime.
+  it("[KNOWN LIMITATION] two distinct service lines sharing the same CPT code AND date silently collapse into one row", async () => {
+    const { from, rows } = makeFakeClaimsTable();
+    tableMock.from = from;
+
+    // Two separate 97530 line items billed on the same date (e.g. two
+    // distinct sessions/units reported as separate EOB rows rather than one
+    // row with unitsBilled=2) -- a legitimate, real-world EOB shape.
+    await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", chargeAmount: 75, insuranceReimbursement: 60 });
+    await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", chargeAmount: 90, insuranceReimbursement: 70 });
+
+    // Both calls match the SAME existing row (same patient/period/date/CPT),
+    // so the second call patches the first instead of inserting a second
+    // row -- the first line's $75/$60 is silently overwritten by the
+    // second's $90/$70, and only one 97530 ever appears in the tracker.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].charge_amount).toBe(90);
+    expect(rows[0].insurance_reimbursement).toBe(70);
+  });
+
   it("a different CPT code on the same date creates a separate row (not collapsed into one)", async () => {
     const { from, rows } = makeFakeClaimsTable();
     tableMock.from = from;
