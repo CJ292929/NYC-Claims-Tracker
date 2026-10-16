@@ -189,6 +189,23 @@ describe("findCms1500EnrichmentCandidates", () => {
     const candidates = await findCms1500EnrichmentCandidates(PATIENT_A, MAY_19, "97110");
     expect(candidates).toHaveLength(2);
   });
+
+  // P4-P14: with the source_line_index fix, two legitimate repeated
+  // reimbursement lines for the same date/CPT can now coexist as two
+  // separate rows (same auth period). This function has no line
+  // discriminator (it doesn't select source_line_index at all) and must
+  // keep requiring explicit staff selection rather than guessing which one
+  // a CMS1500 line enriches.
+  it("two repeated reimbursement rows for the same date/CPT (P4-P14) still return as multiple candidates, not auto-resolved", async () => {
+    const { from } = makeFakeClaimsTable([
+      { id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97530", source_line_index: 0, charge_amount: 75, insurance_reimbursement: 60 },
+      { id: "r2", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97530", source_line_index: 1, charge_amount: 90, insurance_reimbursement: 70 },
+    ]);
+    tableMock.from = from;
+
+    const candidates = await findCms1500EnrichmentCandidates(PATIENT_A, MAY_19, "97530");
+    expect(candidates).toHaveLength(2); // caller must require explicit selection, never auto-pick one
+  });
 });
 
 describe("patientHasAnyClaimRecords", () => {
@@ -276,6 +293,40 @@ describe("applyCms1500Enrichment", () => {
     expect(rows[0].visit_number).toBe(1); // preserved
     expect(rows[0].modifier).toBe("GP"); // preserved
     expect(rows[0].units_billed).toBe(0); // legitimate zero preserved, not treated as missing
+  });
+
+  // P4-P14: with two repeated reimbursement rows for the same date/CPT now
+  // possible, staff must pick the exact row (by id) — this proves the
+  // commit step only ever patches the id it's told, never spills onto the
+  // sibling repeated-line row, and never touches either row's money.
+  it("with two repeated rows for the same date/CPT, enriching the one explicitly selected never touches its sibling or either row's money", async () => {
+    const { from, rows } = makeFakeClaimsTable([
+      { id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97530", source_line_index: 0, charge_amount: 75, insurance_reimbursement: 60, visit_number: null, diagnosis_codes: null, modifier: null, units_billed: null },
+      { id: "r2", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97530", source_line_index: 1, charge_amount: 90, insurance_reimbursement: 70, visit_number: null, diagnosis_codes: null, modifier: null, units_billed: null },
+    ]);
+    tableMock.from = from;
+
+    // Staff explicitly selected r2 as the target for this CMS1500 line.
+    await applyCms1500Enrichment({
+      claimRecordId: "r2",
+      patientId: PATIENT_A,
+      dateOfService: MAY_19,
+      cptCodes: "97530",
+      visitNumber: 4,
+      modifier: "GP",
+    });
+
+    const r1 = rows.find(r => r.id === "r1")!;
+    const r2 = rows.find(r => r.id === "r2")!;
+    expect(r2.visit_number).toBe(4);
+    expect(r2.modifier).toBe("GP");
+    expect(r2.charge_amount).toBe(90); // r2's own money untouched
+    expect(r2.insurance_reimbursement).toBe(70);
+    // r1 (the sibling repeated line) is completely untouched -- no bleed-over.
+    expect(r1.visit_number).toBeNull();
+    expect(r1.modifier).toBeNull();
+    expect(r1.charge_amount).toBe(75);
+    expect(r1.insurance_reimbursement).toBe(60);
   });
 
   it("re-applying the identical enrichment twice (reimport) does not duplicate rows or change values", async () => {

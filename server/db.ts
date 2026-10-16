@@ -1125,7 +1125,7 @@ export async function createClaimRecord(data: {
   oaClaimNumber?: string | null;
   claimSubmittedDate?: Date | null;
   expireBcbsClaimNumber?: string | null;
-  claimStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted';
+  claimStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | 'needs_review';
   paymentReceived?: number | null;
   checkDate?: Date | null;
   checkNumberVirtualCard?: string | null;
@@ -1133,6 +1133,7 @@ export async function createClaimRecord(data: {
   dateOfAppeal?: Date | null;
   referenceNo?: string | null;
   lmn?: string | null;
+  sourceLineIndex?: number | null;
 }): Promise<string> {
   const { data: row, error } = await supabase
     .from("claims_records")
@@ -1162,6 +1163,7 @@ export async function createClaimRecord(data: {
       date_of_appeal: data.dateOfAppeal ? data.dateOfAppeal.toISOString().split("T")[0] : null,
       reference_no: data.referenceNo ?? null,
       lmn: data.lmn ?? null,
+      source_line_index: data.sourceLineIndex ?? null,
     })
     .select("id")
     .single();
@@ -1191,7 +1193,7 @@ export async function updateClaimRecord(
     oaClaimNumber?: string | null;
     claimSubmittedDate?: Date | null;
     expireBcbsClaimNumber?: string | null;
-    claimStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted';
+    claimStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | 'needs_review';
     paymentReceived?: number | null;
     checkDate?: Date | null;
     checkNumberVirtualCard?: string | null;
@@ -1484,7 +1486,36 @@ export async function applyCms1500Enrichment(params: {
 }
 
 /**
- * Upsert a claim record by (patient_id, auth_period, date_of_service, cpt_codes).
+ * Thrown by upsertClaimRecord when it cannot safely tell whether a repeated
+ * same-date/same-CPT source line (sourceLineIndex >= 1) is a genuinely new
+ * line or a case where an existing pre-P4-P14 row (source_line_index IS
+ * NULL — created before this disambiguation existed) might already be the
+ * result of the old collapse-and-overwrite bug this change fixes. Rather
+ * than guess, the caller must surface this to staff as a row needing manual
+ * review instead of inserting a possibly-duplicate row or silently leaving
+ * the second line out. See the migration
+ * 20261017000000_claims_source_line_index_and_needs_review.sql and
+ * server/upsertClaimRecord.idempotency.test.ts.
+ */
+export class ClaimLineIdentityAmbiguousError extends Error {
+  constructor(
+    public readonly patientId: string,
+    public readonly dateOfService: string,
+    public readonly cptCodes: string | null,
+    public readonly sourceLineIndex: number
+  ) {
+    super(
+      `Cannot safely save repeated line #${sourceLineIndex + 1} for CPT ${cptCodes ?? "(none)"} on ${dateOfService}: ` +
+      `an existing claim row at this patient/date/CPT predates per-line identity tracking and might already represent ` +
+      `merged or overwritten data from more than one source line. Needs manual review before saving.`
+    );
+    this.name = "ClaimLineIdentityAmbiguousError";
+  }
+}
+
+/**
+ * Upsert a claim record by (patient_id, auth_period, date_of_service, cpt_codes),
+ * optionally disambiguated further by sourceLineIndex (P4-P14).
  *
  * If a matching record already exists, only the non-null fields in `data` are
  * merged into it (existing values are preserved for fields not provided by this
@@ -1494,6 +1525,24 @@ export async function applyCms1500Enrichment(params: {
  *   - CMS1500 first → inserts row with CPT/Charge/Diagnosis/DOS
  *   - Reimbursement later → finds that row and patches Ins.Reimb/Check/EFT
  *   (or vice-versa)
+ *
+ * sourceLineIndex (P4-P14): when two or more source service lines share the
+ * same (patient, auth_period, date_of_service, cpt_codes) — e.g. two
+ * legitimate 97530 lines billed on the same date — the base match key alone
+ * cannot tell them apart and the second upsert would silently overwrite the
+ * first (see server/upsertClaimRecord.idempotency.test.ts's documented
+ * "[KNOWN LIMITATION]" case). Callers that can enumerate a document's lines
+ * in a stable order (server/routers.ts bulkImportFromEOB,
+ * client/src/pages/Dashboard.tsx handleSaveExtractedClaims) pass each line's
+ * 0-based position within its (date, CPT) group here. Re-importing the same
+ * document reproduces the same indices in the same order, so idempotency is
+ * preserved: index 0 patches the first row, index 1 patches the second, etc.
+ * Rows written before this column existed have source_line_index = NULL
+ * ("legacy slot") and are treated as index 0 for backward compatibility; a
+ * legacy row found while this import asks for index >= 1 throws
+ * ClaimLineIdentityAmbiguousError instead of guessing. Callers that don't
+ * pass sourceLineIndex at all (manual single-row edits) get the exact prior
+ * behavior — matched ignoring the column entirely.
  */
 export async function upsertClaimRecord(data: {
   patientId: string;
@@ -1513,7 +1562,7 @@ export async function upsertClaimRecord(data: {
   oaClaimNumber?: string | null;
   claimSubmittedDate?: Date | null;
   expireBcbsClaimNumber?: string | null;
-  claimStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted';
+  claimStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | 'needs_review';
   paymentReceived?: number | null;
   checkDate?: Date | null;
   checkNumberVirtualCard?: string | null;
@@ -1521,28 +1570,61 @@ export async function upsertClaimRecord(data: {
   dateOfAppeal?: Date | null;
   referenceNo?: string | null;
   lmn?: string | null;
+  sourceLineIndex?: number | null;
 }): Promise<string> {
   const dosStr = data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null;
 
-  // Try to find an existing record matching patient + auth_period + date_of_service + cpt_codes
-  // (null cpt_codes is treated as a wildcard match only when both sides are null)
-  let existingId: string | null = null;
-  if (dosStr) {
-    let query = supabase
+  const baseQuery = () => {
+    let q = supabase
       .from("claims_records")
       .select("id")
       .eq("patient_id", data.patientId)
       .eq("auth_period", data.authPeriod)
-      .eq("date_of_service", dosStr);
+      .eq("date_of_service", dosStr as string);
+    q = data.cptCodes ? q.eq("cpt_codes", data.cptCodes) : q.is("cpt_codes", null);
+    return q;
+  };
 
-    if (data.cptCodes) {
-      query = query.eq("cpt_codes", data.cptCodes);
+  // Try to find an existing record matching patient + auth_period + date_of_service + cpt_codes
+  // (null cpt_codes is treated as a wildcard match only when both sides are null)
+  let existingId: string | null = null;
+  let promoteLegacyRow = false;
+
+  if (dosStr) {
+    if (data.sourceLineIndex != null) {
+      const { data: exact, error: exactErr } = await baseQuery().eq("source_line_index", data.sourceLineIndex).maybeSingle();
+      if (exactErr) {
+        console.error("[Supabase] upsertClaimRecord (exact line-index lookup):", exactErr);
+        throw exactErr;
+      }
+      existingId = exact ? (exact as { id: string }).id : null;
+
+      if (!existingId) {
+        const { data: legacy, error: legacyErr } = await baseQuery().is("source_line_index", null).maybeSingle();
+        if (legacyErr) {
+          // More than one legacy (NULL-index) row already exists at this key —
+          // can't safely tell which one (if any) corresponds to this line.
+          throw new ClaimLineIdentityAmbiguousError(data.patientId, dosStr, data.cptCodes ?? null, data.sourceLineIndex);
+        }
+        const legacyId = legacy ? (legacy as { id: string }).id : null;
+
+        if (legacyId && data.sourceLineIndex === 0) {
+          existingId = legacyId;
+          promoteLegacyRow = true; // stamp source_line_index = 0 on this previously-untagged row
+        } else if (legacyId && data.sourceLineIndex > 0) {
+          throw new ClaimLineIdentityAmbiguousError(data.patientId, dosStr, data.cptCodes ?? null, data.sourceLineIndex);
+        }
+      }
     } else {
-      query = query.is("cpt_codes", null);
+      // No line index supplied (manual single-row edits/creates) — exact prior
+      // behavior, matching regardless of source_line_index.
+      const { data: existing, error } = await baseQuery().maybeSingle();
+      if (error) {
+        console.error("[Supabase] upsertClaimRecord (lookup):", error);
+        throw error;
+      }
+      existingId = existing ? (existing as { id: string }).id : null;
     }
-
-    const { data: existing } = await query.maybeSingle();
-    existingId = existing ? (existing as { id: string }).id : null;
   }
 
   if (existingId) {
@@ -1570,6 +1652,7 @@ export async function upsertClaimRecord(data: {
     if (data.dateOfAppeal != null) patch.date_of_appeal = data.dateOfAppeal.toISOString().split("T")[0];
     if (data.referenceNo != null) patch.reference_no = data.referenceNo;
     if (data.lmn != null) patch.lmn = data.lmn;
+    if (promoteLegacyRow) patch.source_line_index = 0;
 
     if (Object.keys(patch).length > 0) {
       const { error } = await supabase.from("claims_records").update(patch).eq("id", existingId);

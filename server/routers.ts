@@ -33,6 +33,7 @@ import {
   ClaimRecordNotFoundError,
   ClaimRecordPatientMismatchError,
   upsertClaimRecord,
+  ClaimLineIdentityAmbiguousError,
   classifyClaimFollowUp,
   sortByFollowUpUrgency,
   aggregateClaimStatusCounts,
@@ -104,6 +105,27 @@ function parseDate(s: string | null | undefined): Date | null {
 
   const d = new Date(trimmed + "T00:00:00Z");
   return isNaN(d.getTime()) ? null : d;
+}
+
+// P4-P14: within one claim/date group's service lines, assigns each line a
+// 0-based "source line index" scoped to lines sharing the same CPT code —
+// the position it occupies among same-CPT repeats, in the order the source
+// document/import lists them. Lines with a unique CPT in the group get
+// index 0 (no repeat). Passed to upsertClaimRecord so two legitimate
+// same-date/same-CPT lines (e.g. two 97530 sessions billed the same day)
+// land in two distinct rows instead of the second silently overwriting the
+// first — see server/db.ts upsertClaimRecord and
+// server/upsertClaimRecord.idempotency.test.ts. Re-running this over the
+// same ordered lines array always reproduces the same indices, which is
+// what keeps re-importing the same document idempotent.
+function computeSourceLineIndices(lines: Array<{ cptCodes?: string | null }>): number[] {
+  const seenCount = new Map<string, number>();
+  return lines.map(line => {
+    const key = (line.cptCodes ?? "").trim();
+    const index = seenCount.get(key) ?? 0;
+    seenCount.set(key, index + 1);
+    return index;
+  });
 }
 
 // Client-facing staff shape — never includes passwordHash or tokenVersion
@@ -763,7 +785,7 @@ export const appRouter = router({
         oaClaimNumber: z.string().nullable().optional(),
         claimSubmittedDate: z.string().nullable().optional(),
         expireBcbsClaimNumber: z.string().nullable().optional(),
-        claimStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted']).optional(),
+        claimStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted', 'needs_review']).optional(),
         paymentReceived: z.number().nullable().optional(),
         checkDate: z.string().nullable().optional(),
         checkNumberVirtualCard: z.string().nullable().optional(),
@@ -821,7 +843,7 @@ export const appRouter = router({
         oaClaimNumber: z.string().nullable().optional(),
         claimSubmittedDate: z.string().nullable().optional(),
         expireBcbsClaimNumber: z.string().nullable().optional(),
-        claimStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted']).optional(),
+        claimStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted', 'needs_review']).optional(),
         paymentReceived: z.number().nullable().optional(),
         checkDate: z.string().nullable().optional(),
         checkNumberVirtualCard: z.string().nullable().optional(),
@@ -909,7 +931,7 @@ export const appRouter = router({
         oaClaimNumber: z.string().nullable().optional(),
         claimSubmittedDate: z.string().nullable().optional(),
         expireBcbsClaimNumber: z.string().nullable().optional(),
-        claimStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted']).optional(),
+        claimStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted', 'needs_review']).optional(),
         paymentReceived: z.number().nullable().optional(),
         checkDate: z.string().nullable().optional(),
         checkNumberVirtualCard: z.string().nullable().optional(),
@@ -917,35 +939,49 @@ export const appRouter = router({
         dateOfAppeal: z.string().nullable().optional(),
         referenceNo: z.string().nullable().optional(),
         lmn: z.string().nullable().optional(),
+        // P4-P14: 0-based position of this line among source lines sharing
+        // its CPT code within the same save batch — see
+        // computeSourceLineIndices. Omitted entirely by any caller that
+        // doesn't have a notion of "repeated lines" (preserves exact prior
+        // matching behavior for those callers).
+        sourceLineIndex: z.number().int().min(0).nullable().optional(),
       }))
       .mutation(async ({ input }) => {
-        await upsertClaimRecord({
-          patientId: input.patientId,
-          authPeriod: input.authPeriod,
-          placeOfService: input.placeOfService ?? null,
-          dateOfService: parseDate(input.dateOfService),
-          visitNumber: input.visitNumber ?? null,
-          cptCodes: input.cptCodes ?? null,
-          unitsBilled: input.unitsBilled ?? null,
-          diagnosisCodes: input.diagnosisCodes ?? null,
-          modifier: input.modifier ?? null,
-          chargeAmount: input.chargeAmount ?? null,
-          insuranceReimbursement: input.insuranceReimbursement ?? null,
-          patientAmountPaid: input.patientAmountPaid ?? null,
-          patientAmountDue: input.patientAmountDue ?? null,
-          insuranceBilled: input.insuranceBilled ?? null,
-          oaClaimNumber: input.oaClaimNumber ?? null,
-          claimSubmittedDate: parseDate(input.claimSubmittedDate),
-          expireBcbsClaimNumber: input.expireBcbsClaimNumber ?? null,
-          claimStatus: input.claimStatus ?? 'submitted',
-          paymentReceived: input.paymentReceived ?? null,
-          checkDate: parseDate(input.checkDate),
-          checkNumberVirtualCard: input.checkNumberVirtualCard ?? null,
-          dateReceived: parseDate(input.dateReceived),
-          dateOfAppeal: parseDate(input.dateOfAppeal),
-          referenceNo: input.referenceNo ?? null,
-          lmn: input.lmn ?? null,
-        });
+        try {
+          await upsertClaimRecord({
+            patientId: input.patientId,
+            authPeriod: input.authPeriod,
+            placeOfService: input.placeOfService ?? null,
+            dateOfService: parseDate(input.dateOfService),
+            visitNumber: input.visitNumber ?? null,
+            cptCodes: input.cptCodes ?? null,
+            sourceLineIndex: input.sourceLineIndex ?? null,
+            unitsBilled: input.unitsBilled ?? null,
+            diagnosisCodes: input.diagnosisCodes ?? null,
+            modifier: input.modifier ?? null,
+            chargeAmount: input.chargeAmount ?? null,
+            insuranceReimbursement: input.insuranceReimbursement ?? null,
+            patientAmountPaid: input.patientAmountPaid ?? null,
+            patientAmountDue: input.patientAmountDue ?? null,
+            insuranceBilled: input.insuranceBilled ?? null,
+            oaClaimNumber: input.oaClaimNumber ?? null,
+            claimSubmittedDate: parseDate(input.claimSubmittedDate),
+            expireBcbsClaimNumber: input.expireBcbsClaimNumber ?? null,
+            claimStatus: input.claimStatus ?? 'submitted',
+            paymentReceived: input.paymentReceived ?? null,
+            checkDate: parseDate(input.checkDate),
+            checkNumberVirtualCard: input.checkNumberVirtualCard ?? null,
+            dateReceived: parseDate(input.dateReceived),
+            dateOfAppeal: parseDate(input.dateOfAppeal),
+            referenceNo: input.referenceNo ?? null,
+            lmn: input.lmn ?? null,
+          });
+        } catch (err) {
+          if (err instanceof ClaimLineIdentityAmbiguousError) {
+            throw new TRPCError({ code: "CONFLICT", message: err.message });
+          }
+          throw err;
+        }
         return { success: true };
       }),
 
@@ -1068,7 +1104,7 @@ export const appRouter = router({
             oaClaimNumber: z.string().nullable().optional(),
             claimSubmittedDate: z.string().nullable().optional(),
             expireBcbsClaimNumber: z.string().nullable().optional(),
-            claimStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted']).optional(),
+            claimStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted', 'needs_review']).optional(),
             checkDate: z.string().nullable().optional(),
             checkNumberVirtualCard: z.string().nullable().optional(),
             dateReceived: z.string().nullable().optional(),
@@ -1225,7 +1261,14 @@ export const appRouter = router({
           let skippedNoReimbursementUploaded = 0;
           let skippedNeedsSelection = 0;
           let skippedUnconfirmedProvenance = 0;
+          let skippedAmbiguousLineIdentity = 0;
           const skippedCms1500Lines: Array<{ dateOfService: string | null; cptCodes: string | null; reason: 'no_match' | 'no_reimbursement_uploaded' | 'needs_selection' | 'unconfirmed_provenance' | 'invalid_date' }> = [];
+          // P4-P14: reimbursement lines that upsertClaimRecord refused to
+          // save because an existing legacy (pre-line-identity) row at this
+          // patient/date/CPT might already be a merged/overwritten artifact
+          // of the bug this column fixes — never silently guessed, always
+          // surfaced to staff instead. See ClaimLineIdentityAmbiguousError.
+          const skippedReimbursementLines: Array<{ dateOfService: string | null; cptCodes: string | null; reason: 'needs_review' }> = [];
           try {
             if (uploadType === 'cms1500') {
               // CMS1500 never creates or writes a financial row. Each line is
@@ -1311,40 +1354,56 @@ export const appRouter = router({
                       diagnosisCodes: claim.diagnosisCodes ?? null,
                     }];
 
-                for (const line of lines) {
+                const lineIndices = computeSourceLineIndices(lines);
+                for (let lIdx = 0; lIdx < lines.length; lIdx++) {
+                  const line = lines[lIdx];
                   // Reimbursement is the ONLY upload type this branch handles
                   // now (cms1500 is handled entirely above) — it owns charge
                   // and every payment field, and establishes new claim rows.
-                  await upsertClaimRecord({
-                    patientId: matchedPatient.id,
-                    authPeriod: maxPeriod,
-                    dateOfService: parseDate(claim.dateOfService),
-                    cptCodes: line.cptCodes ?? null,
-                    claimStatus: claim.claimStatus ?? 'submitted',
-                    oaClaimNumber: claim.oaClaimNumber ?? null,
-                    insuranceReimbursement: line.insuranceReimbursement ?? null,
-                    patientAmountPaid: line.patientAmountPaid ?? null,
-                    patientAmountDue: line.patientAmountDue ?? null,
-                    checkDate: parseDate(claim.checkDate),
-                    checkNumberVirtualCard: claim.checkNumberVirtualCard ?? null,
-                    referenceNo: claim.referenceNo ?? null,
-                    insuranceBilled: claim.insuranceBilled ?? null,
-                    paymentReceived: line.insuranceReimbursement ?? null,
-                    placeOfService: null,
-                    visitNumber: null,
-                    claimSubmittedDate: null,
-                    expireBcbsClaimNumber: null,
-                    // Line-item billing detail (units/diagnosis/modifier/charge)
-                    // many EOBs also print alongside their payment columns.
-                    unitsBilled: line.unitsBilled ?? null,
-                    diagnosisCodes: line.diagnosisCodes ?? null,
-                    modifier: line.modifier ?? null,
-                    chargeAmount: line.chargeAmount ?? null,
-                    dateReceived: parseDate(claim.dateReceived),
-                    dateOfAppeal: parseDate(claim.dateOfAppeal),
-                    lmn: claim.lmn ?? null,
-                  });
-                  claimsImported++;
+                  try {
+                    await upsertClaimRecord({
+                      patientId: matchedPatient.id,
+                      authPeriod: maxPeriod,
+                      dateOfService: parseDate(claim.dateOfService),
+                      cptCodes: line.cptCodes ?? null,
+                      sourceLineIndex: lineIndices[lIdx],
+                      claimStatus: claim.claimStatus ?? 'submitted',
+                      oaClaimNumber: claim.oaClaimNumber ?? null,
+                      insuranceReimbursement: line.insuranceReimbursement ?? null,
+                      patientAmountPaid: line.patientAmountPaid ?? null,
+                      patientAmountDue: line.patientAmountDue ?? null,
+                      checkDate: parseDate(claim.checkDate),
+                      checkNumberVirtualCard: claim.checkNumberVirtualCard ?? null,
+                      referenceNo: claim.referenceNo ?? null,
+                      insuranceBilled: claim.insuranceBilled ?? null,
+                      paymentReceived: line.insuranceReimbursement ?? null,
+                      placeOfService: null,
+                      visitNumber: null,
+                      claimSubmittedDate: null,
+                      expireBcbsClaimNumber: null,
+                      // Line-item billing detail (units/diagnosis/modifier/charge)
+                      // many EOBs also print alongside their payment columns.
+                      unitsBilled: line.unitsBilled ?? null,
+                      diagnosisCodes: line.diagnosisCodes ?? null,
+                      modifier: line.modifier ?? null,
+                      chargeAmount: line.chargeAmount ?? null,
+                      dateReceived: parseDate(claim.dateReceived),
+                      dateOfAppeal: parseDate(claim.dateOfAppeal),
+                      lmn: claim.lmn ?? null,
+                    });
+                    claimsImported++;
+                  } catch (lineErr) {
+                    if (lineErr instanceof ClaimLineIdentityAmbiguousError) {
+                      skippedAmbiguousLineIdentity++;
+                      skippedReimbursementLines.push({
+                        dateOfService: claim.dateOfService ?? null,
+                        cptCodes: line.cptCodes ?? null,
+                        reason: 'needs_review',
+                      });
+                      continue;
+                    }
+                    throw lineErr;
+                  }
                 }
               }
             }
@@ -1360,6 +1419,8 @@ export const appRouter = router({
               ...(skippedNeedsSelection > 0 ? { skippedNeedsSelection } : {}),
               ...(skippedUnconfirmedProvenance > 0 ? { skippedUnconfirmedProvenance } : {}),
               ...(skippedCms1500Lines.length > 0 ? { skippedCms1500Lines } : {}),
+              ...(skippedAmbiguousLineIdentity > 0 ? { skippedAmbiguousLineIdentity } : {}),
+              ...(skippedReimbursementLines.length > 0 ? { skippedReimbursementLines } : {}),
             });
           } catch (err: any) {
             results.push({

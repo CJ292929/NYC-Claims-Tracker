@@ -90,6 +90,7 @@ const CLAIM_STATUS_FILTERS = [
   { value: 'pended', label: 'Pended', color: 'bg-orange-100 text-orange-800' },
   { value: 'rejected', label: 'Rejected', color: 'bg-gray-900 text-white' },
   { value: 'resubmitted', label: 'Resubmitted', color: 'bg-violet-100 text-violet-800' },
+  { value: 'needs_review', label: 'Needs Review', color: 'bg-amber-100 text-amber-800' },
   { value: 'none', label: 'No Status', color: 'bg-gray-50 text-gray-500' },
 ];
 
@@ -462,6 +463,12 @@ export default function Dashboard() {
       dateOfService: string | null;
       cptCodes: string | null;
       reason: 'no_match' | 'no_reimbursement_uploaded' | 'needs_selection' | 'unconfirmed_provenance' | 'invalid_date';
+    }>;
+    skippedAmbiguousLineIdentity?: number;
+    skippedReimbursementLines?: Array<{
+      dateOfService: string | null;
+      cptCodes: string | null;
+      reason: 'needs_review';
     }>;
   }> | null>(null);
   // ── CMS1500 enrichment (P4-P10) ───────────────────────────────────────────
@@ -1635,7 +1642,22 @@ export default function Dashboard() {
     for (const row of editingExtractedClaims) {
       // Save one DB row per CPT line (not consolidated)
       const cptLines: any[] = row.cptLines && row.cptLines.length > 0 ? row.cptLines : [row];
-      for (const line of cptLines) {
+      // P4-P14: 0-based position of each line among lines sharing its CPT
+      // code within this date group, in source order — passed through so
+      // two legitimate same-date/same-CPT lines (e.g. two 97530 sessions)
+      // land in two distinct rows instead of the second silently
+      // overwriting the first. See computeSourceLineIndices in
+      // server/routers.ts (same logic, duplicated here since this save path
+      // calls claims.upsert directly rather than bulkImportFromEOB).
+      const seenCptCount = new Map<string, number>();
+      const lineSourceIndices = cptLines.map((line: any) => {
+        const key = (line.cptCodes ?? '').trim();
+        const idx = seenCptCount.get(key) ?? 0;
+        seenCptCount.set(key, idx + 1);
+        return idx;
+      });
+      for (let lineIdx = 0; lineIdx < cptLines.length; lineIdx++) {
+        const line = cptLines[lineIdx];
         try {
           const lineReimb = line.insuranceReimbursement !== '' && line.insuranceReimbursement != null ? parseFloat(line.insuranceReimbursement) : null;
           await upsertClaim.mutateAsync({
@@ -1645,6 +1667,7 @@ export default function Dashboard() {
             dateOfService: row.dateOfService || line.dateOfService || null,
             visitNumber: row.visitNumber !== '' && row.visitNumber != null ? parseInt(row.visitNumber, 10) : null,
             cptCodes: line.cptCodes || null,
+            sourceLineIndex: lineSourceIndices[lineIdx],
             unitsBilled: line.unitsBilled ? parseInt(line.unitsBilled) : (row.unitsBilled ? parseInt(row.unitsBilled) : null),
             diagnosisCodes: line.diagnosisCodes || row.diagnosisCodes || null,
             modifier: line.modifier || row.modifier || null,
@@ -3075,6 +3098,7 @@ export default function Dashboard() {
                             pended: 'bg-orange-100 text-orange-800',
                             rejected: 'bg-gray-900 text-white',
                             resubmitted: 'bg-violet-100 text-violet-800',
+                            needs_review: 'bg-amber-100 text-amber-800',
                           };
 
                           const hide = (key: string) => hiddenClaimsColumns.has(key);
@@ -3155,6 +3179,7 @@ export default function Dashboard() {
                             { value: 'pended', label: 'Pended' },
                             { value: 'rejected', label: 'Rejected' },
                             { value: 'resubmitted', label: 'Resubmitted' },
+                            { value: 'needs_review', label: 'Needs Review' },
                           ];
 
                           const MobileEditableRow = ({ claimId, label, field, value, type = 'text', prefix = '', decimals = 2 }: {
@@ -3517,6 +3542,7 @@ export default function Dashboard() {
                                                 <option value="pended">Pended</option>
                                                 <option value="rejected">Rejected</option>
                                                 <option value="resubmitted">Resubmitted</option>
+                                                <option value="needs_review">Needs Review</option>
                                               </select>
                                             ) : (
                                               <Badge className={statusColors[claim.claim_status] ?? 'bg-blue-100 text-blue-800'}>
@@ -3875,6 +3901,23 @@ export default function Dashboard() {
                           </ul>
                           <p className="mt-1 text-xs text-amber-700">
                             Resolve these on {r.dashboardName ?? r.patientName}'s own page via the single-patient CMS1500 upload, which supports picking the right row and confirming an unconfirmed match.
+                          </p>
+                        </div>
+                      )}
+                      {r.skippedReimbursementLines && r.skippedReimbursementLines.length > 0 && (
+                        <div className="px-4 pb-3 pt-0">
+                          <p className="text-xs font-semibold text-amber-800">
+                            {r.skippedReimbursementLines.length} repeated line{r.skippedReimbursementLines.length !== 1 ? 's' : ''} not saved — needs manual review:
+                          </p>
+                          <ul className="mt-1 space-y-0.5">
+                            {r.skippedReimbursementLines.map((line, li) => (
+                              <li key={li} className="text-xs text-amber-700 font-mono">
+                                {line.dateOfService ?? '—'} · {line.cptCodes ?? '—'} — matches an existing row from before repeated-line tracking; can't confirm it's safe to add without checking the source document
+                              </li>
+                            ))}
+                          </ul>
+                          <p className="mt-1 text-xs text-amber-700">
+                            Verify against the original EOB and enter this line manually on {r.dashboardName ?? r.patientName}'s own page if it's a genuinely separate service line.
                           </p>
                         </div>
                       )}

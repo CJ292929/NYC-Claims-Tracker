@@ -153,6 +153,7 @@ var init_authUrgency = __esm({
 // server/db.ts
 var db_exports = {};
 __export(db_exports, {
+  ClaimLineIdentityAmbiguousError: () => ClaimLineIdentityAmbiguousError,
   ClaimRecordNotFoundError: () => ClaimRecordNotFoundError,
   ClaimRecordPatientMismatchError: () => ClaimRecordPatientMismatchError,
   FOLLOW_UP_STALE_DAYS: () => FOLLOW_UP_STALE_DAYS,
@@ -844,7 +845,8 @@ async function createClaimRecord(data) {
     date_received: data.dateReceived ? data.dateReceived.toISOString().split("T")[0] : null,
     date_of_appeal: data.dateOfAppeal ? data.dateOfAppeal.toISOString().split("T")[0] : null,
     reference_no: data.referenceNo ?? null,
-    lmn: data.lmn ?? null
+    lmn: data.lmn ?? null,
+    source_line_index: data.sourceLineIndex ?? null
   }).select("id").single();
   if (error) {
     console.error("[Supabase] createClaimRecord:", error);
@@ -988,16 +990,42 @@ async function applyCms1500Enrichment(params) {
 }
 async function upsertClaimRecord(data) {
   const dosStr = data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null;
+  const baseQuery = () => {
+    let q = supabase.from("claims_records").select("id").eq("patient_id", data.patientId).eq("auth_period", data.authPeriod).eq("date_of_service", dosStr);
+    q = data.cptCodes ? q.eq("cpt_codes", data.cptCodes) : q.is("cpt_codes", null);
+    return q;
+  };
   let existingId = null;
+  let promoteLegacyRow = false;
   if (dosStr) {
-    let query = supabase.from("claims_records").select("id").eq("patient_id", data.patientId).eq("auth_period", data.authPeriod).eq("date_of_service", dosStr);
-    if (data.cptCodes) {
-      query = query.eq("cpt_codes", data.cptCodes);
+    if (data.sourceLineIndex != null) {
+      const { data: exact, error: exactErr } = await baseQuery().eq("source_line_index", data.sourceLineIndex).maybeSingle();
+      if (exactErr) {
+        console.error("[Supabase] upsertClaimRecord (exact line-index lookup):", exactErr);
+        throw exactErr;
+      }
+      existingId = exact ? exact.id : null;
+      if (!existingId) {
+        const { data: legacy, error: legacyErr } = await baseQuery().is("source_line_index", null).maybeSingle();
+        if (legacyErr) {
+          throw new ClaimLineIdentityAmbiguousError(data.patientId, dosStr, data.cptCodes ?? null, data.sourceLineIndex);
+        }
+        const legacyId = legacy ? legacy.id : null;
+        if (legacyId && data.sourceLineIndex === 0) {
+          existingId = legacyId;
+          promoteLegacyRow = true;
+        } else if (legacyId && data.sourceLineIndex > 0) {
+          throw new ClaimLineIdentityAmbiguousError(data.patientId, dosStr, data.cptCodes ?? null, data.sourceLineIndex);
+        }
+      }
     } else {
-      query = query.is("cpt_codes", null);
+      const { data: existing, error } = await baseQuery().maybeSingle();
+      if (error) {
+        console.error("[Supabase] upsertClaimRecord (lookup):", error);
+        throw error;
+      }
+      existingId = existing ? existing.id : null;
     }
-    const { data: existing } = await query.maybeSingle();
-    existingId = existing ? existing.id : null;
   }
   if (existingId) {
     const patch = {};
@@ -1023,6 +1051,7 @@ async function upsertClaimRecord(data) {
     if (data.dateOfAppeal != null) patch.date_of_appeal = data.dateOfAppeal.toISOString().split("T")[0];
     if (data.referenceNo != null) patch.reference_no = data.referenceNo;
     if (data.lmn != null) patch.lmn = data.lmn;
+    if (promoteLegacyRow) patch.source_line_index = 0;
     if (Object.keys(patch).length > 0) {
       const { error } = await supabase.from("claims_records").update(patch).eq("id", existingId);
       if (error) {
@@ -1082,7 +1111,7 @@ async function reactivateInsurerCatalogEntry(id, actorId) {
   }
   return toInsurerCatalogEntry(data);
 }
-var FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, REIMBURSEMENT_EVIDENCE_COLUMNS;
+var FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, REIMBURSEMENT_EVIDENCE_COLUMNS, ClaimLineIdentityAmbiguousError;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
@@ -1141,6 +1170,18 @@ var init_db = __esm({
       "reference_no",
       "payment_received"
     ];
+    ClaimLineIdentityAmbiguousError = class extends Error {
+      constructor(patientId, dateOfService, cptCodes, sourceLineIndex) {
+        super(
+          `Cannot safely save repeated line #${sourceLineIndex + 1} for CPT ${cptCodes ?? "(none)"} on ${dateOfService}: an existing claim row at this patient/date/CPT predates per-line identity tracking and might already represent merged or overwritten data from more than one source line. Needs manual review before saving.`
+        );
+        this.patientId = patientId;
+        this.dateOfService = dateOfService;
+        this.cptCodes = cptCodes;
+        this.sourceLineIndex = sourceLineIndex;
+        this.name = "ClaimLineIdentityAmbiguousError";
+      }
+    };
   }
 });
 
@@ -2879,6 +2920,24 @@ function sanitizeVisitNumber(claim) {
     claim.visitNumber = null;
   }
 }
+function reconcileClaimStatusWithPaymentEvidence(claim) {
+  if (claim.insuranceReimbursement == null) return;
+  if (claim.claimStatus === "denied" && claim.insuranceReimbursement > 0) {
+    claim.notes = [
+      claim.notes,
+      `\u26A0\uFE0F claimStatus corrected from "denied" to "approved" \u2014 this line has an insurance reimbursement of $${claim.insuranceReimbursement.toFixed(2)}, which a denied line cannot have.`
+    ].filter(Boolean).join(" | ");
+    claim.claimStatus = "approved";
+    return;
+  }
+  if (claim.claimStatus === "approved" && claim.insuranceReimbursement === 0) {
+    claim.notes = [
+      claim.notes,
+      `\u26A0\uFE0F claimStatus flagged "needs_review" \u2014 extracted as "approved" but insurance reimbursement is $0, which needs staff confirmation before relying on either status.`
+    ].filter(Boolean).join(" | ");
+    claim.claimStatus = "needs_review";
+  }
+}
 function verifyClaimAgainstSourceText(claim, sourceText) {
   const warnings = [];
   if (claim.cptCodes) {
@@ -2966,7 +3025,7 @@ For each claim/service line, extract EVERY one of these fields when it appears a
 - oaClaimNumber: claim number/ID/ICN/reference number for this claim \u2014 copy it character-for-character exactly as printed; never reformat, abbreviate, or invent one
 - checkDate: check/payment/EFT date in MM/DD/YYYY format
 - checkNumberVirtualCard: check number, EFT trace number, or virtual card number
-- claimStatus: one of "approved", "denied", or "submitted" (infer from context \u2014 e.g. a $0 paid line with a denial code is "denied"; a line with a payment amount is "approved")
+- claimStatus: one of "approved", "denied", or "submitted" \u2014 determine this INDEPENDENTLY for EACH service line using ONLY that specific line's own evidence (its own denial reason/remark code, or its own $0 payment paired with an explicit denial code/phrase). NEVER mark a line "denied" solely because the DOCUMENT contains the word "denied" somewhere else, or because a DIFFERENT line on the same claim was denied \u2014 a document or claim can have some lines paid and others denied, and each line's status must reflect only itself. NEVER infer "denied" purely from a $0 payment, a remaining patient balance, or an adjustment/reduction code by themselves \u2014 those also occur on lines that are simply still processing, fully adjusted to a contractual rate, or awaiting a coordination-of-benefits step; use "submitted" instead when a line has no payment and no explicit denial evidence of its own. A line with any positive insuranceReimbursement amount must never be "denied".
 - insuranceBilled: the NUMERIC billing/group/payer identifier for this claim \u2014 e.g. "Group #", "Group Number", "Group No", "Group ID", "Billing ID", "Billing Number", "Payer ID", "Payer Number", or a slash-separated identifier like "16404/137040261". This is NEVER the insurance company/payer name (do not write "Aetna", "Meritain Health", "BCBS", "Cigna", etc. here \u2014 that is a completely different field, not this one). If no such numeric identifier is visible anywhere in this claim's block, use null \u2014 do not substitute the payer name as a fallback.
 - visitNumber: Always return null for EOB documents. Visit number comes only from CMS-1500 forms.
 
@@ -3171,6 +3230,7 @@ ${source.text}` : [
     for (const claim of normalizedClaims) {
       sanitizeInsuranceBilled(claim);
       sanitizeVisitNumber(claim);
+      reconcileClaimStatusWithPaymentEvidence(claim);
     }
     if (source.kind === "text") {
       for (const claim of normalizedClaims) {
@@ -3837,6 +3897,7 @@ function registerClaimUploadRoute(app2) {
         console.log("[ClaimUpload] Stage 5/7 \u2014 AI text parsing failed upstream, using legacy AI extraction...");
         const claims = await mapToClaimColumns(extractedText);
         enforceFieldBoundary(claims, "reimbursement");
+        claims.forEach(reconcileClaimStatusWithPaymentEvidence);
         console.log(`[ClaimUpload] Stage 7/7 \u2014 Database save pending: ${claims.length} claim(s) via legacy AI extraction`);
         res.json({ claims, extractedLength: extractedText.length, templateUsed: "AI Extraction (Legacy)", uploadType: "reimbursement" });
       } catch (err) {
@@ -4110,6 +4171,15 @@ function parseDate2(s) {
   }
   const d = /* @__PURE__ */ new Date(trimmed + "T00:00:00Z");
   return isNaN(d.getTime()) ? null : d;
+}
+function computeSourceLineIndices(lines) {
+  const seenCount = /* @__PURE__ */ new Map();
+  return lines.map((line) => {
+    const key = (line.cptCodes ?? "").trim();
+    const index = seenCount.get(key) ?? 0;
+    seenCount.set(key, index + 1);
+    return index;
+  });
 }
 function toSafeStaff(user) {
   const { passwordHash: _passwordHash, tokenVersion: _tokenVersion, ...safe } = user;
@@ -4644,7 +4714,7 @@ var appRouter = router({
       oaClaimNumber: z2.string().nullable().optional(),
       claimSubmittedDate: z2.string().nullable().optional(),
       expireBcbsClaimNumber: z2.string().nullable().optional(),
-      claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted"]).optional(),
+      claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
       paymentReceived: z2.number().nullable().optional(),
       checkDate: z2.string().nullable().optional(),
       checkNumberVirtualCard: z2.string().nullable().optional(),
@@ -4699,7 +4769,7 @@ var appRouter = router({
       oaClaimNumber: z2.string().nullable().optional(),
       claimSubmittedDate: z2.string().nullable().optional(),
       expireBcbsClaimNumber: z2.string().nullable().optional(),
-      claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted"]).optional(),
+      claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
       paymentReceived: z2.number().nullable().optional(),
       checkDate: z2.string().nullable().optional(),
       checkNumberVirtualCard: z2.string().nullable().optional(),
@@ -4777,42 +4847,56 @@ var appRouter = router({
       oaClaimNumber: z2.string().nullable().optional(),
       claimSubmittedDate: z2.string().nullable().optional(),
       expireBcbsClaimNumber: z2.string().nullable().optional(),
-      claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted"]).optional(),
+      claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
       paymentReceived: z2.number().nullable().optional(),
       checkDate: z2.string().nullable().optional(),
       checkNumberVirtualCard: z2.string().nullable().optional(),
       dateReceived: z2.string().nullable().optional(),
       dateOfAppeal: z2.string().nullable().optional(),
       referenceNo: z2.string().nullable().optional(),
-      lmn: z2.string().nullable().optional()
+      lmn: z2.string().nullable().optional(),
+      // P4-P14: 0-based position of this line among source lines sharing
+      // its CPT code within the same save batch — see
+      // computeSourceLineIndices. Omitted entirely by any caller that
+      // doesn't have a notion of "repeated lines" (preserves exact prior
+      // matching behavior for those callers).
+      sourceLineIndex: z2.number().int().min(0).nullable().optional()
     })).mutation(async ({ input }) => {
-      await upsertClaimRecord({
-        patientId: input.patientId,
-        authPeriod: input.authPeriod,
-        placeOfService: input.placeOfService ?? null,
-        dateOfService: parseDate2(input.dateOfService),
-        visitNumber: input.visitNumber ?? null,
-        cptCodes: input.cptCodes ?? null,
-        unitsBilled: input.unitsBilled ?? null,
-        diagnosisCodes: input.diagnosisCodes ?? null,
-        modifier: input.modifier ?? null,
-        chargeAmount: input.chargeAmount ?? null,
-        insuranceReimbursement: input.insuranceReimbursement ?? null,
-        patientAmountPaid: input.patientAmountPaid ?? null,
-        patientAmountDue: input.patientAmountDue ?? null,
-        insuranceBilled: input.insuranceBilled ?? null,
-        oaClaimNumber: input.oaClaimNumber ?? null,
-        claimSubmittedDate: parseDate2(input.claimSubmittedDate),
-        expireBcbsClaimNumber: input.expireBcbsClaimNumber ?? null,
-        claimStatus: input.claimStatus ?? "submitted",
-        paymentReceived: input.paymentReceived ?? null,
-        checkDate: parseDate2(input.checkDate),
-        checkNumberVirtualCard: input.checkNumberVirtualCard ?? null,
-        dateReceived: parseDate2(input.dateReceived),
-        dateOfAppeal: parseDate2(input.dateOfAppeal),
-        referenceNo: input.referenceNo ?? null,
-        lmn: input.lmn ?? null
-      });
+      try {
+        await upsertClaimRecord({
+          patientId: input.patientId,
+          authPeriod: input.authPeriod,
+          placeOfService: input.placeOfService ?? null,
+          dateOfService: parseDate2(input.dateOfService),
+          visitNumber: input.visitNumber ?? null,
+          cptCodes: input.cptCodes ?? null,
+          sourceLineIndex: input.sourceLineIndex ?? null,
+          unitsBilled: input.unitsBilled ?? null,
+          diagnosisCodes: input.diagnosisCodes ?? null,
+          modifier: input.modifier ?? null,
+          chargeAmount: input.chargeAmount ?? null,
+          insuranceReimbursement: input.insuranceReimbursement ?? null,
+          patientAmountPaid: input.patientAmountPaid ?? null,
+          patientAmountDue: input.patientAmountDue ?? null,
+          insuranceBilled: input.insuranceBilled ?? null,
+          oaClaimNumber: input.oaClaimNumber ?? null,
+          claimSubmittedDate: parseDate2(input.claimSubmittedDate),
+          expireBcbsClaimNumber: input.expireBcbsClaimNumber ?? null,
+          claimStatus: input.claimStatus ?? "submitted",
+          paymentReceived: input.paymentReceived ?? null,
+          checkDate: parseDate2(input.checkDate),
+          checkNumberVirtualCard: input.checkNumberVirtualCard ?? null,
+          dateReceived: parseDate2(input.dateReceived),
+          dateOfAppeal: parseDate2(input.dateOfAppeal),
+          referenceNo: input.referenceNo ?? null,
+          lmn: input.lmn ?? null
+        });
+      } catch (err) {
+        if (err instanceof ClaimLineIdentityAmbiguousError) {
+          throw new TRPCError3({ code: "CONFLICT", message: err.message });
+        }
+        throw err;
+      }
       return { success: true };
     }),
     /**
@@ -4927,7 +5011,7 @@ var appRouter = router({
           oaClaimNumber: z2.string().nullable().optional(),
           claimSubmittedDate: z2.string().nullable().optional(),
           expireBcbsClaimNumber: z2.string().nullable().optional(),
-          claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted"]).optional(),
+          claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
           checkDate: z2.string().nullable().optional(),
           checkNumberVirtualCard: z2.string().nullable().optional(),
           dateReceived: z2.string().nullable().optional(),
@@ -5020,7 +5104,9 @@ var appRouter = router({
         let skippedNoReimbursementUploaded = 0;
         let skippedNeedsSelection = 0;
         let skippedUnconfirmedProvenance = 0;
+        let skippedAmbiguousLineIdentity = 0;
         const skippedCms1500Lines = [];
+        const skippedReimbursementLines = [];
         try {
           if (uploadType === "cms1500") {
             const hasAnyClaims = await patientHasAnyClaimRecords(matchedPatient.id);
@@ -5085,37 +5171,53 @@ var appRouter = router({
                 modifier: claim.modifier ?? null,
                 diagnosisCodes: claim.diagnosisCodes ?? null
               }];
-              for (const line of lines) {
-                await upsertClaimRecord({
-                  patientId: matchedPatient.id,
-                  authPeriod: maxPeriod,
-                  dateOfService: parseDate2(claim.dateOfService),
-                  cptCodes: line.cptCodes ?? null,
-                  claimStatus: claim.claimStatus ?? "submitted",
-                  oaClaimNumber: claim.oaClaimNumber ?? null,
-                  insuranceReimbursement: line.insuranceReimbursement ?? null,
-                  patientAmountPaid: line.patientAmountPaid ?? null,
-                  patientAmountDue: line.patientAmountDue ?? null,
-                  checkDate: parseDate2(claim.checkDate),
-                  checkNumberVirtualCard: claim.checkNumberVirtualCard ?? null,
-                  referenceNo: claim.referenceNo ?? null,
-                  insuranceBilled: claim.insuranceBilled ?? null,
-                  paymentReceived: line.insuranceReimbursement ?? null,
-                  placeOfService: null,
-                  visitNumber: null,
-                  claimSubmittedDate: null,
-                  expireBcbsClaimNumber: null,
-                  // Line-item billing detail (units/diagnosis/modifier/charge)
-                  // many EOBs also print alongside their payment columns.
-                  unitsBilled: line.unitsBilled ?? null,
-                  diagnosisCodes: line.diagnosisCodes ?? null,
-                  modifier: line.modifier ?? null,
-                  chargeAmount: line.chargeAmount ?? null,
-                  dateReceived: parseDate2(claim.dateReceived),
-                  dateOfAppeal: parseDate2(claim.dateOfAppeal),
-                  lmn: claim.lmn ?? null
-                });
-                claimsImported++;
+              const lineIndices = computeSourceLineIndices(lines);
+              for (let lIdx = 0; lIdx < lines.length; lIdx++) {
+                const line = lines[lIdx];
+                try {
+                  await upsertClaimRecord({
+                    patientId: matchedPatient.id,
+                    authPeriod: maxPeriod,
+                    dateOfService: parseDate2(claim.dateOfService),
+                    cptCodes: line.cptCodes ?? null,
+                    sourceLineIndex: lineIndices[lIdx],
+                    claimStatus: claim.claimStatus ?? "submitted",
+                    oaClaimNumber: claim.oaClaimNumber ?? null,
+                    insuranceReimbursement: line.insuranceReimbursement ?? null,
+                    patientAmountPaid: line.patientAmountPaid ?? null,
+                    patientAmountDue: line.patientAmountDue ?? null,
+                    checkDate: parseDate2(claim.checkDate),
+                    checkNumberVirtualCard: claim.checkNumberVirtualCard ?? null,
+                    referenceNo: claim.referenceNo ?? null,
+                    insuranceBilled: claim.insuranceBilled ?? null,
+                    paymentReceived: line.insuranceReimbursement ?? null,
+                    placeOfService: null,
+                    visitNumber: null,
+                    claimSubmittedDate: null,
+                    expireBcbsClaimNumber: null,
+                    // Line-item billing detail (units/diagnosis/modifier/charge)
+                    // many EOBs also print alongside their payment columns.
+                    unitsBilled: line.unitsBilled ?? null,
+                    diagnosisCodes: line.diagnosisCodes ?? null,
+                    modifier: line.modifier ?? null,
+                    chargeAmount: line.chargeAmount ?? null,
+                    dateReceived: parseDate2(claim.dateReceived),
+                    dateOfAppeal: parseDate2(claim.dateOfAppeal),
+                    lmn: claim.lmn ?? null
+                  });
+                  claimsImported++;
+                } catch (lineErr) {
+                  if (lineErr instanceof ClaimLineIdentityAmbiguousError) {
+                    skippedAmbiguousLineIdentity++;
+                    skippedReimbursementLines.push({
+                      dateOfService: claim.dateOfService ?? null,
+                      cptCodes: line.cptCodes ?? null,
+                      reason: "needs_review"
+                    });
+                    continue;
+                  }
+                  throw lineErr;
+                }
               }
             }
           }
@@ -5130,7 +5232,9 @@ var appRouter = router({
             ...skippedNoReimbursementUploaded > 0 ? { skippedNoReimbursementUploaded } : {},
             ...skippedNeedsSelection > 0 ? { skippedNeedsSelection } : {},
             ...skippedUnconfirmedProvenance > 0 ? { skippedUnconfirmedProvenance } : {},
-            ...skippedCms1500Lines.length > 0 ? { skippedCms1500Lines } : {}
+            ...skippedCms1500Lines.length > 0 ? { skippedCms1500Lines } : {},
+            ...skippedAmbiguousLineIdentity > 0 ? { skippedAmbiguousLineIdentity } : {},
+            ...skippedReimbursementLines.length > 0 ? { skippedReimbursementLines } : {}
           });
         } catch (err) {
           results.push({
