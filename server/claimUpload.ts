@@ -19,7 +19,7 @@ import { invokeLLM } from './_core/llm';
 import { ENV } from './_core/env';
 import { requireAuthenticatedUser } from './_core/requireAuth';
 import { tryTemplateExtraction, parseCMS1500, PatientBoundaryError, type ExtractedClaim, type PatientClaimGroup } from './insuranceTemplates';
-import { extractClaimsWithAI, detectInsuranceType, KNOWN_INSURER_NAMES, type ExtractionSource } from './aiClaimExtractor';
+import { extractClaimsWithAI, detectInsuranceType, KNOWN_INSURER_NAMES, reconcileClaimStatusWithPaymentEvidence, type ExtractionSource } from './aiClaimExtractor';
 
 // requireAuthenticatedUser (server/_core/requireAuth.ts) runs before multer
 // so an unauthenticated request never reaches file parsing, template
@@ -825,6 +825,7 @@ export function registerClaimUploadRoute(app: Express) {
         // document type, so this is the one place the boundary gate is load-bearing
         // rather than defense-in-depth.
         enforceFieldBoundary(claims, 'reimbursement');
+        claims.forEach(reconcileClaimStatusWithPaymentEvidence);
         console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${claims.length} claim(s) via legacy AI extraction`);
         res.json({ claims, extractedLength: extractedText.length, templateUsed: 'AI Extraction (Legacy)', uploadType: 'reimbursement' });
       } catch (err: any) {

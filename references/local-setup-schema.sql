@@ -130,7 +130,7 @@ CREATE TABLE IF NOT EXISTS public.claims_records (
   claim_submitted_date date,
   expire_bcbs_claim_number text,
   claim_status text NOT NULL DEFAULT 'submitted' CHECK (
-    claim_status IN ('submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted')
+    claim_status IN ('submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted', 'needs_review')
   ),
   payment_received numeric(10, 2),
   check_date date,
@@ -140,6 +140,10 @@ CREATE TABLE IF NOT EXISTS public.claims_records (
   reference_no text,
   lmn text,
   is_resolved boolean NOT NULL DEFAULT false,
+  -- P4-P14: 0-based position of a service line within its (date_of_service,
+  -- cpt_codes) group as encountered in the source document. NULL = legacy
+  -- row. See 20261017000000_claims_source_line_index_and_needs_review.sql.
+  source_line_index integer,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -147,6 +151,7 @@ CREATE TABLE IF NOT EXISTS public.claims_records (
 CREATE INDEX IF NOT EXISTS idx_claims_patient_period ON public.claims_records(patient_id, auth_period);
 CREATE INDEX IF NOT EXISTS idx_claims_status ON public.claims_records(claim_status);
 CREATE INDEX IF NOT EXISTS idx_claims_is_resolved ON public.claims_records(is_resolved);
+CREATE INDEX IF NOT EXISTS idx_claims_line_identity ON public.claims_records (patient_id, auth_period, date_of_service, cpt_codes, source_line_index);
 
 -- ─── audit_logs (immutable trail of patient field changes) ────────────────
 CREATE TABLE IF NOT EXISTS public.audit_logs (

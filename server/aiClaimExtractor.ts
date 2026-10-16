@@ -112,6 +112,56 @@ function sanitizeVisitNumber(claim: ExtractedClaim): void {
 }
 
 /**
+ * P4-P14: reported bug — an Anthem/BCBS row showed "Denied" despite a
+ * present, non-zero insurance reimbursement amount. The model's claimStatus
+ * guess (see the claimStatus prompt instruction above) can be wrong in ways
+ * no prompt wording fully prevents — document-wide denial language bleeding
+ * onto an individual line being the most common. This function is a
+ * deterministic, line-local safety net applied AFTER extraction: it never
+ * looks at any other line or the document as a whole, only at this one
+ * claim's own already-extracted numeric fields, so it can never propagate
+ * one line's denial (or lack of one) onto another.
+ *
+ * - "denied" contradicted by a positive reimbursement: a payer cannot both
+ *   deny a line and pay it — the payment is the stronger, harder-to-fake
+ *   signal, so the status is corrected to "approved" rather than trusting
+ *   the model's text-based "denied" guess.
+ * - "approved" contradicted by a confirmed $0 reimbursement: equally not
+ *   safe to trust blindly (the inverse bug — rubber-stamping every line
+ *   "Approved" regardless of evidence) and equally not safe to flip straight
+ *   to "denied" (a $0 payment alone is never sufficient proof of denial —
+ *   it's also what a still-processing or fully-adjusted line looks like).
+ *   Routed to "needs_review" instead of guessing either way.
+ * Every other combination (including "submitted" with no payment yet, or
+ * "denied" with a confirmed $0 payment — consistent, not corrected) is left
+ * exactly as extracted.
+ */
+export function reconcileClaimStatusWithPaymentEvidence(claim: ExtractedClaim): void {
+  if (claim.insuranceReimbursement == null) return; // unknown amount — nothing to check against
+
+  if (claim.claimStatus === "denied" && claim.insuranceReimbursement > 0) {
+    claim.notes = [
+      claim.notes,
+      `⚠️ claimStatus corrected from "denied" to "approved" — this line has an insurance reimbursement of $${claim.insuranceReimbursement.toFixed(2)}, which a denied line cannot have.`,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    claim.claimStatus = "approved";
+    return;
+  }
+
+  if (claim.claimStatus === "approved" && claim.insuranceReimbursement === 0) {
+    claim.notes = [
+      claim.notes,
+      `⚠️ claimStatus flagged "needs_review" — extracted as "approved" but insurance reimbursement is $0, which needs staff confirmation before relying on either status.`,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    claim.claimStatus = "needs_review";
+  }
+}
+
+/**
  * Checks whether a claim's CPT code and dollar amounts actually appear as
  * substrings in the exact source text the model was given. Returns a list of
  * human-readable warnings (empty if everything checks out) — see the call
@@ -258,7 +308,7 @@ For each claim/service line, extract EVERY one of these fields when it appears a
 - oaClaimNumber: claim number/ID/ICN/reference number for this claim — copy it character-for-character exactly as printed; never reformat, abbreviate, or invent one
 - checkDate: check/payment/EFT date in MM/DD/YYYY format
 - checkNumberVirtualCard: check number, EFT trace number, or virtual card number
-- claimStatus: one of "approved", "denied", or "submitted" (infer from context — e.g. a $0 paid line with a denial code is "denied"; a line with a payment amount is "approved")
+- claimStatus: one of "approved", "denied", or "submitted" — determine this INDEPENDENTLY for EACH service line using ONLY that specific line's own evidence (its own denial reason/remark code, or its own $0 payment paired with an explicit denial code/phrase). NEVER mark a line "denied" solely because the DOCUMENT contains the word "denied" somewhere else, or because a DIFFERENT line on the same claim was denied — a document or claim can have some lines paid and others denied, and each line's status must reflect only itself. NEVER infer "denied" purely from a $0 payment, a remaining patient balance, or an adjustment/reduction code by themselves — those also occur on lines that are simply still processing, fully adjusted to a contractual rate, or awaiting a coordination-of-benefits step; use "submitted" instead when a line has no payment and no explicit denial evidence of its own. A line with any positive insuranceReimbursement amount must never be "denied".
 - insuranceBilled: the NUMERIC billing/group/payer identifier for this claim — e.g. "Group #", "Group Number", "Group No", "Group ID", "Billing ID", "Billing Number", "Payer ID", "Payer Number", or a slash-separated identifier like "16404/137040261". This is NEVER the insurance company/payer name (do not write "Aetna", "Meritain Health", "BCBS", "Cigna", etc. here — that is a completely different field, not this one). If no such numeric identifier is visible anywhere in this claim's block, use null — do not substitute the payer name as a fallback.
 - visitNumber: Always return null for EOB documents. Visit number comes only from CMS-1500 forms.
 
@@ -515,6 +565,7 @@ IMPORTANT:
     for (const claim of normalizedClaims) {
       sanitizeInsuranceBilled(claim);
       sanitizeVisitNumber(claim);
+      reconcileClaimStatusWithPaymentEvidence(claim);
     }
 
     // Cheap, deterministic anti-hallucination check — only possible when we
