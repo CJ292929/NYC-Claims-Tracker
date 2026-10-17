@@ -75,7 +75,10 @@ export function PatientSnapshotPane({
 
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <RecordAttributionLine entityType="patient" entityId={patient.id} />
-        <RecordHistoryButton entityType="patient" entityId={patient.id} />
+        <div className="flex items-center gap-2">
+          <RecordHistoryButton entityType="patient" entityId={patient.id} />
+          <RecordHistoryButton entityType="visit_record" entityId={patient.id} label="Authorization History" />
+        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-3">

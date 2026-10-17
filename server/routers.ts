@@ -645,7 +645,7 @@ export const appRouter = router({
           // Re-adding a deliberately-deleted name: reactivate the same row
           // instead of inserting a duplicate (normalized_name stays unique
           // across active+inactive rows — see the P4-P13 migration).
-          return await reactivateInsurerCatalogEntry(existing.id, getActorContext(ctx.user).actorId);
+          return await reactivateInsurerCatalogEntry(existing.id, getActorContext(ctx.user));
         }
 
         try {
@@ -672,7 +672,7 @@ export const appRouter = router({
         if (!existing) {
           throw new TRPCError({ code: "NOT_FOUND", message: "Insurance company not found" });
         }
-        return await deactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user).actorId);
+        return await deactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user));
       }),
 
     // Deliberate reactivation (P4-P13) from the Manage Insurance Companies
@@ -686,7 +686,16 @@ export const appRouter = router({
         if (!existing) {
           throw new TRPCError({ code: "NOT_FOUND", message: "Insurance company not found" });
         }
-        return await reactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user).actorId);
+        return await reactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user));
+      }),
+
+    // Same gate as create/delete/reactivate — insurer catalog management is
+    // admin/owner only, so its history is too (unlike patient/visit/claim
+    // history, which any authenticated staff member can read).
+    history: adminOrOwnerProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .query(async ({ input }) => {
+        return listHistoryForEntity("insurer_catalog", input.id);
       }),
   }),
 
@@ -722,6 +731,8 @@ export const appRouter = router({
         }, getActorContext(ctx.user));
         return { success: true };
       }),
+
+
 
     bulkCreate: normalProtectedProcedure
       .input(
@@ -791,7 +802,7 @@ export const appRouter = router({
         await updateVisitRecord(visitId, {
           authStatus: "pending",
           dateAshSubmitted: todayMidnight,
-        }, actor);
+        }, actor, { action: "AUTHORIZATION_MARKED_REQUESTED", patientId: input.patientId });
         return { success: true, visitId, date: todayMidnight.toISOString().split("T")[0] };
       }),
 

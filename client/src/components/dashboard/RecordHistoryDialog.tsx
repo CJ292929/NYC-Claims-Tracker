@@ -12,7 +12,7 @@ import {
 import { History, Loader2 } from "lucide-react";
 import { formatTimestamp } from "@/lib/date";
 
-export type HistoryEntityType = "patient" | "visit_record" | "claim_record" | "clinic_user";
+export type HistoryEntityType = "patient" | "visit_record" | "claim_record" | "clinic_user" | "insurer_catalog";
 
 type AuditLogRow = {
   id: string;
@@ -42,12 +42,14 @@ function useHistoryQuery(entityType: HistoryEntityType, entityId: string, enable
   const visitHistory = trpc.visits.historyForPatient.useQuery({ patientId: entityId }, { enabled: enabled && entityType === "visit_record" });
   const claimHistory = trpc.claims.historyForClaim.useQuery({ id: entityId }, { enabled: enabled && entityType === "claim_record" });
   const staffHistory = trpc.staff.history.useQuery({ id: entityId }, { enabled: enabled && entityType === "clinic_user" });
+  const insurerHistory = trpc.insurance.history.useQuery({ id: entityId }, { enabled: enabled && entityType === "insurer_catalog" });
 
   switch (entityType) {
     case "patient": return patientHistory;
     case "visit_record": return visitHistory;
     case "claim_record": return claimHistory;
     case "clinic_user": return staffHistory;
+    case "insurer_catalog": return insurerHistory;
   }
 }
 
