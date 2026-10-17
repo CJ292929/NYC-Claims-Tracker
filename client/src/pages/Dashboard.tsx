@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical, Settings } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical, Settings, History } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
@@ -29,6 +29,7 @@ import { AuthAlertPanel } from '@/components/dashboard/AuthAlertPanel';
 import { AuthorizationOverview } from '@/components/dashboard/AuthorizationOverview';
 import { AuthorizationRecordsWorkspace } from '@/components/dashboard/AuthorizationRecordsWorkspace';
 import { ClaimsFollowUpPanel } from '@/components/dashboard/ClaimsFollowUpPanel';
+import { RecordHistoryDialog } from '@/components/dashboard/RecordHistoryDialog';
 import { PatientOverview } from '@/components/dashboard/PatientOverview';
 import { PatientRecordsWorkspace } from '@/components/dashboard/PatientRecordsWorkspace';
 import { DischargedPatientsWorkspace } from '@/components/dashboard/DischargedPatientsWorkspace';
@@ -367,6 +368,7 @@ export default function Dashboard() {
   const [newInsuranceName, setNewInsuranceName] = useState('');
   const [showManageInsurance, setShowManageInsurance] = useState(false);
   const [insurerPendingDelete, setInsurerPendingDelete] = useState<{ id: string; name: string } | null>(null);
+  const [historyInsurerId, setHistoryInsurerId] = useState<string | null>(null);
   const [selectedInsurance, setSelectedInsurance] = useState<string>('Aetna');
   const [newPatientName, setNewPatientName] = useState('');
   const [newPatientInsurance, setNewPatientInsurance] = useState('Aetna');
@@ -385,6 +387,8 @@ export default function Dashboard() {
   const [deleteClaimTarget, setDeleteClaimTarget] = useState<{
     id: string; patientId: string; dateOfService: string | null; cptCodes: string | null;
   } | null>(null);
+  /** View History dialog for a single claim row (claims table "actions" menu) */
+  const [historyClaimId, setHistoryClaimId] = useState<string | null>(null);
   // Patient selected within the Patient Records workspace's own snapshot
   // pane — deliberately separate from selectedPatientId (which still backs
   // the Dashboard KPI/Analytics fallback and the Visits/Claims detail
@@ -2285,6 +2289,13 @@ export default function Dashboard() {
         </AlertDialogContent>
       </AlertDialog>
 
+      <RecordHistoryDialog
+        open={historyClaimId !== null}
+        onOpenChange={(open) => { if (!open) setHistoryClaimId(null); }}
+        entityType="claim_record"
+        entityId={historyClaimId ?? ''}
+      />
+
       <AlertDialog open={deleteClaimTarget !== null} onOpenChange={(open) => { if (!open) setDeleteClaimTarget(null); }}>
         <AlertDialogContent className="bg-white">
           <AlertDialogHeader>
@@ -3207,9 +3218,11 @@ export default function Dashboard() {
                             { key: 'dateOfAppeal', label: 'Appeal Date', align: 'left' },
                             { key: 'referenceNo', label: 'Appeal Ref #', align: 'left' },
                             // Not a data field — never hideable, never part of CSV export or
-                            // totals math. Only rendered when canManageStaff (admin/owner),
-                            // mirroring the server's adminOrOwnerProcedure gate on claims.delete.
-                            ...(canManageStaff ? [{ key: 'actions', label: '', align: 'center' as const }] : []),
+                            // totals math. Always rendered (View History is available to any
+                            // authenticated staff member, matching claims.historyForClaim's
+                            // normalProtectedProcedure gate); Delete Claim inside it stays
+                            // canManageStaff-only, mirroring claims.delete's adminOrOwnerProcedure.
+                            { key: 'actions', label: '', align: 'center' as const },
                           ];
                           const visibleClaimsColumns = claimsTableColumns.filter(c => c.key === 'actions' || !hide(c.key));
 
@@ -3365,18 +3378,22 @@ export default function Dashboard() {
                                         </button>
                                       )
                                     )}
-                                    {canManageStaff && (
-                                      <DropdownMenu>
-                                        <DropdownMenuTrigger asChild>
-                                          <button
-                                            type="button"
-                                            aria-label="Claim row actions"
-                                            className="p-1.5 rounded hover:bg-gray-200 text-gray-500 shrink-0"
-                                          >
-                                            <MoreVertical className="w-4 h-4" />
-                                          </button>
-                                        </DropdownMenuTrigger>
-                                        <DropdownMenuContent align="end">
+                                    <DropdownMenu>
+                                      <DropdownMenuTrigger asChild>
+                                        <button
+                                          type="button"
+                                          aria-label="Claim row actions"
+                                          className="p-1.5 rounded hover:bg-gray-200 text-gray-500 shrink-0"
+                                        >
+                                          <MoreVertical className="w-4 h-4" />
+                                        </button>
+                                      </DropdownMenuTrigger>
+                                      <DropdownMenuContent align="end">
+                                        <DropdownMenuItem onClick={() => setHistoryClaimId(claim.id)}>
+                                          <History className="w-4 h-4" />
+                                          View History
+                                        </DropdownMenuItem>
+                                        {canManageStaff && (
                                           <DropdownMenuItem
                                             variant="destructive"
                                             onClick={() => setDeleteClaimTarget({
@@ -3389,9 +3406,9 @@ export default function Dashboard() {
                                             <Trash2 className="w-4 h-4" />
                                             Delete Claim
                                           </DropdownMenuItem>
-                                        </DropdownMenuContent>
-                                      </DropdownMenu>
-                                    )}
+                                        )}
+                                      </DropdownMenuContent>
+                                    </DropdownMenu>
                                   </div>
 
                                   {/* Billing */}
@@ -3634,19 +3651,23 @@ export default function Dashboard() {
                                         {!hide('checkNumberVirtualCard') && <EditableText field="checkNumberVirtualCard" value={claim.check_number_virtual_card} />}
                                         {!hide('dateOfAppeal') && <EditableDate field="dateOfAppeal" value={claim.date_of_appeal} />}
                                         {!hide('referenceNo') && <EditableText field="referenceNo" value={claim.reference_no} />}
-                                        {canManageStaff && (
-                                          <td className="border border-gray-200 px-1 py-1 text-center sticky right-0 bg-white hover:bg-brand-cream/50 z-10">
-                                            <DropdownMenu>
-                                              <DropdownMenuTrigger asChild>
-                                                <button
-                                                  type="button"
-                                                  aria-label="Claim row actions"
-                                                  className="p-1 rounded hover:bg-gray-200 text-gray-500"
-                                                >
-                                                  <MoreVertical className="w-4 h-4" />
-                                                </button>
-                                              </DropdownMenuTrigger>
-                                              <DropdownMenuContent align="end">
+                                        <td className="border border-gray-200 px-1 py-1 text-center sticky right-0 bg-white hover:bg-brand-cream/50 z-10">
+                                          <DropdownMenu>
+                                            <DropdownMenuTrigger asChild>
+                                              <button
+                                                type="button"
+                                                aria-label="Claim row actions"
+                                                className="p-1 rounded hover:bg-gray-200 text-gray-500"
+                                              >
+                                                <MoreVertical className="w-4 h-4" />
+                                              </button>
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent align="end">
+                                              <DropdownMenuItem onClick={() => setHistoryClaimId(claim.id)}>
+                                                <History className="w-4 h-4" />
+                                                View History
+                                              </DropdownMenuItem>
+                                              {canManageStaff && (
                                                 <DropdownMenuItem
                                                   variant="destructive"
                                                   onClick={() => setDeleteClaimTarget({
@@ -3659,10 +3680,10 @@ export default function Dashboard() {
                                                   <Trash2 className="w-4 h-4" />
                                                   Delete Claim
                                                 </DropdownMenuItem>
-                                              </DropdownMenuContent>
-                                            </DropdownMenu>
-                                          </td>
-                                        )}
+                                              )}
+                                            </DropdownMenuContent>
+                                          </DropdownMenu>
+                                        </td>
                                       </tr>
                                     );
                                     return isLastOfDateGroup
@@ -4647,32 +4668,49 @@ export default function Dashboard() {
                   <p className="text-xs text-muted-foreground">Removed — hidden from new selections</p>
                 )}
               </div>
-              {entry.isActive ? (
+              <div className="flex items-center gap-1.5 shrink-0">
                 <Button
                   size="sm"
                   variant="outline"
-                  className="shrink-0 gap-1.5 text-destructive hover:text-destructive"
-                  onClick={() => setInsurerPendingDelete({ id: entry.id, name: entry.name })}
+                  className="gap-1.5"
+                  onClick={() => setHistoryInsurerId(entry.id)}
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Delete
+                  <History className="w-3.5 h-3.5" />
+                  History
                 </Button>
-              ) : (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="shrink-0 gap-1.5"
-                  disabled={reactivateInsurer.isPending}
-                  onClick={() => reactivateInsurer.mutate({ id: entry.id })}
-                >
-                  {reactivateInsurer.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                  Reactivate
-                </Button>
-              )}
+                {entry.isActive ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1.5 text-destructive hover:text-destructive"
+                    onClick={() => setInsurerPendingDelete({ id: entry.id, name: entry.name })}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1.5"
+                    disabled={reactivateInsurer.isPending}
+                    onClick={() => reactivateInsurer.mutate({ id: entry.id })}
+                  >
+                    {reactivateInsurer.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                    Reactivate
+                  </Button>
+                )}
+              </div>
             </div>
           ))}
         </div>
       </DialogContent>
+      <RecordHistoryDialog
+        open={historyInsurerId !== null}
+        onOpenChange={(open) => { if (!open) setHistoryInsurerId(null); }}
+        entityType="insurer_catalog"
+        entityId={historyInsurerId ?? ''}
+      />
     </Dialog>
   );
 
