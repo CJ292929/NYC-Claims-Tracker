@@ -466,9 +466,8 @@ async function getVisitsByPatientId(patientId) {
   }
   return (data ?? []).map(toVisitRecord);
 }
-async function createVisitRecord(data, actor) {
-  const { data: row, error } = await supabase.from("visit_records").insert({
-    patient_id: data.patientId,
+async function createVisitRecord(data, actor, action = "VISIT_RECORD_CREATE") {
+  const payload = {
     sessions_authorized: data.sessionsAuthorized ?? null,
     sessions_remaining: data.sessionsRemaining ?? null,
     session_number: data.sessionNumber ?? null,
@@ -479,37 +478,51 @@ async function createVisitRecord(data, actor) {
     auth_status: data.authStatus ?? "none",
     total_insurance_reimbursement: data.totalInsuranceReimbursement ?? null,
     total_patient_due: data.totalPatientDue ?? null,
-    total_patient_paid: data.totalPatientPaid ?? null,
-    ...actor ? { created_by: actor.actorId, created_by_type: actor.actorType, updated_by: actor.actorId, updated_by_type: actor.actorType } : {}
-  }).select("id").single();
+    total_patient_paid: data.totalPatientPaid ?? null
+  };
+  const { data: id, error } = await supabase.rpc("write_visit_record_with_audit", {
+    p_id: null,
+    p_patient_id: data.patientId,
+    p_data: payload,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_action: action
+  });
   if (error) {
     console.error("[Supabase] createVisitRecord:", error);
     throw error;
   }
-  return row.id;
+  return id;
 }
-async function updateVisitRecord(id, data, actor) {
-  const update = {};
-  if (actor) {
-    update.updated_by = actor.actorId;
-    update.updated_by_type = actor.actorType;
-  }
-  if (data.sessionsAuthorized !== void 0) update.sessions_authorized = data.sessionsAuthorized;
-  if (data.sessionsRemaining !== void 0) update.sessions_remaining = data.sessionsRemaining;
-  if (data.sessionNumber !== void 0) update.session_number = data.sessionNumber;
-  if (data.authPeriod !== void 0) update.auth_period = data.authPeriod;
+async function updateVisitRecord(id, data, actor, options) {
+  const action = options?.action ?? "VISIT_RECORD_UPDATE";
+  const payload = {};
+  if (data.sessionsAuthorized !== void 0) payload.sessions_authorized = data.sessionsAuthorized;
+  if (data.sessionsRemaining !== void 0) payload.sessions_remaining = data.sessionsRemaining;
+  if (data.sessionNumber !== void 0) payload.session_number = data.sessionNumber;
+  if (data.authPeriod !== void 0) payload.auth_period = data.authPeriod;
   if (data.dateOfService !== void 0) {
-    update.date_of_service = data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null;
+    payload.date_of_service = data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null;
   }
-  if (data.newAuth !== void 0) update.new_auth = data.newAuth;
+  if (data.newAuth !== void 0) payload.new_auth = data.newAuth;
   if (data.dateAshSubmitted !== void 0) {
-    update.date_ash_submitted = data.dateAshSubmitted ? data.dateAshSubmitted.toISOString().split("T")[0] : null;
+    payload.date_ash_submitted = data.dateAshSubmitted ? data.dateAshSubmitted.toISOString().split("T")[0] : null;
   }
-  if (data.authStatus !== void 0) update.auth_status = data.authStatus;
-  if (data.totalInsuranceReimbursement !== void 0) update.total_insurance_reimbursement = data.totalInsuranceReimbursement;
-  if (data.totalPatientDue !== void 0) update.total_patient_due = data.totalPatientDue;
-  if (data.totalPatientPaid !== void 0) update.total_patient_paid = data.totalPatientPaid;
-  const { error } = await supabase.from("visit_records").update(update).eq("id", id);
+  if (data.authStatus !== void 0) payload.auth_status = data.authStatus;
+  if (data.totalInsuranceReimbursement !== void 0) payload.total_insurance_reimbursement = data.totalInsuranceReimbursement;
+  if (data.totalPatientDue !== void 0) payload.total_patient_due = data.totalPatientDue;
+  if (data.totalPatientPaid !== void 0) payload.total_patient_paid = data.totalPatientPaid;
+  if (Object.keys(payload).length === 0) return;
+  const { error } = await supabase.rpc("write_visit_record_with_audit", {
+    p_id: id,
+    p_patient_id: options?.patientId ?? null,
+    p_data: payload,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_action: action
+  });
   if (error) {
     console.error("[Supabase] updateVisitRecord:", error);
     throw error;
@@ -644,76 +657,23 @@ async function approveAndCreateNewBatch(patientId, sessionsAuthorized, authDate,
   const statusPeriods = Array.from(new Set(statusRows.map((r) => r.auth_period ?? 1))).sort((a, b) => a - b);
   const latestStatusPeriod = statusPeriods.length > 0 ? statusPeriods[statusPeriods.length - 1] : 1;
   const targetApprovalPeriod = determineActiveAuthPeriod(statusRows) ?? latestStatusPeriod;
-  const { error: approveErr } = await supabase.from("visit_records").update({ auth_status: "approved", updated_by: actor.actorId, updated_by_type: actor.actorType }).eq("patient_id", patientId).eq("auth_period", targetApprovalPeriod);
-  if (approveErr) {
-    console.error("[Supabase] approveAndCreateNewBatch approve:", approveErr);
-    throw approveErr;
-  }
-  const patientUpdates = {};
-  if (authDate) patientUpdates.auth_date = authDate.toISOString().split("T")[0];
-  if (newInsurance && newInsurance.trim()) patientUpdates.insurance = newInsurance.trim();
-  if (authValidUntil !== void 0) patientUpdates.auth_valid_until = authValidUntil ?? null;
-  if (Object.keys(patientUpdates).length > 0) {
-    patientUpdates.updated_by = actor.actorId;
-    patientUpdates.updated_by_type = actor.actorType;
-    const { error: patErr } = await supabase.from("patients").update(patientUpdates).eq("id", patientId);
-    if (patErr) {
-      console.error("[Supabase] approveAndCreateNewBatch update patient:", patErr);
-      throw patErr;
-    }
-  }
-  const { data: periodRows, error: periodErr } = await supabase.from("visit_records").select("auth_period").eq("patient_id", patientId);
-  if (periodErr) {
-    console.error("[Supabase] approveAndCreateNewBatch periods:", periodErr);
-    throw periodErr;
-  }
-  const maxPeriod = periodRows && periodRows.length > 0 ? Math.max(...periodRows.map((r) => r.auth_period ?? 1)) : 1;
-  const nextPeriod = maxPeriod + 1;
-  let batchInsurance = newInsurance?.trim() || null;
-  if (!batchInsurance) {
-    const { data: patRow } = await supabase.from("patients").select("insurance").eq("id", patientId).single();
-    batchInsurance = patRow?.insurance ?? null;
-  }
-  const newRows = Array.from({ length: sessionsAuthorized }, (_, i) => ({
-    patient_id: patientId,
-    sessions_authorized: sessionsAuthorized,
-    sessions_remaining: sessionsAuthorized - i,
-    session_number: i + 1,
-    auth_period: nextPeriod,
-    date_of_service: null,
-    new_auth: null,
-    date_ash_submitted: null,
-    auth_status: "none",
-    insurance_company: batchInsurance
-  }));
-  const stampedRows = newRows.map((r) => ({
-    ...r,
-    created_by: actor.actorId,
-    created_by_type: actor.actorType,
-    updated_by: actor.actorId,
-    updated_by_type: actor.actorType
-  }));
-  const { data: inserted, error: insertErr } = await supabase.from("visit_records").insert(stampedRows).select("id");
-  if (insertErr) {
-    console.error("[Supabase] approveAndCreateNewBatch insert:", insertErr);
-    throw insertErr;
-  }
-  const newVisitIds = (inserted ?? []).map((r) => r.id);
-  const { error: auditErr } = await supabase.from("audit_logs").insert({
-    entity_type: "visit_record",
-    entity_id: patientId,
-    patient_id: patientId,
-    actor_id: actor.actorId,
-    actor_type: actor.actorType,
-    actor_display: actor.actorDisplay,
-    action: "AUTHORIZATION_APPROVED",
-    before_data: { auth_period: targetApprovalPeriod },
-    after_data: { new_auth_period: nextPeriod, sessions_authorized: sessionsAuthorized }
+  const { data: newVisitIds, error } = await supabase.rpc("approve_authorization_with_audit", {
+    p_patient_id: patientId,
+    p_target_period: targetApprovalPeriod,
+    p_sessions_authorized: sessionsAuthorized,
+    p_auth_date: authDate ? authDate.toISOString().split("T")[0] : null,
+    p_new_insurance: newInsurance ?? null,
+    p_auth_valid_until_provided: authValidUntil !== void 0,
+    p_auth_valid_until: authValidUntil ?? null,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay
   });
-  if (auditErr) {
-    console.error("[Supabase] approveAndCreateNewBatch audit insert failed (approval already applied):", auditErr);
+  if (error) {
+    console.error("[Supabase] approveAndCreateNewBatch:", error);
+    throw error;
   }
-  return { newVisitIds };
+  return { newVisitIds: newVisitIds ?? [] };
 }
 async function getCompletedPatients() {
   const { data: allPatients, error: pErr } = await supabase.from("patients").select("id").order("name", { ascending: true });
@@ -1199,12 +1159,23 @@ async function getInsurerCatalogEntryByNormalizedName(normalizedName) {
   return data ? toInsurerCatalogEntry(data) : void 0;
 }
 async function createInsurerCatalogEntry(params, actor) {
-  const { data, error } = await supabase.from("insurer_catalog").insert({ name: params.name, created_by: actor.actorId, created_by_type: actor.actorType }).select().single();
+  const { data: id, error } = await supabase.rpc("write_insurer_catalog_with_audit", {
+    p_id: null,
+    p_data: { name: params.name },
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_action: "INSURER_CREATE"
+  });
   if (error) {
     console.error("[Supabase] createInsurerCatalogEntry:", error);
     throw error;
   }
-  return toInsurerCatalogEntry(data);
+  const created = await getInsurerCatalogEntryById(id);
+  if (!created) {
+    throw new Error(`createInsurerCatalogEntry: row ${id} not found after insert`);
+  }
+  return created;
 }
 async function getInsurerCatalogEntryById(id) {
   const { data, error } = await supabase.from("insurer_catalog").select("*").eq("id", id).maybeSingle();
@@ -1214,21 +1185,43 @@ async function getInsurerCatalogEntryById(id) {
   }
   return data ? toInsurerCatalogEntry(data) : void 0;
 }
-async function deactivateInsurerCatalogEntry(id, actorId) {
-  const { data, error } = await supabase.from("insurer_catalog").update({ is_active: false, deactivated_at: (/* @__PURE__ */ new Date()).toISOString(), deactivated_by: actorId }).eq("id", id).select().single();
+async function deactivateInsurerCatalogEntry(id, actor) {
+  const { error } = await supabase.rpc("write_insurer_catalog_with_audit", {
+    p_id: id,
+    p_data: { is_active: false, deactivated_at: (/* @__PURE__ */ new Date()).toISOString(), deactivated_by: actor.actorId },
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_action: "INSURER_DEACTIVATE"
+  });
   if (error) {
     console.error("[Supabase] deactivateInsurerCatalogEntry:", error);
     throw error;
   }
-  return toInsurerCatalogEntry(data);
+  const updated = await getInsurerCatalogEntryById(id);
+  if (!updated) {
+    throw new Error(`deactivateInsurerCatalogEntry: row ${id} not found after update`);
+  }
+  return updated;
 }
-async function reactivateInsurerCatalogEntry(id, actorId) {
-  const { data, error } = await supabase.from("insurer_catalog").update({ is_active: true, reactivated_at: (/* @__PURE__ */ new Date()).toISOString(), reactivated_by: actorId }).eq("id", id).select().single();
+async function reactivateInsurerCatalogEntry(id, actor) {
+  const { error } = await supabase.rpc("write_insurer_catalog_with_audit", {
+    p_id: id,
+    p_data: { is_active: true, reactivated_at: (/* @__PURE__ */ new Date()).toISOString(), reactivated_by: actor.actorId },
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_action: "INSURER_REACTIVATE"
+  });
   if (error) {
     console.error("[Supabase] reactivateInsurerCatalogEntry:", error);
     throw error;
   }
-  return toInsurerCatalogEntry(data);
+  const updated = await getInsurerCatalogEntryById(id);
+  if (!updated) {
+    throw new Error(`reactivateInsurerCatalogEntry: row ${id} not found after update`);
+  }
+  return updated;
 }
 var LastActiveAccountManagerError, ClinicUserConflictError, FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, dateOnly, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, REIMBURSEMENT_EVIDENCE_COLUMNS, ClaimLineIdentityAmbiguousError;
 var init_db = __esm({
@@ -4740,7 +4733,7 @@ var appRouter = router({
         if (existing.isActive) {
           throw new TRPCError3({ code: "CONFLICT", message: "This insurance company already exists" });
         }
-        return await reactivateInsurerCatalogEntry(existing.id, getActorContext(ctx.user).actorId);
+        return await reactivateInsurerCatalogEntry(existing.id, getActorContext(ctx.user));
       }
       try {
         return await createInsurerCatalogEntry({ name: input.name }, getActorContext(ctx.user));
@@ -4760,7 +4753,7 @@ var appRouter = router({
       if (!existing) {
         throw new TRPCError3({ code: "NOT_FOUND", message: "Insurance company not found" });
       }
-      return await deactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user).actorId);
+      return await deactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user));
     }),
     // Deliberate reactivation (P4-P13) from the Manage Insurance Companies
     // dialog — distinct from insurance.create's own reactivate-on-conflict
@@ -4771,7 +4764,13 @@ var appRouter = router({
       if (!existing) {
         throw new TRPCError3({ code: "NOT_FOUND", message: "Insurance company not found" });
       }
-      return await reactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user).actorId);
+      return await reactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user));
+    }),
+    // Same gate as create/delete/reactivate — insurer catalog management is
+    // admin/owner only, so its history is too (unlike patient/visit/claim
+    // history, which any authenticated staff member can read).
+    history: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
+      return listHistoryForEntity("insurer_catalog", input.id);
     })
   }),
   // ── Visit Records ────────────────────────────────────────────────────────────
@@ -4859,7 +4858,7 @@ var appRouter = router({
       await updateVisitRecord(visitId, {
         authStatus: "pending",
         dateAshSubmitted: todayMidnight
-      }, actor);
+      }, actor, { action: "AUTHORIZATION_MARKED_REQUESTED", patientId: input.patientId });
       return { success: true, visitId, date: todayMidnight.toISOString().split("T")[0] };
     }),
     historyForPatient: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).query(async ({ input }) => {

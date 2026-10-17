@@ -36,8 +36,8 @@ jobs:
       - name: Typecheck
         run: pnpm check
 
-      - name: Test (local-safe, excludes Supabase integration test)
-        run: npx vitest run --exclude "**/claims.integration.test.ts"
+      - name: Test (local-safe, excludes Postgres/Supabase integration tests)
+        run: npx vitest run --exclude "**/*.integration.test.ts"
 
       - name: Build
         run: pnpm build
