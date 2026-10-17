@@ -75,7 +75,8 @@ describe("patients.update — claimsStatus contract", () => {
 
     expect(dbMock.updatePatient).toHaveBeenCalledWith(
       BASE_PATIENT.id,
-      expect.objectContaining({ name: "Jonathan Smith", claimsStatus: null })
+      expect.objectContaining({ name: "Jonathan Smith", claimsStatus: null }),
+      expect.anything()
     );
   });
 
@@ -99,7 +100,8 @@ describe("patients.update — claimsStatus contract", () => {
 
     expect(dbMock.updatePatient).toHaveBeenCalledWith(
       BASE_PATIENT.id,
-      expect.objectContaining({ claimsStatus: "denied" })
+      expect.objectContaining({ claimsStatus: "denied" }),
+      expect.anything()
     );
   });
 

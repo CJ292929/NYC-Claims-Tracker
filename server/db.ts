@@ -11,6 +11,7 @@ import { normalizeUsername, escapeLikePattern } from "./_core/username";
 import type { User, Patient, VisitRecord, ClinicUser, InsertVisitRecord, InsurerCatalogEntry } from "../drizzle/schema";
 import { determineActivePeriod, deriveAuthPeriodMetrics, getPeriodMetrics } from "@shared/authPeriodMetrics";
 import { deriveAuthorizationUrgency } from "@shared/authUrgency";
+import type { ActorContext } from "./actorIdentity";
 
 // ─── Row adapters (Supabase snake_case → app camelCase) ───────────────────────
 
@@ -179,51 +180,75 @@ export async function getPatientById(id: string): Promise<Patient | undefined> {
   return data ? toPatient(data) : undefined;
 }
 
-export async function createPatient(data: {
-  name: string;
-  insurance?: string;
-  authDate?: Date | null;
-  authValidUntil?: number | null;
-}): Promise<string> {
-  const { data: row, error } = await supabase
-    .from("patients")
-    .insert({
-      name: data.name,
-      insurance: data.insurance ?? "",
-      auth_date: data.authDate ? data.authDate.toISOString().split("T")[0] : null,
-      auth_valid_until: data.authValidUntil ?? null,
-    })
-    .select("id")
-    .single();
+/** Atomically inserts the patient row and its PATIENT_CREATE audit_logs
+ * entry via write_patient_with_audit (see the P4-P17 migration) — one
+ * Postgres transaction, so there's no window where the row exists without
+ * its creation being attributed. isActive/discharge fields are deliberately
+ * not part of this payload — those flow through setPatientActive, which
+ * covers its own distinct semantics (discharge date/reason) and is out of
+ * scope for this audit path. */
+export async function createPatient(
+  data: {
+    name: string;
+    insurance?: string;
+    authDate?: Date | null;
+    authValidUntil?: number | null;
+  },
+  actor: ActorContext
+): Promise<string> {
+  const payload: Record<string, unknown> = { name: data.name };
+  if (data.insurance !== undefined) payload.insurance = data.insurance;
+  if (data.authDate !== undefined) {
+    payload.auth_date = data.authDate ? data.authDate.toISOString().split("T")[0] : null;
+  }
+  if (data.authValidUntil !== undefined) payload.auth_valid_until = data.authValidUntil ?? null;
+
+  const { data: id, error } = await supabase.rpc("write_patient_with_audit", {
+    p_id: null,
+    p_data: payload,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_action: "PATIENT_CREATE",
+  });
 
   if (error) {
     console.error("[Supabase] createPatient:", error);
     throw error;
   }
-  return (row as { id: string }).id;
+  return id as string;
 }
 
+/** Atomically patches the patient row and writes a PATIENT_UPDATE audit_logs
+ * entry (only for the fields actually present in `data` AND whose value
+ * actually changed — see write_patient_with_audit) in one transaction.
+ * claimsStatus=null is an explicit clear (the API-level "none" sentinel is
+ * translated to null by the caller before this point); isActive is not
+ * handled here — see createPatient's note above. */
 export async function updatePatient(
   id: string,
-  data: { name?: string; insurance?: string; authDate?: Date | null; authValidUntil?: number | null; isActive?: boolean; claimsStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | null }
+  data: { name?: string; insurance?: string; authDate?: Date | null; authValidUntil?: number | null; claimsStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | null },
+  actor: ActorContext
 ): Promise<void> {
-  const update: Record<string, unknown> = {};
-  if (data.name !== undefined) update.name = data.name;
-  if (data.insurance !== undefined) update.insurance = data.insurance;
+  const payload: Record<string, unknown> = {};
+  if (data.name !== undefined) payload.name = data.name;
+  if (data.insurance !== undefined) payload.insurance = data.insurance;
   if (data.authDate !== undefined) {
-    update.auth_date = data.authDate ? data.authDate.toISOString().split("T")[0] : null;
+    payload.auth_date = data.authDate ? data.authDate.toISOString().split("T")[0] : null;
   }
-  if (data.authValidUntil !== undefined) {
-    update.auth_valid_until = data.authValidUntil ?? null;
-  }
-  if (data.isActive !== undefined) {
-    update.is_active = data.isActive;
-  }
-  if (data.claimsStatus !== undefined) {
-    update.claims_status = data.claimsStatus;
-  }
+  if (data.authValidUntil !== undefined) payload.auth_valid_until = data.authValidUntil ?? null;
+  if (data.claimsStatus !== undefined) payload.claims_status = data.claimsStatus;
 
-  const { error } = await supabase.from("patients").update(update).eq("id", id);
+  if (Object.keys(payload).length === 0) return;
+
+  const { error } = await supabase.rpc("write_patient_with_audit", {
+    p_id: id,
+    p_data: payload,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_action: "PATIENT_UPDATE",
+  });
   if (error) {
     console.error("[Supabase] updatePatient:", error);
     throw error;
@@ -274,6 +299,96 @@ export async function createAuditLog(entry: {
     console.error("[Supabase] createAuditLog:", error);
     throw error;
   }
+}
+
+export type AuditLogRow = {
+  id: string;
+  entityType: string | null;
+  entityId: string | null;
+  patientId: string | null;
+  actorId: string | null;
+  actorType: "clinic_user" | "owner" | null;
+  actorDisplay: string | null;
+  action: string;
+  beforeData: Record<string, unknown> | null;
+  afterData: Record<string, unknown> | null;
+  importBatchId: string | null;
+  createdAt: Date;
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toAuditLogRow(row: any): AuditLogRow {
+  return {
+    id: row.id,
+    entityType: row.entity_type ?? null,
+    entityId: row.entity_id ?? null,
+    patientId: row.patient_id ?? null,
+    actorId: row.actor_id ?? null,
+    actorType: row.actor_type ?? null,
+    actorDisplay: row.actor_display ?? null,
+    action: row.action,
+    beforeData: row.before_data ?? null,
+    afterData: row.after_data ?? null,
+    importBatchId: row.import_batch_id ?? null,
+    createdAt: new Date(row.created_at),
+  };
+}
+
+/** History for one record (any entity_type/entity_id pair), newest first.
+ * Callers are responsible for their own access check — patients/visits/
+ * claims history is reachable by any authenticated staff member (the same
+ * data-access model the records themselves already use); clinic_user
+ * history is restricted to adminOrOwnerProcedure at the router layer since
+ * it covers account management actions. */
+export async function listHistoryForEntity(entityType: string, entityId: string): Promise<AuditLogRow[]> {
+  const { data, error } = await supabase
+    .from("audit_logs")
+    .select("*")
+    .eq("entity_type", entityType)
+    .eq("entity_id", entityId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("[Supabase] listHistoryForEntity:", error);
+    throw error;
+  }
+  return (data ?? []).map(toAuditLogRow);
+}
+
+/** Paginated, filterable activity feed across every entity type — backs the
+ * admin/owner Activity Log page. adminOrOwnerProcedure-gated at the router
+ * layer (see routers.ts activityLog.list); this function itself does no
+ * authorization, matching the pattern of every other exported helper here
+ * (callers are the single enforcement point). */
+export async function listActivityLog(filters: {
+  actorId?: string | null;
+  entityType?: string | null;
+  action?: string | null;
+  dateFrom?: Date | null;
+  dateTo?: Date | null;
+  page: number;
+  pageSize: number;
+}): Promise<{ rows: AuditLogRow[]; total: number }> {
+  let query = supabase.from("audit_logs").select("*", { count: "exact" });
+
+  if (filters.actorId) query = query.eq("actor_id", filters.actorId);
+  if (filters.entityType) query = query.eq("entity_type", filters.entityType);
+  if (filters.action) query = query.eq("action", filters.action);
+  if (filters.dateFrom) query = query.gte("created_at", filters.dateFrom.toISOString());
+  if (filters.dateTo) query = query.lte("created_at", filters.dateTo.toISOString());
+
+  const from = filters.page * filters.pageSize;
+  const to = from + filters.pageSize - 1;
+
+  const { data, error, count } = await query
+    .order("created_at", { ascending: false })
+    .range(from, to);
+
+  if (error) {
+    console.error("[Supabase] listActivityLog:", error);
+    throw error;
+  }
+  return { rows: (data ?? []).map(toAuditLogRow), total: count ?? 0 };
 }
 
 export async function setPatientActive(
@@ -338,7 +453,7 @@ export async function createVisitRecord(data: {
   totalInsuranceReimbursement?: number | null;
   totalPatientDue?: number | null;
   totalPatientPaid?: number | null;
-}): Promise<string> {
+}, actor?: ActorContext): Promise<string> {
   const { data: row, error } = await supabase
     .from("visit_records")
     .insert({
@@ -354,6 +469,7 @@ export async function createVisitRecord(data: {
       total_insurance_reimbursement: data.totalInsuranceReimbursement ?? null,
       total_patient_due: data.totalPatientDue ?? null,
       total_patient_paid: data.totalPatientPaid ?? null,
+      ...(actor ? { created_by: actor.actorId, created_by_type: actor.actorType, updated_by: actor.actorId, updated_by_type: actor.actorType } : {}),
     })
     .select("id")
     .single();
@@ -379,9 +495,14 @@ export async function updateVisitRecord(
     totalInsuranceReimbursement?: number | null;
     totalPatientDue?: number | null;
     totalPatientPaid?: number | null;
-  }
+  },
+  actor?: ActorContext
 ): Promise<void> {
   const update: Record<string, unknown> = {};
+  if (actor) {
+    update.updated_by = actor.actorId;
+    update.updated_by_type = actor.actorType;
+  }
   if (data.sessionsAuthorized !== undefined) update.sessions_authorized = data.sessionsAuthorized;
   if (data.sessionsRemaining !== undefined) update.sessions_remaining = data.sessionsRemaining;
   if (data.sessionNumber !== undefined) update.session_number = data.sessionNumber;
@@ -416,7 +537,8 @@ export async function bulkCreateVisitRecords(
     newAuth?: string | null;
     dateAshSubmitted?: Date | null;
     authStatus?: "none" | "pending" | "approved" | "denied";
-  }>
+  }>,
+  actor?: ActorContext
 ): Promise<void> {
   if (records.length === 0) return;
 
@@ -430,6 +552,7 @@ export async function bulkCreateVisitRecords(
     new_auth: r.newAuth ?? null,
     date_ash_submitted: r.dateAshSubmitted ? r.dateAshSubmitted.toISOString().split("T")[0] : null,
     auth_status: r.authStatus ?? "none",
+    ...(actor ? { created_by: actor.actorId, created_by_type: actor.actorType, updated_by: actor.actorId, updated_by_type: actor.actorType } : {}),
   }));
 
   const { error } = await supabase.from("visit_records").insert(rows);
@@ -586,12 +709,23 @@ export async function getMarkAsRequestedTargetVisitId(patientId: string): Promis
   return target?.id ?? null;
 }
 
+/** Approves the active authorization period and creates the next batch of
+ * visit session rows. This spans several separate Supabase requests (mark
+ * approved, patch patient, insert the new batch) that were already
+ * sequential before this change — NOT a single Postgres transaction, so a
+ * crash mid-way can leave a partially-applied approval. That pre-existing
+ * limitation is unchanged here; this only adds a best-effort
+ * AUTHORIZATION_APPROVED audit_logs entry once every write above has
+ * already succeeded (sequential, not RPC-atomic with the writes themselves —
+ * see the P4-P17 migration's notes on scope for why visit/authorization
+ * flows weren't folded into a dedicated RPC in this pass). */
 export async function approveAndCreateNewBatch(
   patientId: string,
   sessionsAuthorized: number,
   authDate: Date | null,
-  newInsurance?: string,
-  authValidUntil?: number | null,
+  newInsurance: string | undefined,
+  authValidUntil: number | null | undefined,
+  actor: ActorContext,
 ): Promise<{ newVisitIds: string[] }> {
   // 1. Determine which existing authorization period the approval applies to
   const { data: periodStatusRows, error: periodStatusErr } = await supabase
@@ -610,7 +744,7 @@ export async function approveAndCreateNewBatch(
   // other periods (e.g. an earlier denied/pending period) are left untouched
   const { error: approveErr } = await supabase
     .from("visit_records")
-    .update({ auth_status: "approved" })
+    .update({ auth_status: "approved", updated_by: actor.actorId, updated_by_type: actor.actorType })
     .eq("patient_id", patientId)
     .eq("auth_period", targetApprovalPeriod);
 
@@ -623,6 +757,8 @@ export async function approveAndCreateNewBatch(
   if (authValidUntil !== undefined) patientUpdates.auth_valid_until = authValidUntil ?? null;
 
   if (Object.keys(patientUpdates).length > 0) {
+    patientUpdates.updated_by = actor.actorId;
+    patientUpdates.updated_by_type = actor.actorType;
     const { error: patErr } = await supabase
       .from("patients")
       .update(patientUpdates)
@@ -669,14 +805,40 @@ export async function approveAndCreateNewBatch(
     insurance_company: batchInsurance,
   }));
 
+  const stampedRows = newRows.map(r => ({
+    ...r,
+    created_by: actor.actorId,
+    created_by_type: actor.actorType,
+    updated_by: actor.actorId,
+    updated_by_type: actor.actorType,
+  }));
+
   const { data: inserted, error: insertErr } = await supabase
     .from("visit_records")
-    .insert(newRows)
+    .insert(stampedRows)
     .select("id");
 
   if (insertErr) { console.error("[Supabase] approveAndCreateNewBatch insert:", insertErr); throw insertErr; }
 
   const newVisitIds = ((inserted ?? []) as { id: string }[]).map(r => r.id);
+
+  const { error: auditErr } = await supabase.from("audit_logs").insert({
+    entity_type: "visit_record",
+    entity_id: patientId,
+    patient_id: patientId,
+    actor_id: actor.actorId,
+    actor_type: actor.actorType,
+    actor_display: actor.actorDisplay,
+    action: "AUTHORIZATION_APPROVED",
+    before_data: { auth_period: targetApprovalPeriod },
+    after_data: { new_auth_period: nextPeriod, sessions_authorized: sessionsAuthorized },
+  });
+  if (auditErr) {
+    // The approval itself already committed — surface loudly but don't fail
+    // a successful approval just because its audit entry didn't write.
+    console.error("[Supabase] approveAndCreateNewBatch audit insert failed (approval already applied):", auditErr);
+  }
+
   return { newVisitIds };
 }
 
@@ -807,36 +969,68 @@ export async function listClinicUsers(): Promise<ClinicUser[]> {
   return (data ?? []).map(toClinicUser);
 }
 
-export async function createClinicUser(data: {
-  username: string;
-  passwordHash: string;
-  name: string;
-  email: string | null;
-  department: string | null;
-  role: "admin" | "staff";
-  status: "active" | "archived";
-}): Promise<ClinicUser> {
-  const { data: row, error } = await supabase
-    .from("clinic_users")
-    .insert({
-      username: data.username,
-      password_hash: data.passwordHash,
-      name: data.name,
-      email: data.email,
-      department: data.department,
-      role: data.role,
-      status: data.status,
-      must_change_password: true,
-      token_version: 0,
-    })
-    .select()
-    .single();
+/** Thrown by update_clinic_user_role_with_audit / archive_clinic_user_with_audit
+ * when the action would leave zero active admin clinic_users — the account
+ * management surface must always keep at least one active account manager,
+ * independent of who's performing the action. */
+export class LastActiveAccountManagerError extends Error {
+  constructor() {
+    super("This is the only active admin account — it cannot be demoted or deactivated.");
+    this.name = "LastActiveAccountManagerError";
+  }
+}
+
+/** Thrown when a CAS-guarded clinic_users mutation's expectedTokenVersion no
+ * longer matches the row (a concurrent change already moved it). Callers map
+ * this to "please refresh and try again" rather than a generic failure. */
+export class ClinicUserConflictError extends Error {
+  constructor(id: string) {
+    super(`Staff account ${id} changed during this request`);
+    this.name = "ClinicUserConflictError";
+  }
+}
+
+function mapClinicUserRpcError(error: { code?: string; message?: string }, id: string): never {
+  if (error.code === "P0021" || error.code === "P0022") throw new ClinicUserConflictError(id);
+  if (error.code === "P0023") throw new LastActiveAccountManagerError();
+  throw error;
+}
+
+/** Atomically inserts the clinic_users row and its ACCOUNT_CREATE audit_logs
+ * entry via create_clinic_user_with_audit (P4-P17 migration). */
+export async function createClinicUser(
+  data: {
+    username: string;
+    passwordHash: string;
+    name: string;
+    email: string | null;
+    department: string | null;
+    role: "admin" | "staff";
+    status: "active" | "archived";
+  },
+  actor: ActorContext
+): Promise<ClinicUser> {
+  const { data: id, error } = await supabase.rpc("create_clinic_user_with_audit", {
+    p_username: data.username,
+    p_password_hash: data.passwordHash,
+    p_name: data.name,
+    p_email: data.email,
+    p_department: data.department,
+    p_role: data.role,
+    p_status: data.status,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
 
   if (error) {
     console.error("[Supabase] createClinicUser:", error);
     throw error;
   }
-  return toClinicUser(row);
+
+  const created = await getClinicUserById(id as string);
+  if (!created) throw new Error("createClinicUser: row not found immediately after insert");
+  return created;
 }
 
 /** Name/email/department only — these never affect auth, so no token_version
@@ -871,96 +1065,99 @@ export async function updateClinicUserProfile(
 /** Role changes a session's effective permissions, so token_version is bumped
  * (CAS-guarded, same pattern as changeClinicUserPassword) to invalidate any
  * already-issued session carrying the stale role. */
-export async function updateClinicUserRole(params: {
-  id: string;
-  role: "admin" | "staff";
-  expectedTokenVersion: number;
-}): Promise<ClinicUser | undefined> {
-  const { data, error } = await supabase
-    .from("clinic_users")
-    .update({ role: params.role, token_version: params.expectedTokenVersion + 1 })
-    .eq("id", params.id)
-    .eq("token_version", params.expectedTokenVersion)
-    .select()
-    .maybeSingle();
+/** Role changes a session's effective permissions, so token_version is
+ * bumped (CAS-guarded) to invalidate any already-issued session carrying the
+ * stale role. Atomically writes the ACCOUNT_ROLE_CHANGE audit entry in the
+ * same transaction, and rejects (LastActiveAccountManagerError) a demotion
+ * that would leave zero active admins — see
+ * update_clinic_user_role_with_audit in the P4-P17 migration. */
+export async function updateClinicUserRole(
+  params: { id: string; role: "admin" | "staff"; expectedTokenVersion: number },
+  actor: ActorContext
+): Promise<ClinicUser | undefined> {
+  const { error } = await supabase.rpc("update_clinic_user_role_with_audit", {
+    p_id: params.id,
+    p_role: params.role,
+    p_expected_token_version: params.expectedTokenVersion,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
 
   if (error) {
     console.error("[Supabase] updateClinicUserRole:", error);
-    throw error;
+    mapClinicUserRpcError(error, params.id);
   }
-  return data ? toClinicUser(data) : undefined;
+  return getClinicUserById(params.id);
 }
 
 /** Admin-initiated "Reset Login": unlike changeClinicUserPassword (self-service,
  * clears must_change_password), this always sets must_change_password=true so
- * the temporary password forces a change on next login. */
-export async function adminResetClinicUserPassword(params: {
-  id: string;
-  passwordHash: string;
-  expectedTokenVersion: number;
-}): Promise<ClinicUser | undefined> {
-  const { data, error } = await supabase
-    .from("clinic_users")
-    .update({
-      password_hash: params.passwordHash,
-      must_change_password: true,
-      token_version: params.expectedTokenVersion + 1,
-    })
-    .eq("id", params.id)
-    .eq("token_version", params.expectedTokenVersion)
-    .select()
-    .maybeSingle();
+ * the temporary password forces a change on next login. The audit entry this
+ * writes carries no before/after payload — never the hash, never any
+ * credential-shaped value, only that a reset happened (see
+ * admin_reset_clinic_user_password_with_audit). */
+export async function adminResetClinicUserPassword(
+  params: { id: string; passwordHash: string; expectedTokenVersion: number },
+  actor: ActorContext
+): Promise<ClinicUser | undefined> {
+  const { error } = await supabase.rpc("admin_reset_clinic_user_password_with_audit", {
+    p_id: params.id,
+    p_password_hash: params.passwordHash,
+    p_expected_token_version: params.expectedTokenVersion,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
 
   if (error) {
     console.error("[Supabase] adminResetClinicUserPassword:", error);
-    throw error;
+    mapClinicUserRpcError(error, params.id);
   }
-  return data ? toClinicUser(data) : undefined;
+  return getClinicUserById(params.id);
 }
 
 /** Soft-delete: status -> archived, stamps archived_at, and bumps
  * token_version so any session already issued for this account is rejected
- * on its very next request. The row itself is never removed. */
-export async function archiveClinicUser(params: {
-  id: string;
-  expectedTokenVersion: number;
-}): Promise<ClinicUser | undefined> {
-  const { data, error } = await supabase
-    .from("clinic_users")
-    .update({
-      status: "archived",
-      archived_at: new Date().toISOString(),
-      token_version: params.expectedTokenVersion + 1,
-    })
-    .eq("id", params.id)
-    .eq("token_version", params.expectedTokenVersion)
-    .select()
-    .maybeSingle();
+ * on its very next request. The row itself is never removed. Rejects
+ * (LastActiveAccountManagerError) archiving the last active admin — see
+ * archive_clinic_user_with_audit in the P4-P17 migration. */
+export async function archiveClinicUser(
+  params: { id: string; expectedTokenVersion: number },
+  actor: ActorContext
+): Promise<ClinicUser | undefined> {
+  const { error } = await supabase.rpc("archive_clinic_user_with_audit", {
+    p_id: params.id,
+    p_expected_token_version: params.expectedTokenVersion,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
 
   if (error) {
     console.error("[Supabase] archiveClinicUser:", error);
-    throw error;
+    mapClinicUserRpcError(error, params.id);
   }
-  return data ? toClinicUser(data) : undefined;
+  return getClinicUserById(params.id);
 }
 
 /** Reverses archive. No token_version bump — an archived account has no
  * valid session left to invalidate (archiving already bumped it), and no
  * password reset — a reactivated account's existing password stays in
  * effect unless an admin explicitly runs Reset Login afterward. */
-export async function reactivateClinicUser(id: string): Promise<ClinicUser | undefined> {
-  const { data, error } = await supabase
-    .from("clinic_users")
-    .update({ status: "active", archived_at: null })
-    .eq("id", id)
-    .select()
-    .maybeSingle();
+export async function reactivateClinicUser(id: string, actor: ActorContext): Promise<ClinicUser | undefined> {
+  const { error } = await supabase.rpc("reactivate_clinic_user_with_audit", {
+    p_id: id,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
 
   if (error) {
     console.error("[Supabase] reactivateClinicUser:", error);
-    throw error;
+    mapClinicUserRpcError(error, id);
   }
-  return data ? toClinicUser(data) : undefined;
+  return getClinicUserById(id);
 }
 
 // ─── Claims follow-up classification ──────────────────────────────────────────
@@ -1107,9 +1304,9 @@ export async function getClaimsByPatientAndPeriod(patientId: string, authPeriod:
   return data ?? [];
 }
 
-export async function createClaimRecord(data: {
-  patientId: string;
-  authPeriod: number;
+type ClaimRecordFields = {
+  patientId?: string;
+  authPeriod?: number;
   placeOfService?: string | null;
   dateOfService?: Date | null;
   visitNumber?: number | null;
@@ -1134,113 +1331,129 @@ export async function createClaimRecord(data: {
   referenceNo?: string | null;
   lmn?: string | null;
   sourceLineIndex?: number | null;
+};
+
+const dateOnly = (d: Date | null | undefined) => (d ? d.toISOString().split("T")[0] : null);
+
+/** Maps the camelCase claim fields this module's callers already use onto
+ * the snake_case keys write_claim_record_with_audit's p_data jsonb expects,
+ * including ONLY keys actually present on `data` (not just non-null) — this
+ * preserves createClaimRecord's "always write every column" behavior and
+ * updateClaimRecord/upsertClaimRecord's "only patch fields explicitly
+ * provided" behavior, matching exactly what each call site passed in before
+ * this was centralized through the shared RPC. */
+function claimFieldsToPayload(data: ClaimRecordFields): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  if (data.authPeriod !== undefined) payload.auth_period = data.authPeriod;
+  if (data.placeOfService !== undefined) payload.place_of_service = data.placeOfService;
+  if (data.dateOfService !== undefined) payload.date_of_service = dateOnly(data.dateOfService);
+  if (data.visitNumber !== undefined) payload.visit_number = data.visitNumber;
+  if (data.cptCodes !== undefined) payload.cpt_codes = data.cptCodes;
+  if (data.unitsBilled !== undefined) payload.units_billed = data.unitsBilled;
+  if (data.diagnosisCodes !== undefined) payload.diagnosis_codes = data.diagnosisCodes;
+  if (data.modifier !== undefined) payload.modifier = data.modifier;
+  if (data.chargeAmount !== undefined) payload.charge_amount = data.chargeAmount;
+  if (data.insuranceReimbursement !== undefined) payload.insurance_reimbursement = data.insuranceReimbursement;
+  if (data.patientAmountPaid !== undefined) payload.patient_amount_paid = data.patientAmountPaid;
+  if (data.patientAmountDue !== undefined) payload.patient_amount_due = data.patientAmountDue;
+  if (data.insuranceBilled !== undefined) payload.insurance_billed = data.insuranceBilled;
+  if (data.oaClaimNumber !== undefined) payload.oa_claim_number = data.oaClaimNumber;
+  if (data.claimSubmittedDate !== undefined) payload.claim_submitted_date = dateOnly(data.claimSubmittedDate);
+  if (data.expireBcbsClaimNumber !== undefined) payload.expire_bcbs_claim_number = data.expireBcbsClaimNumber;
+  if (data.claimStatus !== undefined) payload.claim_status = data.claimStatus;
+  if (data.paymentReceived !== undefined) payload.payment_received = data.paymentReceived;
+  if (data.checkDate !== undefined) payload.check_date = dateOnly(data.checkDate);
+  if (data.checkNumberVirtualCard !== undefined) payload.check_number_virtual_card = data.checkNumberVirtualCard;
+  if (data.dateReceived !== undefined) payload.date_received = dateOnly(data.dateReceived);
+  if (data.dateOfAppeal !== undefined) payload.date_of_appeal = dateOnly(data.dateOfAppeal);
+  if (data.referenceNo !== undefined) payload.reference_no = data.referenceNo;
+  if (data.lmn !== undefined) payload.lmn = data.lmn;
+  if (data.sourceLineIndex !== undefined) payload.source_line_index = data.sourceLineIndex;
+  return payload;
+}
+
+/** Inserts-or-patches one claims_records row and its audit_logs entry in a
+ * single Postgres transaction via write_claim_record_with_audit (see the
+ * P4-P17 migration) — the shared write path for claims.create/update/upsert,
+ * CMS1500 enrichment, and both bulk-import flows, so every one of those gets
+ * the same atomicity and the same "skip the audit row on a true no-op"
+ * behavior. Returns the row id (new or existing). */
+async function writeClaimRecordWithAudit(params: {
+  id: string | null;
+  patientId: string;
+  payload: Record<string, unknown>;
+  actor: ActorContext;
+  action: string;
+  importBatchId?: string | null;
 }): Promise<string> {
-  const { data: row, error } = await supabase
-    .from("claims_records")
-    .insert({
-      patient_id: data.patientId,
-      auth_period: data.authPeriod,
-      place_of_service: data.placeOfService ?? null,
-      date_of_service: data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null,
-      visit_number: data.visitNumber ?? null,
-      cpt_codes: data.cptCodes ?? null,
-      units_billed: data.unitsBilled ?? null,
-      diagnosis_codes: data.diagnosisCodes ?? null,
-      modifier: data.modifier ?? null,
-      charge_amount: data.chargeAmount ?? null,
-      insurance_reimbursement: data.insuranceReimbursement ?? null,
-      patient_amount_paid: data.patientAmountPaid ?? null,
-      patient_amount_due: data.patientAmountDue ?? null,
-      insurance_billed: data.insuranceBilled ?? null,
-      oa_claim_number: data.oaClaimNumber ?? null,
-      claim_submitted_date: data.claimSubmittedDate ? data.claimSubmittedDate.toISOString().split("T")[0] : null,
-      expire_bcbs_claim_number: data.expireBcbsClaimNumber ?? null,
-      claim_status: data.claimStatus ?? "submitted",
-      payment_received: data.paymentReceived ?? null,
-      check_date: data.checkDate ? data.checkDate.toISOString().split("T")[0] : null,
-      check_number_virtual_card: data.checkNumberVirtualCard ?? null,
-      date_received: data.dateReceived ? data.dateReceived.toISOString().split("T")[0] : null,
-      date_of_appeal: data.dateOfAppeal ? data.dateOfAppeal.toISOString().split("T")[0] : null,
-      reference_no: data.referenceNo ?? null,
-      lmn: data.lmn ?? null,
-      source_line_index: data.sourceLineIndex ?? null,
-    })
-    .select("id")
-    .single();
+  const { data: id, error } = await supabase.rpc("write_claim_record_with_audit", {
+    p_id: params.id,
+    p_patient_id: params.patientId,
+    p_data: params.payload,
+    p_actor_id: params.actor.actorId,
+    p_actor_type: params.actor.actorType,
+    p_actor_display: params.actor.actorDisplay,
+    p_action: params.action,
+    p_import_batch_id: params.importBatchId ?? null,
+  });
 
   if (error) {
-    console.error("[Supabase] createClaimRecord:", error);
+    console.error("[Supabase] writeClaimRecordWithAudit:", error);
+    if ((error as { code?: string }).code === "P0010") throw new ClaimRecordNotFoundError(params.id ?? "");
+    if ((error as { code?: string }).code === "P0011") throw new ClaimRecordPatientMismatchError(params.id ?? "", params.patientId);
     throw error;
   }
-  return (row as { id: string }).id;
+  return id as string;
+}
+
+export async function createClaimRecord(
+  data: ClaimRecordFields & { patientId: string; authPeriod: number },
+  actor: ActorContext,
+  importBatchId?: string | null
+): Promise<string> {
+  const payload = claimFieldsToPayload(data);
+  // claim_status always has an explicit value on create, matching the prior
+  // direct-insert behavior's `data.claimStatus ?? "submitted"` default.
+  payload.claim_status = data.claimStatus ?? "submitted";
+  return writeClaimRecordWithAudit({
+    id: null,
+    patientId: data.patientId,
+    payload,
+    actor,
+    action: "CLAIM_RECORD_CREATE",
+    importBatchId,
+  });
 }
 
 export async function updateClaimRecord(
   id: string,
-  data: {
-    placeOfService?: string | null;
-    dateOfService?: Date | null;
-    visitNumber?: number | null;
-    cptCodes?: string | null;
-    unitsBilled?: number | null;
-    diagnosisCodes?: string | null;
-    modifier?: string | null;
-    chargeAmount?: number | null;
-    insuranceReimbursement?: number | null;
-    patientAmountPaid?: number | null;
-    patientAmountDue?: number | null;
-    insuranceBilled?: string | null;
-    oaClaimNumber?: string | null;
-    claimSubmittedDate?: Date | null;
-    expireBcbsClaimNumber?: string | null;
-    claimStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | 'needs_review';
-    paymentReceived?: number | null;
-    checkDate?: Date | null;
-    checkNumberVirtualCard?: string | null;
-    dateReceived?: Date | null;
-    dateOfAppeal?: Date | null;
-    referenceNo?: string | null;
-  }
+  data: ClaimRecordFields,
+  actor: ActorContext
 ): Promise<void> {
-  const update: Record<string, unknown> = {};
-  if (data.placeOfService !== undefined) update.place_of_service = data.placeOfService;
-  if (data.dateOfService !== undefined) {
-    update.date_of_service = data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null;
-  }
-  if (data.visitNumber !== undefined) update.visit_number = data.visitNumber;
-  if (data.cptCodes !== undefined) update.cpt_codes = data.cptCodes;
-  if (data.unitsBilled !== undefined) update.units_billed = data.unitsBilled;
-  if (data.diagnosisCodes !== undefined) update.diagnosis_codes = data.diagnosisCodes;
-  if (data.modifier !== undefined) update.modifier = data.modifier;
-  if (data.chargeAmount !== undefined) update.charge_amount = data.chargeAmount;
-  if (data.insuranceReimbursement !== undefined) update.insurance_reimbursement = data.insuranceReimbursement;
-  if (data.patientAmountPaid !== undefined) update.patient_amount_paid = data.patientAmountPaid;
-  if (data.patientAmountDue !== undefined) update.patient_amount_due = data.patientAmountDue;
-  if (data.insuranceBilled !== undefined) update.insurance_billed = data.insuranceBilled;
-  if (data.oaClaimNumber !== undefined) update.oa_claim_number = data.oaClaimNumber;
-  if (data.claimSubmittedDate !== undefined) {
-    update.claim_submitted_date = data.claimSubmittedDate ? data.claimSubmittedDate.toISOString().split("T")[0] : null;
-  }
-  if (data.expireBcbsClaimNumber !== undefined) update.expire_bcbs_claim_number = data.expireBcbsClaimNumber;
-  if (data.claimStatus !== undefined) update.claim_status = data.claimStatus;
-  if (data.paymentReceived !== undefined) update.payment_received = data.paymentReceived;
-  if (data.checkDate !== undefined) {
-    update.check_date = data.checkDate ? data.checkDate.toISOString().split("T")[0] : null;
-  }
-  if (data.checkNumberVirtualCard !== undefined) update.check_number_virtual_card = data.checkNumberVirtualCard;
-  if (data.dateReceived !== undefined) {
-    update.date_received = data.dateReceived ? data.dateReceived.toISOString().split("T")[0] : null;
-  }
-  if (data.dateOfAppeal !== undefined) {
-    update.date_of_appeal = data.dateOfAppeal ? data.dateOfAppeal.toISOString().split("T")[0] : null;
-  }
-  if (data.referenceNo !== undefined) update.reference_no = data.referenceNo;
+  const payload = claimFieldsToPayload(data);
+  if (Object.keys(payload).length === 0) return;
 
-  const { error } = await supabase.from("claims_records").update(update).eq("id", id);
-  if (error) {
-    console.error("[Supabase] updateClaimRecord:", error);
-    throw error;
+  // updateClaimRecord's callers (claims.update) only have the claim id, not
+  // its patient — look it up so write_claim_record_with_audit's ownership
+  // check still has something real to validate against.
+  const { data: row, error: lookupErr } = await supabase
+    .from("claims_records")
+    .select("patient_id")
+    .eq("id", id)
+    .maybeSingle();
+  if (lookupErr) {
+    console.error("[Supabase] updateClaimRecord (lookup):", lookupErr);
+    throw lookupErr;
   }
+  if (!row) throw new ClaimRecordNotFoundError(id);
+
+  await writeClaimRecordWithAudit({
+    id,
+    patientId: (row as { patient_id: string }).patient_id,
+    payload,
+    actor,
+    action: "CLAIM_RECORD_UPDATE",
+  });
 }
 
 export class ClaimRecordNotFoundError extends Error {
@@ -1274,13 +1487,17 @@ export async function deleteClaimRecordWithAudit(params: {
   claimId: string;
   patientId: string;
   actorId: string | null;
+  actorType?: ActorContext["actorType"] | null;
+  actorDisplay?: string | null;
 }): Promise<void> {
-  const { claimId, patientId, actorId } = params;
+  const { claimId, patientId, actorId, actorType, actorDisplay } = params;
 
   const { error } = await supabase.rpc("delete_claim_record_with_audit", {
     p_claim_id: claimId,
     p_patient_id: patientId,
     p_actor_id: actorId,
+    p_actor_type: actorType ?? null,
+    p_actor_display: actorDisplay ?? null,
   });
 
   if (error) {
@@ -1423,6 +1640,8 @@ export async function applyCms1500Enrichment(params: {
   diagnosisCodes?: string | null;
   modifier?: string | null;
   unitsBilled?: number | null;
+  actor: ActorContext;
+  importBatchId?: string | null;
 }): Promise<void> {
   const dosStr = params.dateOfService.toISOString().split("T")[0];
 
@@ -1451,37 +1670,32 @@ export async function applyCms1500Enrichment(params: {
 
   if (Object.keys(patch).length === 0) return; // nothing to enrich — idempotent no-op
 
-  // Re-applies the same patient/date/CPT predicate on the UPDATE itself (not
-  // just the pre-check above) and requests the updated row(s) back —
-  // closing the gap between the ownership check and the write (the row
-  // could be deleted, or a concurrent edit could change its date/CPT, in
-  // that window) and detecting the case where Postgres reports no error but
-  // genuinely patched zero rows. Either way this must throw, never return
-  // successfully having silently changed nothing.
-  let updateQuery = supabase
-    .from("claims_records")
-    .update(patch)
-    .eq("id", params.claimRecordId)
-    .eq("patient_id", params.patientId)
-    .eq("date_of_service", dosStr);
-  updateQuery = params.cptCodes ? updateQuery.eq("cpt_codes", params.cptCodes) : updateQuery.is("cpt_codes", null);
-
-  const { data: updated, error } = await updateQuery.select("id");
-  if (error) {
-    console.error("[Supabase] applyCms1500Enrichment (update):", error);
-    throw error;
-  }
-  if (!updated || updated.length === 0) {
-    throw new Error("Selected claim row does not belong to this patient or no longer matches the service date/CPT code.");
-  }
-  if (updated.length > 1) {
-    // patient_id + date_of_service + cpt_codes is the same match key
-    // upsertClaimRecord relies on being unique per row; more than one row
-    // satisfying it here means that invariant broke, not that this call did
-    // something wrong -- surfacing it loudly beats silently patching
-    // multiple rows under one staff-reviewed claimRecordId.
-    console.error(`[Supabase] applyCms1500Enrichment: update matched ${updated.length} rows for claimRecordId ${params.claimRecordId} -- expected exactly 1.`);
-    throw new Error("Update affected more than one row unexpectedly — aborting rather than risk patching the wrong claim.");
+  // write_claim_record_with_audit re-locks the row by id + patient_id and
+  // writes the patch + its audit entry in one transaction (see the P4-P17
+  // migration), closing the not-found/wrong-patient race the same way the
+  // ownership check above already did for date/CPT. A date/CPT change in
+  // the brief window between that check and this call is not re-validated
+  // at the SQL layer here (unlike the single-row predicate-scoped UPDATE
+  // this replaced) — an accepted, narrow trade-off for reusing the shared
+  // atomic write+audit path rather than hand-rolling it per call site.
+  try {
+    await writeClaimRecordWithAudit({
+      id: params.claimRecordId,
+      patientId: params.patientId,
+      payload: patch,
+      actor: params.actor,
+      action: "CLAIM_RECORD_CMS1500_ENRICHMENT",
+      importBatchId: params.importBatchId,
+    });
+  } catch (err) {
+    // Preserve this function's established error wording (callers —
+    // cms1500EnrichmentCommit's per-line try/catch, bulkImportFromEOB —
+    // surface err.message directly) regardless of which of the RPC's two
+    // failure codes fired.
+    if (err instanceof ClaimRecordNotFoundError || err instanceof ClaimRecordPatientMismatchError) {
+      throw new Error("Selected claim row does not belong to this patient or no longer matches the service date/CPT code.");
+    }
+    throw err;
   }
 }
 
@@ -1571,7 +1785,7 @@ export async function upsertClaimRecord(data: {
   referenceNo?: string | null;
   lmn?: string | null;
   sourceLineIndex?: number | null;
-}): Promise<string> {
+}, actor: ActorContext, importBatchId?: string | null): Promise<string> {
   const dosStr = data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null;
 
   const baseQuery = () => {
@@ -1673,17 +1887,20 @@ export async function upsertClaimRecord(data: {
     if (promoteLegacyRow) patch.source_line_index = 0;
 
     if (Object.keys(patch).length > 0) {
-      const { error } = await supabase.from("claims_records").update(patch).eq("id", existingId);
-      if (error) {
-        console.error("[Supabase] upsertClaimRecord (update):", error);
-        throw error;
-      }
+      await writeClaimRecordWithAudit({
+        id: existingId,
+        patientId: data.patientId,
+        payload: patch,
+        actor,
+        action: "CLAIM_RECORD_UPDATE",
+        importBatchId,
+      });
     }
     return existingId;
   }
 
   // No existing record — insert a new one
-  return createClaimRecord(data);
+  return createClaimRecord(data, actor, importBatchId);
 }
 
 // ─── Insurer catalog (P4-P7) ────────────────────────────────────────────────
@@ -1731,10 +1948,10 @@ export async function getInsurerCatalogEntryByNormalizedName(
  *  this call can never persist a name/normalized_name pair that disagree. */
 export async function createInsurerCatalogEntry(params: {
   name: string;
-}): Promise<InsurerCatalogEntry> {
+}, actor: ActorContext): Promise<InsurerCatalogEntry> {
   const { data, error } = await supabase
     .from("insurer_catalog")
-    .insert({ name: params.name })
+    .insert({ name: params.name, created_by: actor.actorId, created_by_type: actor.actorType })
     .select()
     .single();
 

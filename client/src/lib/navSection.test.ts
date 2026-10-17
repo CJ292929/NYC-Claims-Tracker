@@ -13,6 +13,7 @@ describe('routeToNavSection', () => {
     expect(routeToNavSection('/visits')).toBe('visits');
     expect(routeToNavSection('/claims')).toBe('claims');
     expect(routeToNavSection('/staff')).toBe('staff');
+    expect(routeToNavSection('/activity-log')).toBe('activity-log');
   });
 
   it('falls back to dashboard for "/" and any unrecognized path', () => {
@@ -34,6 +35,7 @@ describe('navSectionToRoute', () => {
     expect(navSectionToRoute('visits')).toBe('/visits');
     expect(navSectionToRoute('claims')).toBe('/claims');
     expect(navSectionToRoute('staff')).toBe('/staff');
+    expect(navSectionToRoute('activity-log')).toBe('/activity-log');
   });
 
   it('returns null for bulk-upload, which has no route of its own', () => {

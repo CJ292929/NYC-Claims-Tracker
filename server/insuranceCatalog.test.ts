@@ -163,7 +163,7 @@ describe("insurance.create — access control", () => {
     // db.ts createInsurerCatalogEntry — so only `name` is ever passed here.
     expect(dbMock.createInsurerCatalogEntry).toHaveBeenCalledWith({
       name: "Aegis One Inc.",
-    });
+    }, expect.anything());
   });
 
   it("clinic admin can create an insurer", async () => {
@@ -208,7 +208,7 @@ describe("insurance.create — validation and duplicates", () => {
     await ownerCaller().insurance.create({ name: "  Hanover  " });
     expect(dbMock.createInsurerCatalogEntry).toHaveBeenCalledWith({
       name: "Hanover",
-    });
+    }, expect.anything());
   });
 
   it("rejects a case/whitespace duplicate via the pre-check", async () => {

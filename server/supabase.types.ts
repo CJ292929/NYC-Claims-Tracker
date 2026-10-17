@@ -12,6 +12,11 @@ export type AuthStatus = "none" | "pending" | "approved" | "denied";
 export type ClaimsStatus = "submitted" | "approved" | "pending" | "denied" | "pended" | "rejected" | "resubmitted";
 export type ClinicUserRole = "admin" | "staff";
 export type ClinicUserStatus = "active" | "archived";
+// P4-P17: which identity table an actor_id/*_by column refers to — never
+// assume a clinic_users.id and a users.id are the same person just because
+// one happens to be present (see server/actorIdentity.ts).
+export type ActorType = "clinic_user" | "owner";
+export type AuditEntityType = "patient" | "visit_record" | "claim_record" | "insurer_catalog" | "clinic_user";
 
 // ─── Row types (what SELECT returns) ─────────────────────────────────────────
 
@@ -54,6 +59,12 @@ export interface PatientRow {
   discharge_date: number | null;   // Unix ms timestamp — when patient was discharged
   discharge_reason: string | null; // reason for discharge
   claims_status: ClaimsStatus;     // claims status: submitted, approved, pending, or denied
+  // P4-P17: attribution. NULL on rows created before this column existed —
+  // render "Unknown — recorded before tracking", never a guess.
+  created_by: string | null;
+  created_by_type: ActorType | null;
+  updated_by: string | null;
+  updated_by_type: ActorType | null;
   created_at: string;
   updated_at: string;
 }
@@ -73,6 +84,10 @@ export interface VisitRecordRow {
   total_insurance_reimbursement: number | null;  // numeric(10,2)
   total_patient_due: number | null;              // numeric(10,2)
   total_patient_paid: number | null;             // numeric(10,2)
+  created_by: string | null;
+  created_by_type: ActorType | null;
+  updated_by: string | null;
+  updated_by_type: ActorType | null;
   created_at: string;
   updated_at: string;
 }
@@ -105,17 +120,38 @@ export interface ClaimRecordRow {
   reference_no: string | null;
   lmn: string | null;                   // letter of medical necessity note/reference
   is_resolved: boolean;                 // staff has cleared this claim from the follow-up queue
+  source_line_index: number | null;
+  created_by: string | null;
+  created_by_type: ActorType | null;
+  updated_by: string | null;
+  updated_by_type: ActorType | null;
   created_at: string;
   updated_at: string;
 }
 
+// P4-P17: generalized from a patient-only field-change log into a
+// cross-entity event log. entity_type/entity_id identify the record this
+// event is about; actor_type disambiguates which identity table actor_id
+// refers to; actor_display is a point-in-time name snapshot (survives a
+// later account rename/deactivation); before_data/after_data are a
+// controlled jsonb field-level diff (only the keys that changed — never a
+// full row); import_batch_id groups events from one bulk import/extraction.
+// patient_id/old_value/new_value are the pre-P4-P17 shape, kept for
+// backward compatibility with existing rows.
 export interface AuditLogRow {
-  id: string;                // uuid
-  patient_id: string;        // uuid → patients.id
-  actor_id: string | null;   // uuid → clinic_users.id / users.id, if known
-  action: string;            // e.g. "PATIENT_NAME_UPDATE"
+  id: string;                      // uuid
+  patient_id: string | null;       // uuid → patients.id (legacy/convenience link)
+  actor_id: string | null;         // uuid → clinic_users.id or users.id, per actor_type
+  action: string;                  // e.g. "PATIENT_NAME_UPDATE", "CLAIM_RECORD_CREATE", "ACCOUNT_ARCHIVE"
   old_value: string | null;
   new_value: string | null;
+  entity_type: AuditEntityType | null;
+  entity_id: string | null;        // uuid → the row identified by entity_type
+  actor_type: ActorType | null;
+  actor_display: string | null;
+  before_data: Record<string, unknown> | null;
+  after_data: Record<string, unknown> | null;
+  import_batch_id: string | null;  // uuid shared across one import/extraction's events
   created_at: string;
 }
 
@@ -125,6 +161,13 @@ export interface InsurerCatalogRow {
   normalized_name: string;   // lower(trim(collapse-whitespace(name))) — UNIQUE
   aliases: string[];         // pre-rename display names for this same product
   created_at: string;
+  is_active: boolean;
+  deactivated_at: string | null;
+  deactivated_by: string | null;
+  reactivated_at: string | null;
+  reactivated_by: string | null;
+  created_by: string | null;
+  created_by_type: ActorType | null;
 }
 
 // ─── Insert types (what INSERT accepts) ──────────────────────────────────────
@@ -142,6 +185,10 @@ export type InsertPatient = {
   discharge_date?: number | null;
   discharge_reason?: string | null;
   claims_status?: ClaimsStatus;
+  created_by?: string | null;
+  created_by_type?: ActorType | null;
+  updated_by?: string | null;
+  updated_by_type?: ActorType | null;
 };
 
 export type InsertVisitRecord = {
@@ -157,6 +204,10 @@ export type InsertVisitRecord = {
   total_insurance_reimbursement?: number | null;
   total_patient_due?: number | null;
   total_patient_paid?: number | null;
+  created_by?: string | null;
+  created_by_type?: ActorType | null;
+  updated_by?: string | null;
+  updated_by_type?: ActorType | null;
 };
 
 export type InsertClaimRecord = {
@@ -186,14 +237,26 @@ export type InsertClaimRecord = {
   reference_no?: string | null;
   lmn?: string | null;
   is_resolved?: boolean;
+  source_line_index?: number | null;
+  created_by?: string | null;
+  created_by_type?: ActorType | null;
+  updated_by?: string | null;
+  updated_by_type?: ActorType | null;
 };
 
 export type InsertAuditLog = {
-  patient_id: string;
+  patient_id?: string | null;
   actor_id?: string | null;
   action: string;
   old_value?: string | null;
   new_value?: string | null;
+  entity_type?: AuditEntityType | null;
+  entity_id?: string | null;
+  actor_type?: ActorType | null;
+  actor_display?: string | null;
+  before_data?: Record<string, unknown> | null;
+  after_data?: Record<string, unknown> | null;
+  import_batch_id?: string | null;
 };
 
 export type UpdatePatient = Partial<InsertPatient>;
