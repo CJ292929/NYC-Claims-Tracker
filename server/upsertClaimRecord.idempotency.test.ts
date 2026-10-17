@@ -279,6 +279,22 @@ describe("upsertClaimRecord idempotency", () => {
       expect(rows[0].charge_amount).toBe(90); // legacy row untouched
     });
 
+    it("P4-P16R: ZERO legacy rows is not an error at all -- never misread as the multiple-rows (PGRST116) ambiguous case", async () => {
+      // maybeSingle() only ever synthesizes an error for >1 matching rows;
+      // 0 rows is `{ data: null, error: null }`. A request for
+      // sourceLineIndex 1 with nothing at all at this key (no exact match,
+      // no legacy row) must insert cleanly, not be treated as ambiguous.
+      const { from, rows } = makeFakeClaimsTable();
+      tableMock.from = from;
+
+      await expect(
+        upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97112", sourceLineIndex: 1, chargeAmount: 60 })
+      ).resolves.toBeTruthy();
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].source_line_index).toBe(1);
+    });
+
     it("P4-P16: a genuine database/schema error on the legacy-row lookup is rethrown as-is, not misclassified as ClaimLineIdentityAmbiguousError", async () => {
       // Simulates e.g. a missing source_line_index column (migration not
       // actually applied) or a transient network/permissions failure --

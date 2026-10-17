@@ -47,6 +47,7 @@ import {
   buildSurvivingRow,
   summarizeSaveResult,
 } from '@/lib/claimSaveRetry';
+import { createSingleFlightGuard, createRequestGuard } from '@/lib/concurrencyGuards';
 import { formatCalendarDate } from '@/lib/date';
 import type { AuthUrgency } from '@shared/authUrgency';
 
@@ -441,18 +442,27 @@ export default function Dashboard() {
   const [claimUploadPeriod, setClaimUploadPeriod] = useState<number | null>(null);
   const [claimUploadType, setClaimUploadType] = useState<'reimbursement' | 'cms1500'>('reimbursement');
   const [isExtractingClaims, setIsExtractingClaims] = useState(false);
-  // P4-P16: bumped at the start of every handleClaimFileUpload call so a
-  // stale response from an earlier upload (double-click, or a slow request
-  // superseded by a second file pick before the first one returned) can
-  // never apply its result on top of a newer one -- without this, two
-  // in-flight extractions resolving out of order could each call
-  // setEditingExtractedClaims and leave the preview showing a mix, or a
-  // retry click racing a still-pending extraction could be overwritten by
-  // the extraction's result rather than the retry's.
-  const uploadRequestIdRef = useRef(0);
+  // P4-P16/P4-P16R: a stale response from an earlier upload (double
+  // upload, or a slow request superseded by a second file pick before the
+  // first one returned) must never apply its result on top of a newer
+  // one -- without this, two in-flight extractions resolving out of order
+  // could each call setEditingExtractedClaims and leave the preview
+  // showing a mix, or a retry click racing a still-pending extraction
+  // could be overwritten by the extraction's result rather than the
+  // retry's. See client/src/lib/concurrencyGuards.ts.
+  const uploadRequestGuardRef = useRef(createRequestGuard());
   const [extractedClaims, setExtractedClaims] = useState<any[]>([]);
   const [editingExtractedClaims, setEditingExtractedClaims] = useState<any[]>([]);
   const [isSavingExtractedClaims, setIsSavingExtractedClaims] = useState(false);
+  // P4-P16R: the "Save N Claims" button's `disabled` prop only takes effect
+  // after React commits the re-render triggered by setIsSavingExtractedClaims
+  // -- two click events dispatched before that commit (a true double-click,
+  // or a second programmatic call) would both pass the `disabled` check and
+  // run the claims.upsert loop concurrently, issuing duplicate writes for
+  // the same rows. This guard is checked and entered synchronously, inside
+  // the same tick as the click handler, so the second call bails out
+  // immediately regardless of render timing. See client/src/lib/concurrencyGuards.ts.
+  const saveGuardRef = useRef(createSingleFlightGuard());
   const [uploadFileName, setUploadFileName] = useState<string>('');
   const [detectedTemplate, setDetectedTemplate] = useState<string>('');
   // Multi-patient EOB: groups from the server (one group per detected patient)
@@ -1305,13 +1315,13 @@ export default function Dashboard() {
     if (!file) return;
     console.log('[EOB Upload] handleClaimFileUpload called with file:', file.name, 'uploadType:', uploadType, 'activePatient:', activePatient?.name);
     // P4-P16: this call's own id -- if a second upload starts (double
-    // click, or a new file picked before this one's request returns)
-    // uploadRequestIdRef.current advances past it, and every place below
-    // that would otherwise write extraction results into state checks
+    // click, or a new file picked before this one's request returns) the
+    // guard's current id advances past it, and every place below that
+    // would otherwise write extraction results into state checks
     // `isStale()` first and bails instead of clobbering/duplicating state
     // set by the newer, still-current request.
-    const requestId = ++uploadRequestIdRef.current;
-    const isStale = () => uploadRequestIdRef.current !== requestId;
+    const requestId = uploadRequestGuardRef.current.start();
+    const isStale = () => !uploadRequestGuardRef.current.isCurrent(requestId);
     setUploadFileName(file.name);
     setClaimUploadType(uploadType);
     setIsExtractingClaims(true);
@@ -1672,6 +1682,12 @@ export default function Dashboard() {
       toast.error('Internal error: CMS1500 data cannot be saved through the reimbursement claim upsert path.');
       return;
     }
+    // P4-P16R: synchronous re-entrancy guard -- see the comment on
+    // saveGuardRef. A second call (double-click, or any other re-entry)
+    // while a save is already running bails out here, before touching any
+    // row, instead of relying on the (React-render-delayed) `disabled`
+    // prop alone.
+    if (!saveGuardRef.current.tryEnter()) return;
     setIsSavingExtractedClaims(true);
     let saved = 0;
     // P4-P16: retryRows holds lines whose failure may be transient/fixable
@@ -1753,6 +1769,7 @@ export default function Dashboard() {
         (rowNeedsReview ? reviewRows : retryRows).push(buildSurvivingRow(row, stillFailing));
       }
     }
+    saveGuardRef.current.exit();
     setIsSavingExtractedClaims(false);
     if (saved > 0) {
       utils.claims.getByPatientAndPeriod.invalidate();

@@ -1602,13 +1602,22 @@ export async function upsertClaimRecord(data: {
       if (!existingId) {
         const { data: legacy, error: legacyErr } = await baseQuery().is("source_line_index", null).maybeSingle();
         if (legacyErr) {
-          // PGRST116 specifically means more than one legacy (NULL-index) row
-          // already exists at this key -- that's the genuine ambiguous-identity
-          // case this error type exists for. Any OTHER error here (missing
-          // column/table, permissions, network) is a real database/schema
-          // failure, not an identity question -- rethrowing it as-is lets
-          // callers tell "this needs staff review" apart from "the database
-          // itself is broken" instead of every failure looking identical.
+          // maybeSingle() here NEVER errors for zero matching rows -- the
+          // Supabase client only synthesizes an error (code PGRST116) when
+          // the underlying result array has length > 1, enforced entirely
+          // client-side (see node_modules/@supabase/postgrest-js
+          // PostgrestBuilder.ts's isMaybeSingle handling: `if (data.length
+          // > 1) { error = { code: 'PGRST116', ... } }`, with the zero- and
+          // one-row cases falling through to `data = null` / `data =
+          // data[0]` and no error at all). So PGRST116 here specifically
+          // means more than one legacy (NULL-index) row already exists at
+          // this key -- the genuine ambiguous-identity case this error type
+          // exists for -- and is never a stand-in for "no rows found."
+          // Any OTHER error here (missing column/table, permissions,
+          // network) is a real database/schema failure, not an identity
+          // question -- rethrowing it as-is lets callers tell "this needs
+          // staff review" apart from "the database itself is broken"
+          // instead of every failure looking identical.
           if (legacyErr.code === "PGRST116") {
             throw new ClaimLineIdentityAmbiguousError(data.patientId, dosStr, data.cptCodes ?? null, data.sourceLineIndex);
           }
