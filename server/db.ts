@@ -1602,9 +1602,18 @@ export async function upsertClaimRecord(data: {
       if (!existingId) {
         const { data: legacy, error: legacyErr } = await baseQuery().is("source_line_index", null).maybeSingle();
         if (legacyErr) {
-          // More than one legacy (NULL-index) row already exists at this key —
-          // can't safely tell which one (if any) corresponds to this line.
-          throw new ClaimLineIdentityAmbiguousError(data.patientId, dosStr, data.cptCodes ?? null, data.sourceLineIndex);
+          // PGRST116 specifically means more than one legacy (NULL-index) row
+          // already exists at this key -- that's the genuine ambiguous-identity
+          // case this error type exists for. Any OTHER error here (missing
+          // column/table, permissions, network) is a real database/schema
+          // failure, not an identity question -- rethrowing it as-is lets
+          // callers tell "this needs staff review" apart from "the database
+          // itself is broken" instead of every failure looking identical.
+          if (legacyErr.code === "PGRST116") {
+            throw new ClaimLineIdentityAmbiguousError(data.patientId, dosStr, data.cptCodes ?? null, data.sourceLineIndex);
+          }
+          console.error("[Supabase] upsertClaimRecord (legacy line-index lookup):", legacyErr);
+          throw legacyErr;
         }
         const legacyId = legacy ? (legacy as { id: string }).id : null;
 

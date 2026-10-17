@@ -278,5 +278,42 @@ describe("upsertClaimRecord idempotency", () => {
       expect(rows).toHaveLength(1); // nothing inserted, nothing merged
       expect(rows[0].charge_amount).toBe(90); // legacy row untouched
     });
+
+    it("P4-P16: a genuine database/schema error on the legacy-row lookup is rethrown as-is, not misclassified as ClaimLineIdentityAmbiguousError", async () => {
+      // Simulates e.g. a missing source_line_index column (migration not
+      // actually applied) or a transient network/permissions failure --
+      // anything other than PostgREST's "multiple rows" (PGRST116). Before
+      // this fix, upsertClaimRecord treated ANY error from this lookup as
+      // the ambiguous-identity case, which would surface a real schema
+      // failure to staff as "needs manual review" instead of the actual
+      // infrastructure problem.
+      const schemaError = { code: "42703", message: 'column "source_line_index" does not exist' };
+      const from = vi.fn((table: string) => {
+        if (table !== "claims_records") throw new Error(`unexpected table: ${table}`);
+        let sawIsNull = false;
+        const chain: Record<string, (...args: unknown[]) => unknown> = {
+          select: () => chain,
+          eq: (_col: string, _val: unknown) => chain,
+          is: (col: string, val: unknown) => {
+            if (val === null && col === "source_line_index") sawIsNull = true;
+            return chain;
+          },
+          maybeSingle: () => {
+            if (sawIsNull) {
+              return Promise.resolve({ data: null, error: schemaError });
+            }
+            // First lookup (exact sourceLineIndex match) finds nothing,
+            // forcing the code into the legacy-row lookup above.
+            return Promise.resolve({ data: null, error: null });
+          },
+        };
+        return chain;
+      });
+      tableMock.from = from;
+
+      await expect(
+        upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 75 })
+      ).rejects.toMatchObject(schemaError);
+    });
   });
 });

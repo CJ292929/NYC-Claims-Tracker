@@ -39,6 +39,14 @@ import { getPatientOverviewMetrics } from '@/lib/patientOverviewMetrics';
 import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import { resolveClaimReviewView } from '@/lib/claimReviewRouting';
+import {
+  assignSourceLineIndices,
+  isReviewRequiredError,
+  appendFailureNote,
+  clearFailureNote,
+  buildSurvivingRow,
+  summarizeSaveResult,
+} from '@/lib/claimSaveRetry';
 import { formatCalendarDate } from '@/lib/date';
 import type { AuthUrgency } from '@shared/authUrgency';
 
@@ -433,6 +441,15 @@ export default function Dashboard() {
   const [claimUploadPeriod, setClaimUploadPeriod] = useState<number | null>(null);
   const [claimUploadType, setClaimUploadType] = useState<'reimbursement' | 'cms1500'>('reimbursement');
   const [isExtractingClaims, setIsExtractingClaims] = useState(false);
+  // P4-P16: bumped at the start of every handleClaimFileUpload call so a
+  // stale response from an earlier upload (double-click, or a slow request
+  // superseded by a second file pick before the first one returned) can
+  // never apply its result on top of a newer one -- without this, two
+  // in-flight extractions resolving out of order could each call
+  // setEditingExtractedClaims and leave the preview showing a mix, or a
+  // retry click racing a still-pending extraction could be overwritten by
+  // the extraction's result rather than the retry's.
+  const uploadRequestIdRef = useRef(0);
   const [extractedClaims, setExtractedClaims] = useState<any[]>([]);
   const [editingExtractedClaims, setEditingExtractedClaims] = useState<any[]>([]);
   const [isSavingExtractedClaims, setIsSavingExtractedClaims] = useState(false);
@@ -1287,6 +1304,14 @@ export default function Dashboard() {
   const handleClaimFileUpload = async (file: File, period: number, uploadType: 'reimbursement' | 'cms1500' = 'reimbursement') => {
     if (!file) return;
     console.log('[EOB Upload] handleClaimFileUpload called with file:', file.name, 'uploadType:', uploadType, 'activePatient:', activePatient?.name);
+    // P4-P16: this call's own id -- if a second upload starts (double
+    // click, or a new file picked before this one's request returns)
+    // uploadRequestIdRef.current advances past it, and every place below
+    // that would otherwise write extraction results into state checks
+    // `isStale()` first and bails instead of clobbering/duplicating state
+    // set by the newer, still-current request.
+    const requestId = ++uploadRequestIdRef.current;
+    const isStale = () => uploadRequestIdRef.current !== requestId;
     setUploadFileName(file.name);
     setClaimUploadType(uploadType);
     setIsExtractingClaims(true);
@@ -1321,6 +1346,14 @@ export default function Dashboard() {
         );
       }
       if (!res.ok) throw new Error(json.error ?? 'Extraction failed');
+
+      // A newer upload superseded this one while the request was in
+      // flight -- its own result (or the dialog being reset/closed) is
+      // already in state; applying this stale response on top would mean
+      // whichever of the two requests happens to resolve last silently
+      // wins, and if that's this one, it could reintroduce a different
+      // file's groups into the current preview.
+      if (isStale()) return;
 
       setDetectedTemplate(json.templateUsed ?? '');
 
@@ -1618,9 +1651,12 @@ export default function Dashboard() {
         : ' (AI Extraction)';
       toast.success(`Extracted ${normalized.length} claim${normalized.length !== 1 ? 's' : ''} (${rawRows.length} CPT lines) from ${file.name}${templateMsg}`);
     } catch (err: any) {
-      toast.error(`Upload failed: ${err.message}`);
+      if (!isStale()) toast.error(`Upload failed: ${err.message}`);
     } finally {
-      setIsExtractingClaims(false);
+      // Only this request's own spinner state -- a stale request's finally
+      // running after a newer upload started must not stop the newer
+      // request's still-in-progress spinner.
+      if (!isStale()) setIsExtractingClaims(false);
     }
   };
 
@@ -1638,26 +1674,32 @@ export default function Dashboard() {
     }
     setIsSavingExtractedClaims(true);
     let saved = 0;
-    const failedRows: any[] = [];
+    // P4-P16: retryRows holds lines whose failure may be transient/fixable
+    // (safe for staff to just click Save again); reviewRows holds lines
+    // the server rejected as identity-ambiguous (ClaimLineIdentityAmbiguousError,
+    // surfaced as a CONFLICT) -- those need a human decision, not a blind
+    // retry. Keeping them in separate buckets (rather than one shared
+    // array that a row gets pushed into once per failing line) also fixes
+    // the bug where a date-group with 2+ failing CPT lines ended up as the
+    // SAME row object appended multiple times, which rendered as the same
+    // group duplicated in this dialog on retry.
+    const retryRows: any[] = [];
+    const reviewRows: any[] = [];
     for (const row of editingExtractedClaims) {
       // Save one DB row per CPT line (not consolidated)
       const cptLines: any[] = row.cptLines && row.cptLines.length > 0 ? row.cptLines : [row];
-      // P4-P14: 0-based position of each line among lines sharing its CPT
-      // code within this date group, in source order — passed through so
-      // two legitimate same-date/same-CPT lines (e.g. two 97530 sessions)
-      // land in two distinct rows instead of the second silently
-      // overwriting the first. See computeSourceLineIndices in
-      // server/routers.ts (same logic, duplicated here since this save path
-      // calls claims.upsert directly rather than bulkImportFromEOB).
-      const seenCptCount = new Map<string, number>();
-      const lineSourceIndices = cptLines.map((line: any) => {
-        const key = (line.cptCodes ?? '').trim();
-        const idx = seenCptCount.get(key) ?? 0;
-        seenCptCount.set(key, idx + 1);
-        return idx;
-      });
-      for (let lineIdx = 0; lineIdx < cptLines.length; lineIdx++) {
-        const line = cptLines[lineIdx];
+      // P4-P14/P4-P16: each line's 0-based position within its (date, CPT)
+      // group is assigned ONCE and stuck on the line object itself (not
+      // recomputed from array position every attempt). A retry only ever
+      // contains the subset of lines that still failed -- recomputing from
+      // that shrunken subset's position would renumber a surviving line
+      // (e.g. what used to be index 1) to index 0, pointing it at a
+      // different existing row than the one it actually corresponds to.
+      assignSourceLineIndices(cptLines);
+
+      const stillFailing: any[] = [];
+      let rowNeedsReview = false;
+      for (const line of cptLines) {
         try {
           const lineReimb = line.insuranceReimbursement !== '' && line.insuranceReimbursement != null ? parseFloat(line.insuranceReimbursement) : null;
           await upsertClaim.mutateAsync({
@@ -1667,7 +1709,7 @@ export default function Dashboard() {
             dateOfService: row.dateOfService || line.dateOfService || null,
             visitNumber: row.visitNumber !== '' && row.visitNumber != null ? parseInt(row.visitNumber, 10) : null,
             cptCodes: line.cptCodes || null,
-            sourceLineIndex: lineSourceIndices[lineIdx],
+            sourceLineIndex: line._sourceLineIndex,
             unitsBilled: line.unitsBilled ? parseInt(line.unitsBilled) : (row.unitsBilled ? parseInt(row.unitsBilled) : null),
             diagnosisCodes: line.diagnosisCodes || row.diagnosisCodes || null,
             modifier: line.modifier || row.modifier || null,
@@ -1689,27 +1731,46 @@ export default function Dashboard() {
             lmn: row.lmn || line.lmn || null,
           });
           saved++;
+          // Clear any stale failure note from a prior attempt now that this
+          // specific line has actually saved.
+          line.notes = clearFailureNote(line.notes);
         } catch (e: any) {
-          toast.error(`CPT ${line.cptCodes || '?'} failed: ${e.message}`);
-          failedRows.push(row);
+          // A CONFLICT from claims.upsert is ClaimLineIdentityAmbiguousError
+          // (server/db.ts) -- a pre-existing legacy row whose identity can't
+          // be safely disambiguated. That needs staff review, not a blind
+          // retry; every other error (validation, schema, network) is
+          // treated as retryable.
+          const needsReview = isReviewRequiredError(e);
+          line.notes = appendFailureNote(line.notes, needsReview, e.message);
+          if (needsReview) rowNeedsReview = true;
+          stillFailing.push(line);
         }
+      }
+
+      if (stillFailing.length > 0) {
+        // A fresh row object carrying ONLY the lines that still need
+        // attention -- lines that already saved are never resent.
+        (rowNeedsReview ? reviewRows : retryRows).push(buildSurvivingRow(row, stillFailing));
       }
     }
     setIsSavingExtractedClaims(false);
     if (saved > 0) {
-      toast.success(`${saved} claim${saved !== 1 ? 's' : ''} saved successfully!`);
       utils.claims.getByPatientAndPeriod.invalidate();
       utils.claims.getFollowUpClaims.invalidate();
       utils.claims.getStatusCounts.invalidate();
     }
-    if (failedRows.length === 0) {
+
+    const remaining = [...reviewRows, ...retryRows];
+    if (remaining.length === 0) {
+      toast.success(`${saved} claim${saved !== 1 ? 's' : ''} saved successfully!`);
       setShowClaimUploadDialog(false);
       setExtractedClaims([]);
       setEditingExtractedClaims([]);
     } else {
-      // Keep only failed rows in the dialog so staff can retry
-      setEditingExtractedClaims(failedRows);
-      toast.error(`${failedRows.length} row${failedRows.length !== 1 ? 's' : ''} failed to save. Please review and try again.`);
+      // Keep only the still-failing lines in the dialog so staff can retry
+      // them specifically -- one summary toast instead of a toast per line.
+      setEditingExtractedClaims(remaining);
+      toast.error(summarizeSaveResult(saved, retryRows, reviewRows), { duration: 15000 });
     }
   };
 
