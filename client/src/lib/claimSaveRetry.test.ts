@@ -193,6 +193,34 @@ describe("P4-P16 regression: a date-group with two failing CPT lines does not du
     expect(retryRows[0].dateOfService).toBe("2026-06-04");
   });
 
+  it("an all-review-required result stays visible (non-empty remaining set) and is actionable, not silently closed", () => {
+    // Dashboard.tsx's handleSaveExtractedClaims only closes the dialog
+    // when `[...reviewRows, ...retryRows]` is empty. When EVERY row needs
+    // review (retryRows empty), that combined set must still be non-empty
+    // so the dialog stays open with the rows visible and their ⚠️ reasons
+    // intact, instead of reporting a false success.
+    const rows = [
+      { dateOfService: "2026-06-06", cptLines: [{ cptCodes: "97140" } as SaveLine] },
+      { dateOfService: "2026-06-07", cptLines: [{ cptCodes: "97530" } as SaveLine] },
+    ];
+
+    const { saved, retryRows, reviewRows } = simulateSaveAttempt(rows, () => ({
+      fail: true,
+      reviewRequired: true,
+      message: "identity ambiguous",
+    }));
+
+    expect(saved).toBe(0);
+    expect(retryRows).toHaveLength(0);
+    expect(reviewRows).toHaveLength(2);
+    const remaining = [...reviewRows, ...retryRows];
+    expect(remaining).toHaveLength(2); // non-empty -- dialog stays open
+    expect(remaining.every(r => r.cptLines[0].notes?.includes("Needs manual review"))).toBe(true);
+    expect(summarizeSaveResult(saved, retryRows, reviewRows)).toBe(
+      "Save result: 0 saved, 2 need manual review before retrying — see ⚠️ for each."
+    );
+  });
+
   it("retrying preserves each surviving line's original sourceLineIndex across attempts", () => {
     const lineA: SaveLine = { cptCodes: "97140" };
     const lineB: SaveLine = { cptCodes: "97140" };
