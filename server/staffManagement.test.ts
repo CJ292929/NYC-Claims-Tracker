@@ -235,7 +235,8 @@ describe("staff.create (D/E/F/G)", () => {
 
     expect(bcryptMock.hash).toHaveBeenCalledWith("temp-password1", 10);
     expect(dbMock.createClinicUser).toHaveBeenCalledWith(
-      expect.objectContaining({ passwordHash: "$2b$10$new-hash" })
+      expect.objectContaining({ passwordHash: "$2b$10$new-hash" }),
+      expect.anything()
     );
     const insertedArgs = dbMock.createClinicUser.mock.calls[0][0];
     expect(insertedArgs.passwordHash).not.toBe("temp-password1");
@@ -248,7 +249,8 @@ describe("staff.create (D/E/F/G)", () => {
     await ownerCaller().staff.create(validInput);
 
     expect(dbMock.createClinicUser).toHaveBeenCalledWith(
-      expect.objectContaining({ role: "staff", status: "active" })
+      expect.objectContaining({ role: "staff", status: "active" }),
+      expect.anything()
     );
     // must_change_password:true and token_version:0 are enforced inside the
     // real (unmocked) db.ts createClinicUser — see staffManagement.db.test.ts.
@@ -283,7 +285,7 @@ describe("staff.resetPassword (H/I)", () => {
       id: STAFF_ROW_ID,
       passwordHash: "$2b$10$new-hash",
       expectedTokenVersion: 2,
-    });
+    }, expect.anything());
     expect(result.mustChangePassword).toBe(true);
   });
 
@@ -321,7 +323,7 @@ describe("staff.archive / staff.reactivate (J/K/L/Q)", () => {
 
     const result = await ownerCaller().staff.archive({ id: STAFF_ROW_ID });
 
-    expect(dbMock.archiveClinicUser).toHaveBeenCalledWith({ id: STAFF_ROW_ID, expectedTokenVersion: 2 });
+    expect(dbMock.archiveClinicUser).toHaveBeenCalledWith({ id: STAFF_ROW_ID, expectedTokenVersion: 2 }, expect.anything());
     expect(result.status).toBe("archived");
   });
 
@@ -386,7 +388,7 @@ describe("staff.update — role change (M)", () => {
       id: STAFF_ROW_ID,
       role: "admin",
       expectedTokenVersion: 2,
-    });
+    }, expect.anything());
     expect(result.role).toBe("admin");
   });
 

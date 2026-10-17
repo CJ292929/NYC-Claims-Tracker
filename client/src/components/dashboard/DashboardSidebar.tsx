@@ -12,6 +12,7 @@ import {
   LogOut,
   Loader2,
   ChevronDown,
+  History,
 } from 'lucide-react';
 import logoIcon from '@/assets/logos/logo-icon.png';
 
@@ -26,7 +27,8 @@ export type NavSection =
   | 'visits'
   | 'claims'
   | 'bulk-upload'
-  | 'staff';
+  | 'staff'
+  | 'activity-log';
 
 type IconType = React.ComponentType<{ className?: string }>;
 
@@ -94,7 +96,10 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
   },
   {
     label: 'Management',
-    items: [leaf('staff', 'Staff Management', UserCog)],
+    items: [
+      leaf('staff', 'Staff Management', UserCog),
+      leaf('activity-log', 'Activity Log', History),
+    ],
   },
 ];
 

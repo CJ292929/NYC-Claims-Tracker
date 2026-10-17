@@ -80,10 +80,32 @@ function makeFakeClaimsTable(seed: Row[] = []) {
     return chain;
   });
 
-  return { from, rows, insertRow: (r: Omit<Row, "id">) => { const row = { id: String(nextId++), ...r }; rows.push(row); return row; } };
+  // Fakes write_claim_record_with_audit (see the P4-P17 migration) against
+  // this SAME `rows` array — applyCms1500Enrichment's final write now goes
+  // through supabase.rpc(...) instead of a second .from("claims_records")
+  // call, so this reproduces the RPC's not-found/patient-mismatch error
+  // codes (P0010/P0011) and its "merge only the provided keys" patch
+  // semantics (plain Object.assign, since the real p_data here only ever
+  // carries the keys actually being changed).
+  const rpc = vi.fn((name: string, args: Record<string, unknown>) => {
+    if (name !== "write_claim_record_with_audit") throw new Error(`unexpected rpc: ${name}`);
+    const { p_id, p_patient_id, p_data } = args as { p_id: string | null; p_patient_id: string; p_data: Record<string, unknown> };
+    if (p_id) {
+      const row = rows.find(r => r.id === p_id);
+      if (!row) return Promise.resolve({ data: null, error: { code: "P0010" } });
+      if (row.patient_id !== p_patient_id) return Promise.resolve({ data: null, error: { code: "P0011" } });
+      Object.assign(row, p_data);
+      return Promise.resolve({ data: p_id, error: null });
+    }
+    const newRow = { id: String(nextId++), patient_id: p_patient_id, ...p_data };
+    rows.push(newRow);
+    return Promise.resolve({ data: newRow.id, error: null });
+  });
+
+  return { from, rpc, rows, insertRow: (r: Omit<Row, "id">) => { const row = { id: String(nextId++), ...r }; rows.push(row); return row; } };
 }
 
-const { tableMock } = vi.hoisted(() => ({ tableMock: { from: vi.fn() } }));
+const { tableMock } = vi.hoisted(() => ({ tableMock: { from: vi.fn(), rpc: vi.fn() } }));
 vi.mock("./supabase", () => ({ supabase: tableMock }));
 
 import {
@@ -91,6 +113,9 @@ import {
   patientHasAnyClaimRecords,
   applyCms1500Enrichment,
 } from "./db";
+import type { ActorContext } from "./actorIdentity";
+
+const ACTOR: ActorContext = { actorId: "actor-1", actorType: "owner", actorDisplay: "Owner" };
 
 const PATIENT_A = "11111111-1111-4111-8111-111111111111";
 const PATIENT_B = "22222222-2222-4222-8222-222222222222";
@@ -226,10 +251,11 @@ describe("patientHasAnyClaimRecords", () => {
 
 describe("applyCms1500Enrichment", () => {
   it("patches only visit/diagnosis/modifier/units -- never charge or any payment field", async () => {
-    const { from, rows } = makeFakeClaimsTable([
+    const { from, rpc, rows } = makeFakeClaimsTable([
       { id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110", charge_amount: 100, insurance_reimbursement: 80, patient_amount_paid: 20, patient_amount_due: 0, visit_number: null, diagnosis_codes: null, modifier: null, units_billed: null },
     ]);
     tableMock.from = from;
+    tableMock.rpc = rpc;
 
     await applyCms1500Enrichment({
       claimRecordId: "r1",
@@ -240,6 +266,7 @@ describe("applyCms1500Enrichment", () => {
       diagnosisCodes: "M54.5",
       modifier: "GP",
       unitsBilled: 1,
+      actor: ACTOR,
     });
 
     expect(rows[0].visit_number).toBe(2);
@@ -254,10 +281,11 @@ describe("applyCms1500Enrichment", () => {
   });
 
   it("ignores a CMS1500-supplied charge amount even if somehow passed in -- the function has no charge parameter at all", async () => {
-    const { from, rows } = makeFakeClaimsTable([
+    const { from, rpc, rows } = makeFakeClaimsTable([
       { id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110", charge_amount: 100 },
     ]);
     tableMock.from = from;
+    tableMock.rpc = rpc;
 
     await applyCms1500Enrichment({
       claimRecordId: "r1",
@@ -265,6 +293,7 @@ describe("applyCms1500Enrichment", () => {
       dateOfService: MAY_19,
       cptCodes: "97110",
       unitsBilled: 3,
+      actor: ACTOR,
     });
 
     expect(rows[0].charge_amount).toBe(100); // untouched regardless of what CMS1500 "saw"
@@ -272,23 +301,25 @@ describe("applyCms1500Enrichment", () => {
   });
 
   it("missing EOB modifier does not block CMS1500 from supplying it", async () => {
-    const { from, rows } = makeFakeClaimsTable([
+    const { from, rpc, rows } = makeFakeClaimsTable([
       { id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110", modifier: null },
     ]);
     tableMock.from = from;
+    tableMock.rpc = rpc;
 
-    await applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: MAY_19, cptCodes: "97110", modifier: "GP" });
+    await applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: MAY_19, cptCodes: "97110", modifier: "GP", actor: ACTOR });
     expect(rows[0].modifier).toBe("GP");
   });
 
   it("preserves existing values when an enrichment field is absent (null/undefined), including legitimate zeros", async () => {
-    const { from, rows } = makeFakeClaimsTable([
+    const { from, rpc, rows } = makeFakeClaimsTable([
       { id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110", visit_number: 1, diagnosis_codes: "M54.5", modifier: "GP", units_billed: 0 },
     ]);
     tableMock.from = from;
+    tableMock.rpc = rpc;
 
     // Re-import with only diagnosisCodes supplied -- visit/modifier/units absent.
-    await applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: MAY_19, cptCodes: "97110", diagnosisCodes: "M54.5" });
+    await applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: MAY_19, cptCodes: "97110", diagnosisCodes: "M54.5", actor: ACTOR });
 
     expect(rows[0].visit_number).toBe(1); // preserved
     expect(rows[0].modifier).toBe("GP"); // preserved
@@ -300,11 +331,12 @@ describe("applyCms1500Enrichment", () => {
   // commit step only ever patches the id it's told, never spills onto the
   // sibling repeated-line row, and never touches either row's money.
   it("with two repeated rows for the same date/CPT, enriching the one explicitly selected never touches its sibling or either row's money", async () => {
-    const { from, rows } = makeFakeClaimsTable([
+    const { from, rpc, rows } = makeFakeClaimsTable([
       { id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97530", source_line_index: 0, charge_amount: 75, insurance_reimbursement: 60, visit_number: null, diagnosis_codes: null, modifier: null, units_billed: null },
       { id: "r2", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97530", source_line_index: 1, charge_amount: 90, insurance_reimbursement: 70, visit_number: null, diagnosis_codes: null, modifier: null, units_billed: null },
     ]);
     tableMock.from = from;
+    tableMock.rpc = rpc;
 
     // Staff explicitly selected r2 as the target for this CMS1500 line.
     await applyCms1500Enrichment({
@@ -314,6 +346,7 @@ describe("applyCms1500Enrichment", () => {
       cptCodes: "97530",
       visitNumber: 4,
       modifier: "GP",
+      actor: ACTOR,
     });
 
     const r1 = rows.find(r => r.id === "r1")!;
@@ -330,12 +363,13 @@ describe("applyCms1500Enrichment", () => {
   });
 
   it("re-applying the identical enrichment twice (reimport) does not duplicate rows or change values", async () => {
-    const { from, rows } = makeFakeClaimsTable([
+    const { from, rpc, rows } = makeFakeClaimsTable([
       { id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110", charge_amount: 100, insurance_reimbursement: 80 },
     ]);
     tableMock.from = from;
+    tableMock.rpc = rpc;
 
-    const args = { claimRecordId: "r1", patientId: PATIENT_A, dateOfService: MAY_19, cptCodes: "97110", visitNumber: 2, modifier: "GP", unitsBilled: 1 };
+    const args = { claimRecordId: "r1", patientId: PATIENT_A, dateOfService: MAY_19, cptCodes: "97110", visitNumber: 2, modifier: "GP", unitsBilled: 1, actor: ACTOR };
     await applyCms1500Enrichment(args);
     await applyCms1500Enrichment(args);
 
@@ -346,46 +380,48 @@ describe("applyCms1500Enrichment", () => {
   });
 
   it("rejects a claimRecordId that does not belong to this patient (server-side ownership validation)", async () => {
-    const { from } = makeFakeClaimsTable([
+    const { from, rpc } = makeFakeClaimsTable([
       { id: "r1", patient_id: PATIENT_B, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110" },
     ]);
     tableMock.from = from;
+    tableMock.rpc = rpc;
 
     await expect(
-      applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: MAY_19, cptCodes: "97110", modifier: "GP" })
+      applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: MAY_19, cptCodes: "97110", modifier: "GP", actor: ACTOR })
     ).rejects.toThrow(/does not belong/i);
   });
 
   it("rejects a claimRecordId that no longer matches the service date/CPT (compatibility re-check)", async () => {
-    const { from } = makeFakeClaimsTable([
+    const { from, rpc } = makeFakeClaimsTable([
       { id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110" },
     ]);
     tableMock.from = from;
+    tableMock.rpc = rpc;
 
     await expect(
-      applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: SEP_1, cptCodes: "97110", modifier: "GP" })
+      applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: SEP_1, cptCodes: "97110", modifier: "GP", actor: ACTOR })
     ).rejects.toThrow(/does not belong|no longer matches/i);
   });
 
   it("throws rather than reporting success when the target row is deleted between the ownership check and the write (stale-target race)", async () => {
-    const { from, rows } = makeFakeClaimsTable([
+    const { from, rpc, rows } = makeFakeClaimsTable([
       { id: "r1", patient_id: PATIENT_A, auth_period: 1, date_of_service: "2026-05-19", cpt_codes: "97110", visit_number: null },
     ]);
-    let callCount = 0;
-    // applyCms1500Enrichment calls supabase.from("claims_records") twice:
-    // once for the ownership pre-check (passes -- the row still exists),
-    // once for the actual update+select. Simulate a concurrent delete
-    // landing in between -- the update's own re-applied predicate must then
-    // match zero rows, and that must throw, not resolve successfully having
-    // changed nothing.
-    tableMock.from = ((table: string) => {
-      callCount++;
-      if (callCount === 2) rows.length = 0;
-      return from(table);
-    }) as typeof from;
+    tableMock.from = from;
+    // applyCms1500Enrichment now does its ownership pre-check via .from(...)
+    // (passes -- the row still exists) and its actual write via
+    // supabase.rpc("write_claim_record_with_audit", ...). Simulate a
+    // concurrent delete landing in that window by clearing `rows` the moment
+    // the RPC is invoked, before it looks the row up by id -- the RPC fake's
+    // own not-found handling (P0010) must then make this throw, not resolve
+    // successfully having changed nothing.
+    tableMock.rpc = ((name: string, args: Record<string, unknown>) => {
+      rows.length = 0;
+      return rpc(name, args);
+    }) as typeof rpc;
 
     await expect(
-      applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: MAY_19, cptCodes: "97110", modifier: "GP" })
+      applyCms1500Enrichment({ claimRecordId: "r1", patientId: PATIENT_A, dateOfService: MAY_19, cptCodes: "97110", modifier: "GP", actor: ACTOR })
     ).rejects.toThrow(/does not belong|no longer matches/i);
   });
 

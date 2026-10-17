@@ -1,6 +1,7 @@
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
+import { RecordAttributionLine, RecordHistoryButton } from '@/components/dashboard/RecordHistoryDialog';
 
 interface SnapshotPatient {
   id: string;
@@ -70,6 +71,11 @@ export function PatientSnapshotPane({
         {alertStatus && (
           <Badge role="status" className={`text-xs px-2.5 py-1 rounded-full font-medium ${alertStatus.color}`}>{alertStatus.label}</Badge>
         )}
+      </div>
+
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <RecordAttributionLine entityType="patient" entityId={patient.id} />
+        <RecordHistoryButton entityType="patient" entityId={patient.id} />
       </div>
 
       <div className="grid grid-cols-3 gap-3">

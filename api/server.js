@@ -156,7 +156,9 @@ __export(db_exports, {
   ClaimLineIdentityAmbiguousError: () => ClaimLineIdentityAmbiguousError,
   ClaimRecordNotFoundError: () => ClaimRecordNotFoundError,
   ClaimRecordPatientMismatchError: () => ClaimRecordPatientMismatchError,
+  ClinicUserConflictError: () => ClinicUserConflictError,
   FOLLOW_UP_STALE_DAYS: () => FOLLOW_UP_STALE_DAYS,
+  LastActiveAccountManagerError: () => LastActiveAccountManagerError,
   adminResetClinicUserPassword: () => adminResetClinicUserPassword,
   aggregateClaimStatusCounts: () => aggregateClaimStatusCounts,
   applyCms1500Enrichment: () => applyCms1500Enrichment,
@@ -191,7 +193,9 @@ __export(db_exports, {
   getPatientById: () => getPatientById,
   getUserByOpenId: () => getUserByOpenId,
   getVisitsByPatientId: () => getVisitsByPatientId,
+  listActivityLog: () => listActivityLog,
   listClinicUsers: () => listClinicUsers,
+  listHistoryForEntity: () => listHistoryForEntity,
   listInsurerCatalog: () => listInsurerCatalog,
   patientHasAnyClaimRecords: () => patientHasAnyClaimRecords,
   reactivateClinicUser: () => reactivateClinicUser,
@@ -328,36 +332,45 @@ async function getPatientById(id) {
   }
   return data ? toPatient(data) : void 0;
 }
-async function createPatient(data) {
-  const { data: row, error } = await supabase.from("patients").insert({
-    name: data.name,
-    insurance: data.insurance ?? "",
-    auth_date: data.authDate ? data.authDate.toISOString().split("T")[0] : null,
-    auth_valid_until: data.authValidUntil ?? null
-  }).select("id").single();
+async function createPatient(data, actor) {
+  const payload = { name: data.name };
+  if (data.insurance !== void 0) payload.insurance = data.insurance;
+  if (data.authDate !== void 0) {
+    payload.auth_date = data.authDate ? data.authDate.toISOString().split("T")[0] : null;
+  }
+  if (data.authValidUntil !== void 0) payload.auth_valid_until = data.authValidUntil ?? null;
+  const { data: id, error } = await supabase.rpc("write_patient_with_audit", {
+    p_id: null,
+    p_data: payload,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_action: "PATIENT_CREATE"
+  });
   if (error) {
     console.error("[Supabase] createPatient:", error);
     throw error;
   }
-  return row.id;
+  return id;
 }
-async function updatePatient(id, data) {
-  const update = {};
-  if (data.name !== void 0) update.name = data.name;
-  if (data.insurance !== void 0) update.insurance = data.insurance;
+async function updatePatient(id, data, actor) {
+  const payload = {};
+  if (data.name !== void 0) payload.name = data.name;
+  if (data.insurance !== void 0) payload.insurance = data.insurance;
   if (data.authDate !== void 0) {
-    update.auth_date = data.authDate ? data.authDate.toISOString().split("T")[0] : null;
+    payload.auth_date = data.authDate ? data.authDate.toISOString().split("T")[0] : null;
   }
-  if (data.authValidUntil !== void 0) {
-    update.auth_valid_until = data.authValidUntil ?? null;
-  }
-  if (data.isActive !== void 0) {
-    update.is_active = data.isActive;
-  }
-  if (data.claimsStatus !== void 0) {
-    update.claims_status = data.claimsStatus;
-  }
-  const { error } = await supabase.from("patients").update(update).eq("id", id);
+  if (data.authValidUntil !== void 0) payload.auth_valid_until = data.authValidUntil ?? null;
+  if (data.claimsStatus !== void 0) payload.claims_status = data.claimsStatus;
+  if (Object.keys(payload).length === 0) return;
+  const { error } = await supabase.rpc("write_patient_with_audit", {
+    p_id: id,
+    p_data: payload,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_action: "PATIENT_UPDATE"
+  });
   if (error) {
     console.error("[Supabase] updatePatient:", error);
     throw error;
@@ -382,6 +395,46 @@ async function createAuditLog(entry) {
     console.error("[Supabase] createAuditLog:", error);
     throw error;
   }
+}
+function toAuditLogRow(row) {
+  return {
+    id: row.id,
+    entityType: row.entity_type ?? null,
+    entityId: row.entity_id ?? null,
+    patientId: row.patient_id ?? null,
+    actorId: row.actor_id ?? null,
+    actorType: row.actor_type ?? null,
+    actorDisplay: row.actor_display ?? null,
+    action: row.action,
+    beforeData: row.before_data ?? null,
+    afterData: row.after_data ?? null,
+    importBatchId: row.import_batch_id ?? null,
+    createdAt: new Date(row.created_at)
+  };
+}
+async function listHistoryForEntity(entityType, entityId) {
+  const { data, error } = await supabase.from("audit_logs").select("*").eq("entity_type", entityType).eq("entity_id", entityId).order("created_at", { ascending: false });
+  if (error) {
+    console.error("[Supabase] listHistoryForEntity:", error);
+    throw error;
+  }
+  return (data ?? []).map(toAuditLogRow);
+}
+async function listActivityLog(filters) {
+  let query = supabase.from("audit_logs").select("*", { count: "exact" });
+  if (filters.actorId) query = query.eq("actor_id", filters.actorId);
+  if (filters.entityType) query = query.eq("entity_type", filters.entityType);
+  if (filters.action) query = query.eq("action", filters.action);
+  if (filters.dateFrom) query = query.gte("created_at", filters.dateFrom.toISOString());
+  if (filters.dateTo) query = query.lte("created_at", filters.dateTo.toISOString());
+  const from = filters.page * filters.pageSize;
+  const to = from + filters.pageSize - 1;
+  const { data, error, count } = await query.order("created_at", { ascending: false }).range(from, to);
+  if (error) {
+    console.error("[Supabase] listActivityLog:", error);
+    throw error;
+  }
+  return { rows: (data ?? []).map(toAuditLogRow), total: count ?? 0 };
 }
 async function setPatientActive(id, isActive, dischargeDate, dischargeReason) {
   const update = { is_active: isActive };
@@ -413,7 +466,7 @@ async function getVisitsByPatientId(patientId) {
   }
   return (data ?? []).map(toVisitRecord);
 }
-async function createVisitRecord(data) {
+async function createVisitRecord(data, actor) {
   const { data: row, error } = await supabase.from("visit_records").insert({
     patient_id: data.patientId,
     sessions_authorized: data.sessionsAuthorized ?? null,
@@ -426,7 +479,8 @@ async function createVisitRecord(data) {
     auth_status: data.authStatus ?? "none",
     total_insurance_reimbursement: data.totalInsuranceReimbursement ?? null,
     total_patient_due: data.totalPatientDue ?? null,
-    total_patient_paid: data.totalPatientPaid ?? null
+    total_patient_paid: data.totalPatientPaid ?? null,
+    ...actor ? { created_by: actor.actorId, created_by_type: actor.actorType, updated_by: actor.actorId, updated_by_type: actor.actorType } : {}
   }).select("id").single();
   if (error) {
     console.error("[Supabase] createVisitRecord:", error);
@@ -434,8 +488,12 @@ async function createVisitRecord(data) {
   }
   return row.id;
 }
-async function updateVisitRecord(id, data) {
+async function updateVisitRecord(id, data, actor) {
   const update = {};
+  if (actor) {
+    update.updated_by = actor.actorId;
+    update.updated_by_type = actor.actorType;
+  }
   if (data.sessionsAuthorized !== void 0) update.sessions_authorized = data.sessionsAuthorized;
   if (data.sessionsRemaining !== void 0) update.sessions_remaining = data.sessionsRemaining;
   if (data.sessionNumber !== void 0) update.session_number = data.sessionNumber;
@@ -457,7 +515,7 @@ async function updateVisitRecord(id, data) {
     throw error;
   }
 }
-async function bulkCreateVisitRecords(records) {
+async function bulkCreateVisitRecords(records, actor) {
   if (records.length === 0) return;
   const rows = records.map((r) => ({
     patient_id: r.patientId,
@@ -468,7 +526,8 @@ async function bulkCreateVisitRecords(records) {
     date_of_service: r.dateOfService ? r.dateOfService.toISOString().split("T")[0] : null,
     new_auth: r.newAuth ?? null,
     date_ash_submitted: r.dateAshSubmitted ? r.dateAshSubmitted.toISOString().split("T")[0] : null,
-    auth_status: r.authStatus ?? "none"
+    auth_status: r.authStatus ?? "none",
+    ...actor ? { created_by: actor.actorId, created_by_type: actor.actorType, updated_by: actor.actorId, updated_by_type: actor.actorType } : {}
   }));
   const { error } = await supabase.from("visit_records").insert(rows);
   if (error) {
@@ -575,7 +634,7 @@ async function getMarkAsRequestedTargetVisitId(patientId) {
   const target = determineMarkAsRequestedTargetRow(data);
   return target?.id ?? null;
 }
-async function approveAndCreateNewBatch(patientId, sessionsAuthorized, authDate, newInsurance, authValidUntil) {
+async function approveAndCreateNewBatch(patientId, sessionsAuthorized, authDate, newInsurance, authValidUntil, actor) {
   const { data: periodStatusRows, error: periodStatusErr } = await supabase.from("visit_records").select("auth_period, sessions_authorized, date_of_service").eq("patient_id", patientId);
   if (periodStatusErr) {
     console.error("[Supabase] approveAndCreateNewBatch periodStatus:", periodStatusErr);
@@ -585,7 +644,7 @@ async function approveAndCreateNewBatch(patientId, sessionsAuthorized, authDate,
   const statusPeriods = Array.from(new Set(statusRows.map((r) => r.auth_period ?? 1))).sort((a, b) => a - b);
   const latestStatusPeriod = statusPeriods.length > 0 ? statusPeriods[statusPeriods.length - 1] : 1;
   const targetApprovalPeriod = determineActiveAuthPeriod(statusRows) ?? latestStatusPeriod;
-  const { error: approveErr } = await supabase.from("visit_records").update({ auth_status: "approved" }).eq("patient_id", patientId).eq("auth_period", targetApprovalPeriod);
+  const { error: approveErr } = await supabase.from("visit_records").update({ auth_status: "approved", updated_by: actor.actorId, updated_by_type: actor.actorType }).eq("patient_id", patientId).eq("auth_period", targetApprovalPeriod);
   if (approveErr) {
     console.error("[Supabase] approveAndCreateNewBatch approve:", approveErr);
     throw approveErr;
@@ -595,6 +654,8 @@ async function approveAndCreateNewBatch(patientId, sessionsAuthorized, authDate,
   if (newInsurance && newInsurance.trim()) patientUpdates.insurance = newInsurance.trim();
   if (authValidUntil !== void 0) patientUpdates.auth_valid_until = authValidUntil ?? null;
   if (Object.keys(patientUpdates).length > 0) {
+    patientUpdates.updated_by = actor.actorId;
+    patientUpdates.updated_by_type = actor.actorType;
     const { error: patErr } = await supabase.from("patients").update(patientUpdates).eq("id", patientId);
     if (patErr) {
       console.error("[Supabase] approveAndCreateNewBatch update patient:", patErr);
@@ -625,12 +686,33 @@ async function approveAndCreateNewBatch(patientId, sessionsAuthorized, authDate,
     auth_status: "none",
     insurance_company: batchInsurance
   }));
-  const { data: inserted, error: insertErr } = await supabase.from("visit_records").insert(newRows).select("id");
+  const stampedRows = newRows.map((r) => ({
+    ...r,
+    created_by: actor.actorId,
+    created_by_type: actor.actorType,
+    updated_by: actor.actorId,
+    updated_by_type: actor.actorType
+  }));
+  const { data: inserted, error: insertErr } = await supabase.from("visit_records").insert(stampedRows).select("id");
   if (insertErr) {
     console.error("[Supabase] approveAndCreateNewBatch insert:", insertErr);
     throw insertErr;
   }
   const newVisitIds = (inserted ?? []).map((r) => r.id);
+  const { error: auditErr } = await supabase.from("audit_logs").insert({
+    entity_type: "visit_record",
+    entity_id: patientId,
+    patient_id: patientId,
+    actor_id: actor.actorId,
+    actor_type: actor.actorType,
+    actor_display: actor.actorDisplay,
+    action: "AUTHORIZATION_APPROVED",
+    before_data: { auth_period: targetApprovalPeriod },
+    after_data: { new_auth_period: nextPeriod, sessions_authorized: sessionsAuthorized }
+  });
+  if (auditErr) {
+    console.error("[Supabase] approveAndCreateNewBatch audit insert failed (approval already applied):", auditErr);
+  }
   return { newVisitIds };
 }
 async function getCompletedPatients() {
@@ -695,23 +777,31 @@ async function listClinicUsers() {
   }
   return (data ?? []).map(toClinicUser);
 }
-async function createClinicUser(data) {
-  const { data: row, error } = await supabase.from("clinic_users").insert({
-    username: data.username,
-    password_hash: data.passwordHash,
-    name: data.name,
-    email: data.email,
-    department: data.department,
-    role: data.role,
-    status: data.status,
-    must_change_password: true,
-    token_version: 0
-  }).select().single();
+function mapClinicUserRpcError(error, id) {
+  if (error.code === "P0021" || error.code === "P0022") throw new ClinicUserConflictError(id);
+  if (error.code === "P0023") throw new LastActiveAccountManagerError();
+  throw error;
+}
+async function createClinicUser(data, actor) {
+  const { data: id, error } = await supabase.rpc("create_clinic_user_with_audit", {
+    p_username: data.username,
+    p_password_hash: data.passwordHash,
+    p_name: data.name,
+    p_email: data.email,
+    p_department: data.department,
+    p_role: data.role,
+    p_status: data.status,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay
+  });
   if (error) {
     console.error("[Supabase] createClinicUser:", error);
     throw error;
   }
-  return toClinicUser(row);
+  const created = await getClinicUserById(id);
+  if (!created) throw new Error("createClinicUser: row not found immediately after insert");
+  return created;
 }
 async function updateClinicUserProfile(id, data) {
   const update = {};
@@ -728,45 +818,62 @@ async function updateClinicUserProfile(id, data) {
   }
   return row ? toClinicUser(row) : void 0;
 }
-async function updateClinicUserRole(params) {
-  const { data, error } = await supabase.from("clinic_users").update({ role: params.role, token_version: params.expectedTokenVersion + 1 }).eq("id", params.id).eq("token_version", params.expectedTokenVersion).select().maybeSingle();
+async function updateClinicUserRole(params, actor) {
+  const { error } = await supabase.rpc("update_clinic_user_role_with_audit", {
+    p_id: params.id,
+    p_role: params.role,
+    p_expected_token_version: params.expectedTokenVersion,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay
+  });
   if (error) {
     console.error("[Supabase] updateClinicUserRole:", error);
-    throw error;
+    mapClinicUserRpcError(error, params.id);
   }
-  return data ? toClinicUser(data) : void 0;
+  return getClinicUserById(params.id);
 }
-async function adminResetClinicUserPassword(params) {
-  const { data, error } = await supabase.from("clinic_users").update({
-    password_hash: params.passwordHash,
-    must_change_password: true,
-    token_version: params.expectedTokenVersion + 1
-  }).eq("id", params.id).eq("token_version", params.expectedTokenVersion).select().maybeSingle();
+async function adminResetClinicUserPassword(params, actor) {
+  const { error } = await supabase.rpc("admin_reset_clinic_user_password_with_audit", {
+    p_id: params.id,
+    p_password_hash: params.passwordHash,
+    p_expected_token_version: params.expectedTokenVersion,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay
+  });
   if (error) {
     console.error("[Supabase] adminResetClinicUserPassword:", error);
-    throw error;
+    mapClinicUserRpcError(error, params.id);
   }
-  return data ? toClinicUser(data) : void 0;
+  return getClinicUserById(params.id);
 }
-async function archiveClinicUser(params) {
-  const { data, error } = await supabase.from("clinic_users").update({
-    status: "archived",
-    archived_at: (/* @__PURE__ */ new Date()).toISOString(),
-    token_version: params.expectedTokenVersion + 1
-  }).eq("id", params.id).eq("token_version", params.expectedTokenVersion).select().maybeSingle();
+async function archiveClinicUser(params, actor) {
+  const { error } = await supabase.rpc("archive_clinic_user_with_audit", {
+    p_id: params.id,
+    p_expected_token_version: params.expectedTokenVersion,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay
+  });
   if (error) {
     console.error("[Supabase] archiveClinicUser:", error);
-    throw error;
+    mapClinicUserRpcError(error, params.id);
   }
-  return data ? toClinicUser(data) : void 0;
+  return getClinicUserById(params.id);
 }
-async function reactivateClinicUser(id) {
-  const { data, error } = await supabase.from("clinic_users").update({ status: "active", archived_at: null }).eq("id", id).select().maybeSingle();
+async function reactivateClinicUser(id, actor) {
+  const { error } = await supabase.rpc("reactivate_clinic_user_with_audit", {
+    p_id: id,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay
+  });
   if (error) {
     console.error("[Supabase] reactivateClinicUser:", error);
-    throw error;
+    mapClinicUserRpcError(error, id);
   }
-  return data ? toClinicUser(data) : void 0;
+  return getClinicUserById(id);
 }
 function daysSince(dateStr, now) {
   if (!dateStr) return null;
@@ -819,87 +926,91 @@ async function getClaimsByPatientAndPeriod(patientId, authPeriod) {
   }
   return data ?? [];
 }
-async function createClaimRecord(data) {
-  const { data: row, error } = await supabase.from("claims_records").insert({
-    patient_id: data.patientId,
-    auth_period: data.authPeriod,
-    place_of_service: data.placeOfService ?? null,
-    date_of_service: data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null,
-    visit_number: data.visitNumber ?? null,
-    cpt_codes: data.cptCodes ?? null,
-    units_billed: data.unitsBilled ?? null,
-    diagnosis_codes: data.diagnosisCodes ?? null,
-    modifier: data.modifier ?? null,
-    charge_amount: data.chargeAmount ?? null,
-    insurance_reimbursement: data.insuranceReimbursement ?? null,
-    patient_amount_paid: data.patientAmountPaid ?? null,
-    patient_amount_due: data.patientAmountDue ?? null,
-    insurance_billed: data.insuranceBilled ?? null,
-    oa_claim_number: data.oaClaimNumber ?? null,
-    claim_submitted_date: data.claimSubmittedDate ? data.claimSubmittedDate.toISOString().split("T")[0] : null,
-    expire_bcbs_claim_number: data.expireBcbsClaimNumber ?? null,
-    claim_status: data.claimStatus ?? "submitted",
-    payment_received: data.paymentReceived ?? null,
-    check_date: data.checkDate ? data.checkDate.toISOString().split("T")[0] : null,
-    check_number_virtual_card: data.checkNumberVirtualCard ?? null,
-    date_received: data.dateReceived ? data.dateReceived.toISOString().split("T")[0] : null,
-    date_of_appeal: data.dateOfAppeal ? data.dateOfAppeal.toISOString().split("T")[0] : null,
-    reference_no: data.referenceNo ?? null,
-    lmn: data.lmn ?? null,
-    source_line_index: data.sourceLineIndex ?? null
-  }).select("id").single();
-  if (error) {
-    console.error("[Supabase] createClaimRecord:", error);
-    throw error;
-  }
-  return row.id;
+function claimFieldsToPayload(data) {
+  const payload = {};
+  if (data.authPeriod !== void 0) payload.auth_period = data.authPeriod;
+  if (data.placeOfService !== void 0) payload.place_of_service = data.placeOfService;
+  if (data.dateOfService !== void 0) payload.date_of_service = dateOnly(data.dateOfService);
+  if (data.visitNumber !== void 0) payload.visit_number = data.visitNumber;
+  if (data.cptCodes !== void 0) payload.cpt_codes = data.cptCodes;
+  if (data.unitsBilled !== void 0) payload.units_billed = data.unitsBilled;
+  if (data.diagnosisCodes !== void 0) payload.diagnosis_codes = data.diagnosisCodes;
+  if (data.modifier !== void 0) payload.modifier = data.modifier;
+  if (data.chargeAmount !== void 0) payload.charge_amount = data.chargeAmount;
+  if (data.insuranceReimbursement !== void 0) payload.insurance_reimbursement = data.insuranceReimbursement;
+  if (data.patientAmountPaid !== void 0) payload.patient_amount_paid = data.patientAmountPaid;
+  if (data.patientAmountDue !== void 0) payload.patient_amount_due = data.patientAmountDue;
+  if (data.insuranceBilled !== void 0) payload.insurance_billed = data.insuranceBilled;
+  if (data.oaClaimNumber !== void 0) payload.oa_claim_number = data.oaClaimNumber;
+  if (data.claimSubmittedDate !== void 0) payload.claim_submitted_date = dateOnly(data.claimSubmittedDate);
+  if (data.expireBcbsClaimNumber !== void 0) payload.expire_bcbs_claim_number = data.expireBcbsClaimNumber;
+  if (data.claimStatus !== void 0) payload.claim_status = data.claimStatus;
+  if (data.paymentReceived !== void 0) payload.payment_received = data.paymentReceived;
+  if (data.checkDate !== void 0) payload.check_date = dateOnly(data.checkDate);
+  if (data.checkNumberVirtualCard !== void 0) payload.check_number_virtual_card = data.checkNumberVirtualCard;
+  if (data.dateReceived !== void 0) payload.date_received = dateOnly(data.dateReceived);
+  if (data.dateOfAppeal !== void 0) payload.date_of_appeal = dateOnly(data.dateOfAppeal);
+  if (data.referenceNo !== void 0) payload.reference_no = data.referenceNo;
+  if (data.lmn !== void 0) payload.lmn = data.lmn;
+  if (data.sourceLineIndex !== void 0) payload.source_line_index = data.sourceLineIndex;
+  return payload;
 }
-async function updateClaimRecord(id, data) {
-  const update = {};
-  if (data.placeOfService !== void 0) update.place_of_service = data.placeOfService;
-  if (data.dateOfService !== void 0) {
-    update.date_of_service = data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null;
-  }
-  if (data.visitNumber !== void 0) update.visit_number = data.visitNumber;
-  if (data.cptCodes !== void 0) update.cpt_codes = data.cptCodes;
-  if (data.unitsBilled !== void 0) update.units_billed = data.unitsBilled;
-  if (data.diagnosisCodes !== void 0) update.diagnosis_codes = data.diagnosisCodes;
-  if (data.modifier !== void 0) update.modifier = data.modifier;
-  if (data.chargeAmount !== void 0) update.charge_amount = data.chargeAmount;
-  if (data.insuranceReimbursement !== void 0) update.insurance_reimbursement = data.insuranceReimbursement;
-  if (data.patientAmountPaid !== void 0) update.patient_amount_paid = data.patientAmountPaid;
-  if (data.patientAmountDue !== void 0) update.patient_amount_due = data.patientAmountDue;
-  if (data.insuranceBilled !== void 0) update.insurance_billed = data.insuranceBilled;
-  if (data.oaClaimNumber !== void 0) update.oa_claim_number = data.oaClaimNumber;
-  if (data.claimSubmittedDate !== void 0) {
-    update.claim_submitted_date = data.claimSubmittedDate ? data.claimSubmittedDate.toISOString().split("T")[0] : null;
-  }
-  if (data.expireBcbsClaimNumber !== void 0) update.expire_bcbs_claim_number = data.expireBcbsClaimNumber;
-  if (data.claimStatus !== void 0) update.claim_status = data.claimStatus;
-  if (data.paymentReceived !== void 0) update.payment_received = data.paymentReceived;
-  if (data.checkDate !== void 0) {
-    update.check_date = data.checkDate ? data.checkDate.toISOString().split("T")[0] : null;
-  }
-  if (data.checkNumberVirtualCard !== void 0) update.check_number_virtual_card = data.checkNumberVirtualCard;
-  if (data.dateReceived !== void 0) {
-    update.date_received = data.dateReceived ? data.dateReceived.toISOString().split("T")[0] : null;
-  }
-  if (data.dateOfAppeal !== void 0) {
-    update.date_of_appeal = data.dateOfAppeal ? data.dateOfAppeal.toISOString().split("T")[0] : null;
-  }
-  if (data.referenceNo !== void 0) update.reference_no = data.referenceNo;
-  const { error } = await supabase.from("claims_records").update(update).eq("id", id);
+async function writeClaimRecordWithAudit(params) {
+  const { data: id, error } = await supabase.rpc("write_claim_record_with_audit", {
+    p_id: params.id,
+    p_patient_id: params.patientId,
+    p_data: params.payload,
+    p_actor_id: params.actor.actorId,
+    p_actor_type: params.actor.actorType,
+    p_actor_display: params.actor.actorDisplay,
+    p_action: params.action,
+    p_import_batch_id: params.importBatchId ?? null
+  });
   if (error) {
-    console.error("[Supabase] updateClaimRecord:", error);
+    console.error("[Supabase] writeClaimRecordWithAudit:", error);
+    if (error.code === "P0010") throw new ClaimRecordNotFoundError(params.id ?? "");
+    if (error.code === "P0011") throw new ClaimRecordPatientMismatchError(params.id ?? "", params.patientId);
     throw error;
   }
+  return id;
+}
+async function createClaimRecord(data, actor, importBatchId) {
+  const payload = claimFieldsToPayload(data);
+  payload.claim_status = data.claimStatus ?? "submitted";
+  return writeClaimRecordWithAudit({
+    id: null,
+    patientId: data.patientId,
+    payload,
+    actor,
+    action: "CLAIM_RECORD_CREATE",
+    importBatchId
+  });
+}
+async function updateClaimRecord(id, data, actor) {
+  const payload = claimFieldsToPayload(data);
+  if (Object.keys(payload).length === 0) return;
+  const { data: row, error: lookupErr } = await supabase.from("claims_records").select("patient_id").eq("id", id).maybeSingle();
+  if (lookupErr) {
+    console.error("[Supabase] updateClaimRecord (lookup):", lookupErr);
+    throw lookupErr;
+  }
+  if (!row) throw new ClaimRecordNotFoundError(id);
+  await writeClaimRecordWithAudit({
+    id,
+    patientId: row.patient_id,
+    payload,
+    actor,
+    action: "CLAIM_RECORD_UPDATE"
+  });
 }
 async function deleteClaimRecordWithAudit(params) {
-  const { claimId, patientId, actorId } = params;
+  const { claimId, patientId, actorId, actorType, actorDisplay } = params;
   const { error } = await supabase.rpc("delete_claim_record_with_audit", {
     p_claim_id: claimId,
     p_patient_id: patientId,
-    p_actor_id: actorId
+    p_actor_id: actorId,
+    p_actor_type: actorType ?? null,
+    p_actor_display: actorDisplay ?? null
   });
   if (error) {
     if (error.code === "P0010") {
@@ -973,22 +1084,23 @@ async function applyCms1500Enrichment(params) {
   if (params.modifier != null) patch.modifier = params.modifier;
   if (params.unitsBilled != null) patch.units_billed = params.unitsBilled;
   if (Object.keys(patch).length === 0) return;
-  let updateQuery = supabase.from("claims_records").update(patch).eq("id", params.claimRecordId).eq("patient_id", params.patientId).eq("date_of_service", dosStr);
-  updateQuery = params.cptCodes ? updateQuery.eq("cpt_codes", params.cptCodes) : updateQuery.is("cpt_codes", null);
-  const { data: updated, error } = await updateQuery.select("id");
-  if (error) {
-    console.error("[Supabase] applyCms1500Enrichment (update):", error);
-    throw error;
-  }
-  if (!updated || updated.length === 0) {
-    throw new Error("Selected claim row does not belong to this patient or no longer matches the service date/CPT code.");
-  }
-  if (updated.length > 1) {
-    console.error(`[Supabase] applyCms1500Enrichment: update matched ${updated.length} rows for claimRecordId ${params.claimRecordId} -- expected exactly 1.`);
-    throw new Error("Update affected more than one row unexpectedly \u2014 aborting rather than risk patching the wrong claim.");
+  try {
+    await writeClaimRecordWithAudit({
+      id: params.claimRecordId,
+      patientId: params.patientId,
+      payload: patch,
+      actor: params.actor,
+      action: "CLAIM_RECORD_CMS1500_ENRICHMENT",
+      importBatchId: params.importBatchId
+    });
+  } catch (err) {
+    if (err instanceof ClaimRecordNotFoundError || err instanceof ClaimRecordPatientMismatchError) {
+      throw new Error("Selected claim row does not belong to this patient or no longer matches the service date/CPT code.");
+    }
+    throw err;
   }
 }
-async function upsertClaimRecord(data) {
+async function upsertClaimRecord(data, actor, importBatchId) {
   const dosStr = data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null;
   const baseQuery = () => {
     let q = supabase.from("claims_records").select("id").eq("patient_id", data.patientId).eq("auth_period", data.authPeriod).eq("date_of_service", dosStr);
@@ -1008,7 +1120,11 @@ async function upsertClaimRecord(data) {
       if (!existingId) {
         const { data: legacy, error: legacyErr } = await baseQuery().is("source_line_index", null).maybeSingle();
         if (legacyErr) {
-          throw new ClaimLineIdentityAmbiguousError(data.patientId, dosStr, data.cptCodes ?? null, data.sourceLineIndex);
+          if (legacyErr.code === "PGRST116") {
+            throw new ClaimLineIdentityAmbiguousError(data.patientId, dosStr, data.cptCodes ?? null, data.sourceLineIndex);
+          }
+          console.error("[Supabase] upsertClaimRecord (legacy line-index lookup):", legacyErr);
+          throw legacyErr;
         }
         const legacyId = legacy ? legacy.id : null;
         if (legacyId && data.sourceLineIndex === 0) {
@@ -1053,15 +1169,18 @@ async function upsertClaimRecord(data) {
     if (data.lmn != null) patch.lmn = data.lmn;
     if (promoteLegacyRow) patch.source_line_index = 0;
     if (Object.keys(patch).length > 0) {
-      const { error } = await supabase.from("claims_records").update(patch).eq("id", existingId);
-      if (error) {
-        console.error("[Supabase] upsertClaimRecord (update):", error);
-        throw error;
-      }
+      await writeClaimRecordWithAudit({
+        id: existingId,
+        patientId: data.patientId,
+        payload: patch,
+        actor,
+        action: "CLAIM_RECORD_UPDATE",
+        importBatchId
+      });
     }
     return existingId;
   }
-  return createClaimRecord(data);
+  return createClaimRecord(data, actor, importBatchId);
 }
 async function listInsurerCatalog() {
   const { data, error } = await supabase.from("insurer_catalog").select("*").order("name", { ascending: true });
@@ -1079,8 +1198,8 @@ async function getInsurerCatalogEntryByNormalizedName(normalizedName) {
   }
   return data ? toInsurerCatalogEntry(data) : void 0;
 }
-async function createInsurerCatalogEntry(params) {
-  const { data, error } = await supabase.from("insurer_catalog").insert({ name: params.name }).select().single();
+async function createInsurerCatalogEntry(params, actor) {
+  const { data, error } = await supabase.from("insurer_catalog").insert({ name: params.name, created_by: actor.actorId, created_by_type: actor.actorType }).select().single();
   if (error) {
     console.error("[Supabase] createInsurerCatalogEntry:", error);
     throw error;
@@ -1111,7 +1230,7 @@ async function reactivateInsurerCatalogEntry(id, actorId) {
   }
   return toInsurerCatalogEntry(data);
 }
-var FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, REIMBURSEMENT_EVIDENCE_COLUMNS, ClaimLineIdentityAmbiguousError;
+var LastActiveAccountManagerError, ClinicUserConflictError, FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, dateOnly, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, REIMBURSEMENT_EVIDENCE_COLUMNS, ClaimLineIdentityAmbiguousError;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
@@ -1120,6 +1239,18 @@ var init_db = __esm({
     init_username();
     init_authPeriodMetrics();
     init_authUrgency();
+    LastActiveAccountManagerError = class extends Error {
+      constructor() {
+        super("This is the only active admin account \u2014 it cannot be demoted or deactivated.");
+        this.name = "LastActiveAccountManagerError";
+      }
+    };
+    ClinicUserConflictError = class extends Error {
+      constructor(id) {
+        super(`Staff account ${id} changed during this request`);
+        this.name = "ClinicUserConflictError";
+      }
+    };
     FOLLOW_UP_STALE_DAYS = 30;
     FOLLOW_UP_URGENCY_RANK = {
       rejected: 1,
@@ -1148,6 +1279,7 @@ var init_db = __esm({
       "rejected",
       "resubmitted"
     ];
+    dateOnly = (d) => d ? d.toISOString().split("T")[0] : null;
     ClaimRecordNotFoundError = class extends Error {
       constructor(id) {
         super(`Claim record ${id} not found`);
@@ -4085,6 +4217,25 @@ var systemRouter = router({
 // server/routers.ts
 init_db();
 
+// server/actorIdentity.ts
+function getActorContext(user) {
+  if (user.clinicUser) {
+    return {
+      actorId: user.clinicUser.clinicUserId,
+      actorType: "clinic_user",
+      actorDisplay: user.clinicUser.name || user.clinicUser.username
+    };
+  }
+  return {
+    actorId: user.id,
+    actorType: "owner",
+    actorDisplay: user.name || "Owner"
+  };
+}
+
+// server/routers.ts
+import { randomUUID } from "crypto";
+
 // shared/insuranceCatalog.ts
 function normalizeInsurerName(name) {
   return name.trim().replace(/\s+/g, " ").toLowerCase();
@@ -4363,7 +4514,7 @@ var appRouter = router({
         password: z2.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
         confirmPassword: z2.string().min(1)
       })
-    ).mutation(async ({ input }) => {
+    ).mutation(async ({ ctx, input }) => {
       if (input.password !== input.confirmPassword) {
         throw new TRPCError3({ code: "BAD_REQUEST", message: "Passwords do not match" });
       }
@@ -4382,7 +4533,7 @@ var appRouter = router({
           department: input.department || null,
           role: input.role,
           status: input.status
-        });
+        }, getActorContext(ctx.user));
         return toSafeStaff(created);
       } catch (err) {
         if (err?.code === "23505") {
@@ -4404,13 +4555,24 @@ var appRouter = router({
       const current = await getClinicUserById(id);
       if (!current) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
       if (role !== void 0 && role !== current.role) {
+        const isOwner = !ctx.user.clinicUser && ctx.user.role === "admin";
+        if (!isOwner) {
+          throw new TRPCError3({ code: "FORBIDDEN", message: "Only the owner can change account roles." });
+        }
         const isSelf = ctx.user.clinicUser?.clinicUserId === id;
         if (isSelf) {
           throw new TRPCError3({ code: "FORBIDDEN", message: "You cannot change your own role." });
         }
-        const updated = await updateClinicUserRole({ id, role, expectedTokenVersion: current.tokenVersion });
-        if (!updated) {
-          throw new TRPCError3({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+        try {
+          await updateClinicUserRole({ id, role, expectedTokenVersion: current.tokenVersion }, getActorContext(ctx.user));
+        } catch (err) {
+          if (err instanceof LastActiveAccountManagerError) {
+            throw new TRPCError3({ code: "BAD_REQUEST", message: err.message });
+          }
+          if (err instanceof ClinicUserConflictError) {
+            throw new TRPCError3({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+          }
+          throw err;
         }
       }
       const profileFields = {};
@@ -4430,22 +4592,26 @@ var appRouter = router({
         password: z2.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
         confirmPassword: z2.string().min(1)
       })
-    ).mutation(async ({ input }) => {
+    ).mutation(async ({ ctx, input }) => {
       if (input.password !== input.confirmPassword) {
         throw new TRPCError3({ code: "BAD_REQUEST", message: "Passwords do not match" });
       }
       const current = await getClinicUserById(input.id);
       if (!current) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
       const passwordHash = await bcrypt.hash(input.password, 10);
-      const updated = await adminResetClinicUserPassword({
-        id: input.id,
-        passwordHash,
-        expectedTokenVersion: current.tokenVersion
-      });
-      if (!updated) {
-        throw new TRPCError3({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+      try {
+        const updated = await adminResetClinicUserPassword({
+          id: input.id,
+          passwordHash,
+          expectedTokenVersion: current.tokenVersion
+        }, getActorContext(ctx.user));
+        return toSafeStaff(updated);
+      } catch (err) {
+        if (err instanceof ClinicUserConflictError) {
+          throw new TRPCError3({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+        }
+        throw err;
       }
-      return toSafeStaff(updated);
     }),
     archive: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ ctx, input }) => {
       const isSelf = ctx.user.clinicUser?.clinicUserId === input.id;
@@ -4454,16 +4620,26 @@ var appRouter = router({
       }
       const current = await getClinicUserById(input.id);
       if (!current) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
-      const updated = await archiveClinicUser({ id: input.id, expectedTokenVersion: current.tokenVersion });
-      if (!updated) {
-        throw new TRPCError3({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+      try {
+        const updated = await archiveClinicUser({ id: input.id, expectedTokenVersion: current.tokenVersion }, getActorContext(ctx.user));
+        return toSafeStaff(updated);
+      } catch (err) {
+        if (err instanceof LastActiveAccountManagerError) {
+          throw new TRPCError3({ code: "BAD_REQUEST", message: err.message });
+        }
+        if (err instanceof ClinicUserConflictError) {
+          throw new TRPCError3({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+        }
+        throw err;
       }
-      return toSafeStaff(updated);
     }),
-    reactivate: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
-      const updated = await reactivateClinicUser(input.id);
+    reactivate: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ ctx, input }) => {
+      const updated = await reactivateClinicUser(input.id, getActorContext(ctx.user));
       if (!updated) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
       return toSafeStaff(updated);
+    }),
+    history: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
+      return listHistoryForEntity("clinic_user", input.id);
     })
   }),
   // ── Patients ────────────────────────────────────────────────────────────────
@@ -4484,13 +4660,13 @@ var appRouter = router({
         authValidUntil: z2.number().nullable().optional()
         // Unix ms timestamp
       })
-    ).mutation(async ({ input }) => {
+    ).mutation(async ({ input, ctx }) => {
       const id = await createPatient({
         name: input.name,
         insurance: input.insurance,
         authDate: parseDate2(input.authDate),
         authValidUntil: input.authValidUntil ?? null
-      });
+      }, getActorContext(ctx.user));
       return { id };
     }),
     update: normalProtectedProcedure.input(
@@ -4519,14 +4695,7 @@ var appRouter = router({
         // Field omitted entirely → key absent → updatePatient leaves the
         // column untouched. Field present as "none" → explicit clear (NULL).
         ...claimsStatus !== void 0 ? { claimsStatus: claimsStatus === "none" ? null : claimsStatus } : {}
-      });
-      const changes = diffPatientUpdate(before, rest);
-      if (changes.length > 0) {
-        const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
-        for (const change of changes) {
-          await createAuditLog({ patientId: id, actorId, ...change });
-        }
-      }
+      }, getActorContext(ctx.user));
       return { success: true };
     }),
     delete: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
@@ -4541,6 +4710,9 @@ var appRouter = router({
     })).mutation(async ({ input }) => {
       await setPatientActive(input.id, input.isActive, input.dischargeDate, input.dischargeReason);
       return { success: true };
+    }),
+    history: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
+      return listHistoryForEntity("patient", input.id);
     })
   }),
   // ── Insurer Catalog (P4-P7) ─────────────────────────────────────────────────
@@ -4568,11 +4740,10 @@ var appRouter = router({
         if (existing.isActive) {
           throw new TRPCError3({ code: "CONFLICT", message: "This insurance company already exists" });
         }
-        const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
-        return await reactivateInsurerCatalogEntry(existing.id, actorId);
+        return await reactivateInsurerCatalogEntry(existing.id, getActorContext(ctx.user).actorId);
       }
       try {
-        return await createInsurerCatalogEntry({ name: input.name });
+        return await createInsurerCatalogEntry({ name: input.name }, getActorContext(ctx.user));
       } catch (err) {
         if (err?.code === "23505") {
           throw new TRPCError3({ code: "CONFLICT", message: "This insurance company already exists" });
@@ -4589,8 +4760,7 @@ var appRouter = router({
       if (!existing) {
         throw new TRPCError3({ code: "NOT_FOUND", message: "Insurance company not found" });
       }
-      const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
-      return await deactivateInsurerCatalogEntry(input.id, actorId);
+      return await deactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user).actorId);
     }),
     // Deliberate reactivation (P4-P13) from the Manage Insurance Companies
     // dialog — distinct from insurance.create's own reactivate-on-conflict
@@ -4601,8 +4771,7 @@ var appRouter = router({
       if (!existing) {
         throw new TRPCError3({ code: "NOT_FOUND", message: "Insurance company not found" });
       }
-      const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
-      return await reactivateInsurerCatalogEntry(input.id, actorId);
+      return await reactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user).actorId);
     })
   }),
   // ── Visit Records ────────────────────────────────────────────────────────────
@@ -4610,23 +4779,23 @@ var appRouter = router({
     listByPatient: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).query(async ({ input }) => {
       return getVisitsByPatientId(input.patientId);
     }),
-    create: normalProtectedProcedure.input(visitRecordInput.extend({ patientId: z2.string().uuid() })).mutation(async ({ input }) => {
+    create: normalProtectedProcedure.input(visitRecordInput.extend({ patientId: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
       const { patientId, dateOfService, dateAshSubmitted, ...rest } = input;
       const id = await createVisitRecord({
         patientId,
         ...rest,
         dateOfService: parseDate2(dateOfService),
         dateAshSubmitted: parseDate2(dateAshSubmitted)
-      });
+      }, getActorContext(ctx.user));
       return { id };
     }),
-    update: normalProtectedProcedure.input(visitRecordInput.extend({ id: z2.string().uuid() })).mutation(async ({ input }) => {
+    update: normalProtectedProcedure.input(visitRecordInput.extend({ id: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
       const { id, dateOfService, dateAshSubmitted, ...rest } = input;
       await updateVisitRecord(id, {
         ...rest,
         ...dateOfService !== void 0 ? { dateOfService: parseDate2(dateOfService) } : {},
         ...dateAshSubmitted !== void 0 ? { dateAshSubmitted: parseDate2(dateAshSubmitted) } : {}
-      });
+      }, getActorContext(ctx.user));
       return { success: true };
     }),
     bulkCreate: normalProtectedProcedure.input(
@@ -4634,7 +4803,7 @@ var appRouter = router({
         patientId: z2.string().uuid(),
         records: z2.array(visitRecordInput)
       })
-    ).mutation(async ({ input }) => {
+    ).mutation(async ({ input, ctx }) => {
       const rows = input.records.map((r) => ({
         patientId: input.patientId,
         sessionsAuthorized: r.sessionsAuthorized ?? null,
@@ -4646,7 +4815,7 @@ var appRouter = router({
         dateAshSubmitted: parseDate2(r.dateAshSubmitted),
         authStatus: r.authStatus ?? "none"
       }));
-      await bulkCreateVisitRecords(rows);
+      await bulkCreateVisitRecords(rows, getActorContext(ctx.user));
       return { success: true };
     }),
     // Returns urgency summaries for ALL patients — used by the homepage alert panel
@@ -4663,14 +4832,15 @@ var appRouter = router({
       // optional insurance change for new period
       authValidUntil: z2.number().nullable().optional()
       // Unix ms timestamp for expiry
-    })).mutation(async ({ input }) => {
+    })).mutation(async ({ input, ctx }) => {
       const authDate = input.authDate ? /* @__PURE__ */ new Date(input.authDate + "T00:00:00Z") : null;
       const { newVisitIds } = await approveAndCreateNewBatch(
         input.patientId,
         input.sessionsAuthorized,
         authDate,
         input.newInsurance,
-        input.authValidUntil ?? void 0
+        input.authValidUntil ?? void 0,
+        getActorContext(ctx.user)
       );
       return { success: true, newVisitCount: newVisitIds.length };
     }),
@@ -4680,16 +4850,20 @@ var appRouter = router({
     }),
     // Sets the active-period visit row (same period getAuthAlertSummaries is
     // showing) to authStatus=pending + today's dateAshSubmitted
-    markAsRequested: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).mutation(async ({ input }) => {
+    markAsRequested: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
       const visitId = await getMarkAsRequestedTargetVisitId(input.patientId);
       if (!visitId) throw new TRPCError3({ code: "NOT_FOUND", message: "No visit records found for this patient" });
       const today = /* @__PURE__ */ new Date();
       const todayMidnight = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+      const actor = getActorContext(ctx.user);
       await updateVisitRecord(visitId, {
         authStatus: "pending",
         dateAshSubmitted: todayMidnight
-      });
+      }, actor);
       return { success: true, visitId, date: todayMidnight.toISOString().split("T")[0] };
+    }),
+    historyForPatient: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).query(async ({ input }) => {
+      return listHistoryForEntity("visit_record", input.patientId);
     })
   }),
   claims: router({
@@ -4722,7 +4896,7 @@ var appRouter = router({
       dateOfAppeal: z2.string().nullable().optional(),
       referenceNo: z2.string().nullable().optional(),
       lmn: z2.string().nullable().optional()
-    })).mutation(async ({ input }) => {
+    })).mutation(async ({ input, ctx }) => {
       const claimId = await createClaimRecord({
         patientId: input.patientId,
         authPeriod: input.authPeriod,
@@ -4749,7 +4923,7 @@ var appRouter = router({
         dateOfAppeal: parseDate2(input.dateOfAppeal),
         referenceNo: input.referenceNo ?? null,
         lmn: input.lmn ?? null
-      });
+      }, getActorContext(ctx.user));
       return { success: true, claimId };
     }),
     update: normalProtectedProcedure.input(z2.object({
@@ -4776,7 +4950,7 @@ var appRouter = router({
       dateReceived: z2.string().nullable().optional(),
       dateOfAppeal: z2.string().nullable().optional(),
       referenceNo: z2.string().nullable().optional()
-    })).mutation(async ({ input }) => {
+    })).mutation(async ({ input, ctx }) => {
       const { id, ...data } = input;
       const alertStatuses = ["denied", "rejected", "pended", "resubmitted"];
       const shouldResetResolved = data.claimStatus !== void 0 && alertStatuses.includes(data.claimStatus);
@@ -4807,16 +4981,18 @@ var appRouter = router({
         dateReceived: data.dateReceived !== void 0 ? parseDate2(data.dateReceived) : void 0,
         dateOfAppeal: data.dateOfAppeal !== void 0 ? parseDate2(data.dateOfAppeal) : void 0,
         referenceNo: data.referenceNo ?? void 0
-      });
+      }, getActorContext(ctx.user));
       return { success: true };
     }),
     delete: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid(), patientId: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
-      const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+      const actor = getActorContext(ctx.user);
       try {
         await deleteClaimRecordWithAudit({
           claimId: input.id,
           patientId: input.patientId,
-          actorId
+          actorId: actor.actorId,
+          actorType: actor.actorType,
+          actorDisplay: actor.actorDisplay
         });
       } catch (err) {
         if (err instanceof ClaimRecordNotFoundError) {
@@ -4861,7 +5037,7 @@ var appRouter = router({
       // doesn't have a notion of "repeated lines" (preserves exact prior
       // matching behavior for those callers).
       sourceLineIndex: z2.number().int().min(0).nullable().optional()
-    })).mutation(async ({ input }) => {
+    })).mutation(async ({ input, ctx }) => {
       try {
         await upsertClaimRecord({
           patientId: input.patientId,
@@ -4890,7 +5066,7 @@ var appRouter = router({
           dateOfAppeal: parseDate2(input.dateOfAppeal),
           referenceNo: input.referenceNo ?? null,
           lmn: input.lmn ?? null
-        });
+        }, getActorContext(ctx.user));
       } catch (err) {
         if (err instanceof ClaimLineIdentityAmbiguousError) {
           throw new TRPCError3({ code: "CONFLICT", message: err.message });
@@ -4898,6 +5074,9 @@ var appRouter = router({
         throw err;
       }
       return { success: true };
+    }),
+    historyForClaim: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
+      return listHistoryForEntity("claim_record", input.id);
     }),
     /**
      * CMS1500 enrichment, step 1 — preview only, no writes.
@@ -4970,7 +5149,9 @@ var appRouter = router({
         modifier: z2.string().nullable().optional(),
         unitsBilled: z2.number().nullable().optional()
       }))
-    })).mutation(async ({ input }) => {
+    })).mutation(async ({ input, ctx }) => {
+      const actor = getActorContext(ctx.user);
+      const importBatchId = randomUUID();
       const results = [];
       for (const line of input.lines) {
         try {
@@ -4984,7 +5165,9 @@ var appRouter = router({
             visitNumber: line.visitNumber ?? null,
             diagnosisCodes: line.diagnosisCodes ?? null,
             modifier: line.modifier ?? null,
-            unitsBilled: line.unitsBilled ?? null
+            unitsBilled: line.unitsBilled ?? null,
+            actor,
+            importBatchId
           });
           results.push({ lineKey: line.lineKey, status: "saved" });
         } catch (err) {
@@ -5051,10 +5234,12 @@ var appRouter = router({
         groupIndex: z2.number().int().nonnegative(),
         patientId: z2.string().uuid()
       })).optional()
-    })).mutation(async ({ input }) => {
+    })).mutation(async ({ input, ctx }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
       const allPatients = await getAllPatients();
       const uploadType = input.uploadType ?? "reimbursement";
+      const actor = getActorContext(ctx.user);
+      const importBatchId = randomUUID();
       const confirmedMatches = input.confirmedMatches ?? [];
       const seenGroupIndexes = /* @__PURE__ */ new Set();
       for (const c of confirmedMatches) {
@@ -5153,7 +5338,9 @@ var appRouter = router({
                   visitNumber: claim.visitNumber ?? null,
                   diagnosisCodes: line.diagnosisCodes ?? null,
                   modifier: line.modifier ?? null,
-                  unitsBilled: line.unitsBilled ?? null
+                  unitsBilled: line.unitsBilled ?? null,
+                  actor,
+                  importBatchId
                 });
                 claimsImported++;
               }
@@ -5204,7 +5391,7 @@ var appRouter = router({
                     dateReceived: parseDate2(claim.dateReceived),
                     dateOfAppeal: parseDate2(claim.dateOfAppeal),
                     lmn: claim.lmn ?? null
-                  });
+                  }, actor, importBatchId);
                   claimsImported++;
                 } catch (lineErr) {
                   if (lineErr instanceof ClaimLineIdentityAmbiguousError) {
@@ -5316,6 +5503,33 @@ var appRouter = router({
           patientId: row.patient_id
         }))
       );
+    })
+  }),
+  // ── Activity Log (P4-P17) ───────────────────────────────────────────────────
+  // Cross-entity, paginated, filterable view over audit_logs — owner/admin
+  // only, same gate as Staff Management (adminOrOwnerProcedure). Read-only:
+  // there is no mutation here, and audit_logs itself has no browser-reachable
+  // write path at all (service_role-only, see the P4-P17 migration's RLS).
+  activityLog: router({
+    list: adminOrOwnerProcedure.input(z2.object({
+      actorId: z2.string().uuid().optional(),
+      entityType: z2.enum(["patient", "visit_record", "claim_record", "insurer_catalog", "clinic_user"]).optional(),
+      action: z2.string().optional(),
+      dateFrom: z2.string().nullable().optional(),
+      // ISO date string "YYYY-MM-DD"
+      dateTo: z2.string().nullable().optional(),
+      page: z2.number().int().min(0).default(0),
+      pageSize: z2.number().int().min(1).max(200).default(50)
+    })).query(async ({ input }) => {
+      return listActivityLog({
+        actorId: input.actorId ?? null,
+        entityType: input.entityType ?? null,
+        action: input.action ?? null,
+        dateFrom: parseDate2(input.dateFrom),
+        dateTo: parseDate2(input.dateTo),
+        page: input.page,
+        pageSize: input.pageSize
+      });
     })
   })
 });

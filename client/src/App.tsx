@@ -8,6 +8,7 @@ import Dashboard from "./pages/Dashboard";
 import Login from "./pages/Login";
 import ChangePassword from "./pages/ChangePassword";
 import StaffManagement from "./pages/StaffManagement";
+import ActivityLog from "./pages/ActivityLog";
 import { trpc } from "@/lib/trpc";
 import { canManageStaff, isForcedPasswordChange } from "@/lib/authGate";
 import { useEffect } from "react";
@@ -96,6 +97,31 @@ function StaffManagementRoute() {
   return <StaffManagement />;
 }
 
+/** /activity-log: owner OAuth admins and clinic admins only — same gate as
+ * /staff (mirrors the server's activityLog.list adminOrOwnerProcedure). */
+function ActivityLogRoute() {
+  const [, navigate] = useLocation();
+  const { data: user, isLoading } = trpc.auth.me.useQuery();
+  const forcedPasswordChange = isForcedPasswordChange(user);
+  const allowed = canManageStaff(user);
+
+  useEffect(() => {
+    if (isLoading) return;
+    if (!user) {
+      navigate("/login");
+    } else if (forcedPasswordChange) {
+      navigate("/change-password");
+    } else if (!allowed) {
+      navigate("/dashboard");
+    }
+  }, [isLoading, user, forcedPasswordChange, allowed, navigate]);
+
+  if (isLoading) return <AuthLoadingScreen />;
+  if (!user || forcedPasswordChange || !allowed) return null;
+
+  return <ActivityLog />;
+}
+
 /** Every path backed by the same Dashboard instance. Extracted so tests can
  * verify route/component wiring without rendering the app. */
 export const DASHBOARD_ROUTE_PATHS = [
@@ -134,6 +160,7 @@ export function Router() {
       <Route path="/login" component={Login} />
       <Route path="/change-password" component={ChangePasswordRoute} />
       <Route path="/staff" component={StaffManagementRoute} />
+      <Route path="/activity-log" component={ActivityLogRoute} />
       <Route path="/" component={() => <Redirect to="/dashboard" />} />
       <Route path={DASHBOARD_ROUTE_PATTERN} component={ProtectedDashboard} />
       <Route path="/404" component={NotFound} />

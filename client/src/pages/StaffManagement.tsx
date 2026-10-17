@@ -53,6 +53,7 @@ import {
 import {
   AlertCircle,
   Archive,
+  History,
   KeyRound,
   Loader2,
   MoreVertical,
@@ -63,6 +64,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { formatTimestamp } from "@/lib/date";
+import { RecordHistoryDialog } from "@/components/dashboard/RecordHistoryDialog";
 import { validateCreateStaffForm, validateResetStaffPasswordForm } from "@/lib/staffValidation";
 import { MIN_CLINIC_PASSWORD_LENGTH } from "@shared/const";
 
@@ -288,6 +290,7 @@ export default function StaffManagement() {
   // ── Archive / Reactivate ─────────────────────────────────────────────────
   const [archiving, setArchiving] = useState<StaffRow | null>(null);
   const [reactivating, setReactivating] = useState<StaffRow | null>(null);
+  const [historyFor, setHistoryFor] = useState<StaffRow | null>(null);
 
   const archiveMutation = trpc.staff.archive.useMutation({
     onSuccess: () => {
@@ -434,6 +437,7 @@ export default function StaffManagement() {
                           onReset={() => openReset(row)}
                           onArchive={() => setArchiving(row)}
                           onReactivate={() => setReactivating(row)}
+                          onViewHistory={() => setHistoryFor(row)}
                         />
                       </TableCell>
                     </TableRow>
@@ -459,6 +463,7 @@ export default function StaffManagement() {
                         onReset={() => openReset(row)}
                         onArchive={() => setArchiving(row)}
                         onReactivate={() => setReactivating(row)}
+                        onViewHistory={() => setHistoryFor(row)}
                       />
                     </div>
                     <div className="flex flex-wrap gap-1.5">
@@ -764,6 +769,15 @@ export default function StaffManagement() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {historyFor && (
+        <RecordHistoryDialog
+          open={historyFor !== null}
+          onOpenChange={(open) => { if (!open) setHistoryFor(null); }}
+          entityType="clinic_user"
+          entityId={historyFor.id}
+        />
+      )}
     </DashboardShell>
   );
 }
@@ -775,6 +789,7 @@ function StaffRowActions({
   onReset,
   onArchive,
   onReactivate,
+  onViewHistory,
 }: {
   row: StaffRow;
   isSelf: boolean;
@@ -782,6 +797,7 @@ function StaffRowActions({
   onReset: () => void;
   onArchive: () => void;
   onReactivate: () => void;
+  onViewHistory: () => void;
 }) {
   return (
     <DropdownMenu>
@@ -798,6 +814,10 @@ function StaffRowActions({
         <DropdownMenuItem onClick={onReset}>
           <KeyRound className="w-4 h-4 mr-2" />
           Reset Login
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={onViewHistory}>
+          <History className="w-4 h-4 mr-2" />
+          View History
         </DropdownMenuItem>
         {row.status === "active" ? (
           <DropdownMenuItem

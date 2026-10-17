@@ -118,6 +118,8 @@ describe("claims.delete authorization", () => {
       claimId: CLAIM_ID,
       patientId: PATIENT_ID,
       actorId: "owner-1",
+      actorType: "owner",
+      actorDisplay: "Owner",
     });
   });
 
@@ -128,6 +130,8 @@ describe("claims.delete authorization", () => {
       claimId: CLAIM_ID,
       patientId: PATIENT_ID,
       actorId: "clinic-admin-1",
+      actorType: "clinic_user",
+      actorDisplay: "Clinic User",
     });
   });
 

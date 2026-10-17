@@ -38,12 +38,20 @@ describe("deleteClaimRecordWithAudit", () => {
   it("calls the delete_claim_record_with_audit RPC with the expected args", async () => {
     rpcMock.mockResolvedValue({ data: null, error: null });
 
-    await deleteClaimRecordWithAudit({ claimId: CLAIM_ID, patientId: PATIENT_ID, actorId: ACTOR_ID });
+    await deleteClaimRecordWithAudit({
+      claimId: CLAIM_ID,
+      patientId: PATIENT_ID,
+      actorId: ACTOR_ID,
+      actorType: "clinic_user",
+      actorDisplay: "Jane Nurse",
+    });
 
     expect(rpcMock).toHaveBeenCalledWith("delete_claim_record_with_audit", {
       p_claim_id: CLAIM_ID,
       p_patient_id: PATIENT_ID,
       p_actor_id: ACTOR_ID,
+      p_actor_type: "clinic_user",
+      p_actor_display: "Jane Nurse",
     });
   });
 

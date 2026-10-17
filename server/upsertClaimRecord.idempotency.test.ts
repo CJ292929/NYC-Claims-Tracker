@@ -82,14 +82,38 @@ function makeFakeClaimsTable() {
     return chain;
   });
 
-  return { from, rows };
+  // Fakes write_claim_record_with_audit (P4-P17) against this SAME `rows`
+  // array -- upsertClaimRecord's actual insert/patch now goes through
+  // supabase.rpc(...) instead of the raw .insert()/.update() calls above
+  // (those stay only for the OTHER queries this module issues directly,
+  // e.g. the match-finding .select().maybeSingle() lookups). Mirrors the
+  // RPC's "merge only the provided keys" semantics with a plain
+  // Object.assign, since p_data here only ever carries the keys actually
+  // being set, exactly like the real jsonb_populate_record patch.
+  const rpc = vi.fn((name: string, args: Record<string, unknown>) => {
+    if (name !== "write_claim_record_with_audit") throw new Error(`unexpected rpc: ${name}`);
+    const { p_id, p_patient_id, p_data } = args as { p_id: string | null; p_patient_id: string; p_data: Record<string, unknown> };
+    if (p_id) {
+      const row = rows.find(r => r.id === p_id);
+      if (!row) return Promise.resolve({ data: null, error: { code: "P0010" } });
+      Object.assign(row, p_data);
+      return Promise.resolve({ data: p_id, error: null });
+    }
+    const row: Row = { id: String(nextId++), patient_id: p_patient_id, ...p_data };
+    rows.push(row);
+    return Promise.resolve({ data: row.id, error: null });
+  });
+
+  return { from, rpc, rows };
 }
 
-const { tableMock } = vi.hoisted(() => ({ tableMock: { from: vi.fn() } }));
+const { tableMock } = vi.hoisted(() => ({ tableMock: { from: vi.fn(), rpc: vi.fn() } }));
 vi.mock("./supabase", () => ({ supabase: tableMock }));
 
 import { upsertClaimRecord, ClaimLineIdentityAmbiguousError } from "./db";
+import type { ActorContext } from "./actorIdentity";
 
+const ACTOR: ActorContext = { actorId: "actor-1", actorType: "owner", actorDisplay: "Owner" };
 const PATIENT_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_PATIENT_ID = "22222222-2222-4222-8222-222222222222";
 const DOS = new Date("2026-03-05T00:00:00Z");
@@ -101,8 +125,9 @@ beforeEach(() => {
 
 describe("upsertClaimRecord idempotency", () => {
   it("reimporting the identical row (no sourceLineIndex) patches the existing claim instead of inserting a duplicate", async () => {
-    const { from, rows } = makeFakeClaimsTable();
+    const { from, rpc, rows } = makeFakeClaimsTable();
     tableMock.from = from;
+    tableMock.rpc = rpc;
 
     await upsertClaimRecord({
       patientId: PATIENT_ID,
@@ -111,7 +136,7 @@ describe("upsertClaimRecord idempotency", () => {
       cptCodes: "97110",
       chargeAmount: 100,
       insuranceReimbursement: 80,
-    });
+    }, ACTOR);
     expect(rows).toHaveLength(1);
 
     // Re-import the same date/CPT row (e.g. the same file imported twice)
@@ -122,25 +147,27 @@ describe("upsertClaimRecord idempotency", () => {
       cptCodes: "97110",
       chargeAmount: 100,
       insuranceReimbursement: 80,
-    });
+    }, ACTOR);
 
     expect(rows).toHaveLength(1); // still one row, not two
     expect(rows[0].insurance_reimbursement).toBe(80);
   });
 
   it("a different CPT code on the same date creates a separate row (not collapsed into one)", async () => {
-    const { from, rows } = makeFakeClaimsTable();
+    const { from, rpc, rows } = makeFakeClaimsTable();
     tableMock.from = from;
+    tableMock.rpc = rpc;
 
-    await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97110", chargeAmount: 100 });
-    await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97140", chargeAmount: 50 });
+    await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97110", chargeAmount: 100 }, ACTOR);
+    await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97140", chargeAmount: 50 }, ACTOR);
 
     expect(rows).toHaveLength(2);
   });
 
   it("a later import patching reimbursement does not null out a field only the earlier import set", async () => {
-    const { from, rows } = makeFakeClaimsTable();
+    const { from, rpc, rows } = makeFakeClaimsTable();
     tableMock.from = from;
+    tableMock.rpc = rpc;
 
     // First pass (CMS1500): sets place_of_service, no reimbursement yet
     await upsertClaimRecord({
@@ -149,7 +176,7 @@ describe("upsertClaimRecord idempotency", () => {
       dateOfService: DOS,
       cptCodes: "97110",
       placeOfService: "11",
-    });
+    }, ACTOR);
     // Second pass (reimbursement EOB for the same date/CPT): adds reimbursement
     await upsertClaimRecord({
       patientId: PATIENT_ID,
@@ -157,7 +184,7 @@ describe("upsertClaimRecord idempotency", () => {
       dateOfService: DOS,
       cptCodes: "97110",
       insuranceReimbursement: 80,
-    });
+    }, ACTOR);
 
     expect(rows).toHaveLength(1);
     expect(rows[0].place_of_service).toBe("11"); // preserved, not wiped by the second (narrower) payload
@@ -166,13 +193,14 @@ describe("upsertClaimRecord idempotency", () => {
 
   describe("P4-P14: repeated same-date/same-CPT service lines (sourceLineIndex)", () => {
     it("two legitimate distinct 97530 lines on the same date both survive as separate rows", async () => {
-      const { from, rows } = makeFakeClaimsTable();
+      const { from, rpc, rows } = makeFakeClaimsTable();
       tableMock.from = from;
+      tableMock.rpc = rpc;
 
       // Two separate 97530 line items billed on the same date -- a
       // legitimate, real-world EOB shape (the reported UHC case).
-      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 75, insuranceReimbursement: 60 });
-      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 1, chargeAmount: 90, insuranceReimbursement: 70 });
+      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 75, insuranceReimbursement: 60 }, ACTOR);
+      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 1, chargeAmount: 90, insuranceReimbursement: 70 }, ACTOR);
 
       expect(rows).toHaveLength(2);
       const [first, second] = [...rows].sort((a, b) => (a.source_line_index as number) - (b.source_line_index as number));
@@ -183,8 +211,9 @@ describe("upsertClaimRecord idempotency", () => {
     });
 
     it("identical repeated lines (same units/modifier/amounts) still remain two distinct rows", async () => {
-      const { from, rows } = makeFakeClaimsTable();
+      const { from, rpc, rows } = makeFakeClaimsTable();
       tableMock.from = from;
+      tableMock.rpc = rpc;
 
       const identicalLine = {
         patientId: PATIENT_ID,
@@ -196,8 +225,8 @@ describe("upsertClaimRecord idempotency", () => {
         chargeAmount: 50,
         insuranceReimbursement: 40,
       };
-      await upsertClaimRecord({ ...identicalLine, sourceLineIndex: 0 });
-      await upsertClaimRecord({ ...identicalLine, sourceLineIndex: 1 });
+      await upsertClaimRecord({ ...identicalLine, sourceLineIndex: 0 }, ACTOR);
+      await upsertClaimRecord({ ...identicalLine, sourceLineIndex: 1 }, ACTOR);
 
       expect(rows).toHaveLength(2);
       expect(rows[0].charge_amount).toBe(50);
@@ -206,12 +235,13 @@ describe("upsertClaimRecord idempotency", () => {
     });
 
     it("reimporting the same two-line document is idempotent -- no extra rows, no double payments", async () => {
-      const { from, rows } = makeFakeClaimsTable();
+      const { from, rpc, rows } = makeFakeClaimsTable();
       tableMock.from = from;
+      tableMock.rpc = rpc;
 
       const importDocument = async () => {
-        await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 75, insuranceReimbursement: 60 });
-        await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 1, chargeAmount: 90, insuranceReimbursement: 70 });
+        await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 75, insuranceReimbursement: 60 }, ACTOR);
+        await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 1, chargeAmount: 90, insuranceReimbursement: 70 }, ACTOR);
       };
 
       await importDocument();
@@ -224,11 +254,12 @@ describe("upsertClaimRecord idempotency", () => {
     });
 
     it("different patients with the same date/CPT remain separate (not merged across patients)", async () => {
-      const { from, rows } = makeFakeClaimsTable();
+      const { from, rpc, rows } = makeFakeClaimsTable();
       tableMock.from = from;
+      tableMock.rpc = rpc;
 
-      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 75 });
-      await upsertClaimRecord({ patientId: OTHER_PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 999 });
+      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 75 }, ACTOR);
+      await upsertClaimRecord({ patientId: OTHER_PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 999 }, ACTOR);
 
       expect(rows).toHaveLength(2);
       const mine = rows.find(r => r.patient_id === PATIENT_ID)!;
@@ -236,23 +267,25 @@ describe("upsertClaimRecord idempotency", () => {
     });
 
     it("different dates for the same patient/CPT remain separate", async () => {
-      const { from, rows } = makeFakeClaimsTable();
+      const { from, rpc, rows } = makeFakeClaimsTable();
       tableMock.from = from;
+      tableMock.rpc = rpc;
 
-      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 75 });
-      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: OTHER_DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 80 });
+      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 75 }, ACTOR);
+      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: OTHER_DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 80 }, ACTOR);
 
       expect(rows).toHaveLength(2);
     });
 
     it("a pre-P4-P14 legacy row (source_line_index NULL) is treated as index 0 and patched in place, not duplicated", async () => {
-      const { from, rows } = makeFakeClaimsTable();
+      const { from, rpc, rows } = makeFakeClaimsTable();
       tableMock.from = from;
+      tableMock.rpc = rpc;
 
       // Simulate a row written before source_line_index existed.
       rows.push({ id: "legacy-1", patient_id: PATIENT_ID, auth_period: 1, date_of_service: "2026-03-05", cpt_codes: "97530", charge_amount: 75, insurance_reimbursement: 60, source_line_index: null } as Row);
 
-      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, insuranceReimbursement: 65 });
+      await upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, insuranceReimbursement: 65 }, ACTOR);
 
       expect(rows).toHaveLength(1); // patched, not duplicated
       expect(rows[0].id).toBe("legacy-1");
@@ -261,8 +294,9 @@ describe("upsertClaimRecord idempotency", () => {
     });
 
     it("[AMBIGUOUS LEGACY MATCH] a legacy NULL-index row found while importing a SECOND repeated line throws instead of silently inserting or merging", async () => {
-      const { from, rows } = makeFakeClaimsTable();
+      const { from, rpc, rows } = makeFakeClaimsTable();
       tableMock.from = from;
+      tableMock.rpc = rpc;
 
       // A pre-P4-P14 row already exists at this exact key with no line
       // index -- it might already be the P4-P13 "KNOWN LIMITATION" merge
@@ -272,7 +306,7 @@ describe("upsertClaimRecord idempotency", () => {
       rows.push({ id: "legacy-1", patient_id: PATIENT_ID, auth_period: 1, date_of_service: "2026-03-05", cpt_codes: "97530", charge_amount: 90, insurance_reimbursement: 70, source_line_index: null } as Row);
 
       await expect(
-        upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 1, chargeAmount: 75, insuranceReimbursement: 60 })
+        upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 1, chargeAmount: 75, insuranceReimbursement: 60 }, ACTOR)
       ).rejects.toBeInstanceOf(ClaimLineIdentityAmbiguousError);
 
       expect(rows).toHaveLength(1); // nothing inserted, nothing merged
@@ -284,11 +318,12 @@ describe("upsertClaimRecord idempotency", () => {
       // 0 rows is `{ data: null, error: null }`. A request for
       // sourceLineIndex 1 with nothing at all at this key (no exact match,
       // no legacy row) must insert cleanly, not be treated as ambiguous.
-      const { from, rows } = makeFakeClaimsTable();
+      const { from, rpc, rows } = makeFakeClaimsTable();
       tableMock.from = from;
+      tableMock.rpc = rpc;
 
       await expect(
-        upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97112", sourceLineIndex: 1, chargeAmount: 60 })
+        upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97112", sourceLineIndex: 1, chargeAmount: 60 }, ACTOR)
       ).resolves.toBeTruthy();
 
       expect(rows).toHaveLength(1);
@@ -326,9 +361,12 @@ describe("upsertClaimRecord idempotency", () => {
         return chain;
       });
       tableMock.from = from;
+      // No tableMock.rpc stub here -- this error fires on the legacy-row
+      // lookup (a .from(...) query), before upsertClaimRecord ever reaches
+      // the write_claim_record_with_audit RPC call.
 
       await expect(
-        upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 75 })
+        upsertClaimRecord({ patientId: PATIENT_ID, authPeriod: 1, dateOfService: DOS, cptCodes: "97530", sourceLineIndex: 0, chargeAmount: 75 }, ACTOR)
       ).rejects.toMatchObject(schemaError);
     });
   });

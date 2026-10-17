@@ -10,8 +10,6 @@ import {
   getPatientById,
   createPatient,
   updatePatient,
-  diffPatientUpdate,
-  createAuditLog,
   deletePatient,
   setPatientActive,
   getVisitsByPatientId,
@@ -53,10 +51,16 @@ import {
   findCms1500EnrichmentCandidates,
   patientHasAnyClaimRecords,
   applyCms1500Enrichment,
+  LastActiveAccountManagerError,
+  ClinicUserConflictError,
+  listActivityLog,
+  listHistoryForEntity,
   type Cms1500EnrichmentCandidate as Cms1500EnrichmentCandidateDTO,
 } from "./db";
 import type { ClinicUser } from "../drizzle/schema";
 import { sdk } from "./_core/sdk";
+import { getActorContext } from "./actorIdentity";
+import { randomUUID } from "crypto";
 import { ONE_YEAR_MS } from "@shared/const";
 import { normalizeInsurerName } from "@shared/insuranceCatalog";
 import {
@@ -352,7 +356,7 @@ export const appRouter = router({
           confirmPassword: z.string().min(1),
         })
       )
-      .mutation(async ({ input }) => {
+      .mutation(async ({ ctx, input }) => {
         if (input.password !== input.confirmPassword) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Passwords do not match" });
         }
@@ -373,7 +377,7 @@ export const appRouter = router({
             department: input.department || null,
             role: input.role,
             status: input.status,
-          });
+          }, getActorContext(ctx.user));
           return toSafeStaff(created);
         } catch (err: unknown) {
           // Backstop against a race between the uniqueness check above and the
@@ -401,13 +405,28 @@ export const appRouter = router({
         if (!current) throw new TRPCError({ code: "NOT_FOUND", message: "Staff account not found" });
 
         if (role !== undefined && role !== current.role) {
+          // Only the true owner (OAuth identity, never a clinic session —
+          // see adminOrOwnerProcedure's notes in _core/trpc.ts) may grant or
+          // revoke admin privileges. A clinic admin can still reach this
+          // endpoint for profile edits, just not role changes.
+          const isOwner = !ctx.user.clinicUser && ctx.user.role === "admin";
+          if (!isOwner) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Only the owner can change account roles." });
+          }
           const isSelf = ctx.user.clinicUser?.clinicUserId === id;
           if (isSelf) {
             throw new TRPCError({ code: "FORBIDDEN", message: "You cannot change your own role." });
           }
-          const updated = await updateClinicUserRole({ id, role, expectedTokenVersion: current.tokenVersion });
-          if (!updated) {
-            throw new TRPCError({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+          try {
+            await updateClinicUserRole({ id, role, expectedTokenVersion: current.tokenVersion }, getActorContext(ctx.user));
+          } catch (err: unknown) {
+            if (err instanceof LastActiveAccountManagerError) {
+              throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+            }
+            if (err instanceof ClinicUserConflictError) {
+              throw new TRPCError({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+            }
+            throw err;
           }
         }
 
@@ -432,7 +451,7 @@ export const appRouter = router({
           confirmPassword: z.string().min(1),
         })
       )
-      .mutation(async ({ input }) => {
+      .mutation(async ({ ctx, input }) => {
         if (input.password !== input.confirmPassword) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Passwords do not match" });
         }
@@ -441,15 +460,19 @@ export const appRouter = router({
         if (!current) throw new TRPCError({ code: "NOT_FOUND", message: "Staff account not found" });
 
         const passwordHash = await bcrypt.hash(input.password, 10);
-        const updated = await adminResetClinicUserPassword({
-          id: input.id,
-          passwordHash,
-          expectedTokenVersion: current.tokenVersion,
-        });
-        if (!updated) {
-          throw new TRPCError({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+        try {
+          const updated = await adminResetClinicUserPassword({
+            id: input.id,
+            passwordHash,
+            expectedTokenVersion: current.tokenVersion,
+          }, getActorContext(ctx.user));
+          return toSafeStaff(updated!);
+        } catch (err: unknown) {
+          if (err instanceof ClinicUserConflictError) {
+            throw new TRPCError({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+          }
+          throw err;
         }
-        return toSafeStaff(updated);
       }),
 
     archive: adminOrOwnerProcedure
@@ -463,19 +486,32 @@ export const appRouter = router({
         const current = await getClinicUserById(input.id);
         if (!current) throw new TRPCError({ code: "NOT_FOUND", message: "Staff account not found" });
 
-        const updated = await archiveClinicUser({ id: input.id, expectedTokenVersion: current.tokenVersion });
-        if (!updated) {
-          throw new TRPCError({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+        try {
+          const updated = await archiveClinicUser({ id: input.id, expectedTokenVersion: current.tokenVersion }, getActorContext(ctx.user));
+          return toSafeStaff(updated!);
+        } catch (err: unknown) {
+          if (err instanceof LastActiveAccountManagerError) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+          }
+          if (err instanceof ClinicUserConflictError) {
+            throw new TRPCError({ code: "CONFLICT", message: "This account changed during the request. Please try again." });
+          }
+          throw err;
         }
-        return toSafeStaff(updated);
       }),
 
     reactivate: adminOrOwnerProcedure
       .input(z.object({ id: z.string().uuid() }))
-      .mutation(async ({ input }) => {
-        const updated = await reactivateClinicUser(input.id);
+      .mutation(async ({ ctx, input }) => {
+        const updated = await reactivateClinicUser(input.id, getActorContext(ctx.user));
         if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Staff account not found" });
         return toSafeStaff(updated);
+      }),
+
+    history: adminOrOwnerProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .query(async ({ input }) => {
+        return listHistoryForEntity("clinic_user", input.id);
       }),
   }),
 
@@ -502,13 +538,13 @@ export const appRouter = router({
           authValidUntil: z.number().nullable().optional(), // Unix ms timestamp
         })
       )
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const id = await createPatient({
           name: input.name,
           insurance: input.insurance,
           authDate: parseDate(input.authDate),
           authValidUntil: input.authValidUntil ?? null,
-        });
+        }, getActorContext(ctx.user));
         return { id };
       }),
 
@@ -535,6 +571,10 @@ export const appRouter = router({
         const before = await getPatientById(id);
         if (!before) throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
 
+        // write_patient_with_audit (called inside updatePatient) writes the
+        // row update and its audit_logs entry in one transaction, and skips
+        // the audit row entirely when nothing actually changed — no
+        // separate diff/audit step needed here anymore.
         await updatePatient(id, {
           ...rest,
           ...(authDate !== undefined ? { authDate: parseDate(authDate) } : {}),
@@ -542,15 +582,7 @@ export const appRouter = router({
           // Field omitted entirely → key absent → updatePatient leaves the
           // column untouched. Field present as "none" → explicit clear (NULL).
           ...(claimsStatus !== undefined ? { claimsStatus: claimsStatus === 'none' ? null : claimsStatus } : {}),
-        });
-
-        const changes = diffPatientUpdate(before, rest);
-        if (changes.length > 0) {
-          const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
-          for (const change of changes) {
-            await createAuditLog({ patientId: id, actorId, ...change });
-          }
-        }
+        }, getActorContext(ctx.user));
 
         return { success: true };
       }),
@@ -572,6 +604,12 @@ export const appRouter = router({
       .mutation(async ({ input }) => {
         await setPatientActive(input.id, input.isActive, input.dischargeDate, input.dischargeReason);
         return { success: true };
+      }),
+
+    history: normalProtectedProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .query(async ({ input }) => {
+        return listHistoryForEntity("patient", input.id);
       }),
   }),
 
@@ -607,12 +645,11 @@ export const appRouter = router({
           // Re-adding a deliberately-deleted name: reactivate the same row
           // instead of inserting a duplicate (normalized_name stays unique
           // across active+inactive rows — see the P4-P13 migration).
-          const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
-          return await reactivateInsurerCatalogEntry(existing.id, actorId);
+          return await reactivateInsurerCatalogEntry(existing.id, getActorContext(ctx.user).actorId);
         }
 
         try {
-          return await createInsurerCatalogEntry({ name: input.name });
+          return await createInsurerCatalogEntry({ name: input.name }, getActorContext(ctx.user));
         } catch (err: unknown) {
           // Backstop against a race between the uniqueness check above and
           // the insert — the DB's UNIQUE(normalized_name) index is the real
@@ -635,8 +672,7 @@ export const appRouter = router({
         if (!existing) {
           throw new TRPCError({ code: "NOT_FOUND", message: "Insurance company not found" });
         }
-        const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
-        return await deactivateInsurerCatalogEntry(input.id, actorId);
+        return await deactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user).actorId);
       }),
 
     // Deliberate reactivation (P4-P13) from the Manage Insurance Companies
@@ -650,8 +686,7 @@ export const appRouter = router({
         if (!existing) {
           throw new TRPCError({ code: "NOT_FOUND", message: "Insurance company not found" });
         }
-        const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
-        return await reactivateInsurerCatalogEntry(input.id, actorId);
+        return await reactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user).actorId);
       }),
   }),
 
@@ -665,26 +700,26 @@ export const appRouter = router({
 
     create: normalProtectedProcedure
       .input(visitRecordInput.extend({ patientId: z.string().uuid() }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const { patientId, dateOfService, dateAshSubmitted, ...rest } = input;
         const id = await createVisitRecord({
           patientId,
           ...rest,
           dateOfService: parseDate(dateOfService),
           dateAshSubmitted: parseDate(dateAshSubmitted),
-        });
+        }, getActorContext(ctx.user));
         return { id };
       }),
 
     update: normalProtectedProcedure
       .input(visitRecordInput.extend({ id: z.string().uuid() }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const { id, dateOfService, dateAshSubmitted, ...rest } = input;
         await updateVisitRecord(id, {
           ...rest,
           ...(dateOfService !== undefined ? { dateOfService: parseDate(dateOfService) } : {}),
           ...(dateAshSubmitted !== undefined ? { dateAshSubmitted: parseDate(dateAshSubmitted) } : {}),
-        });
+        }, getActorContext(ctx.user));
         return { success: true };
       }),
 
@@ -695,7 +730,7 @@ export const appRouter = router({
           records: z.array(visitRecordInput),
         })
       )
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const rows = input.records.map(r => ({
           patientId: input.patientId,
           sessionsAuthorized: r.sessionsAuthorized ?? null,
@@ -707,7 +742,7 @@ export const appRouter = router({
           dateAshSubmitted: parseDate(r.dateAshSubmitted),
           authStatus: r.authStatus ?? "none" as const,
         }));
-        await bulkCreateVisitRecords(rows);
+        await bulkCreateVisitRecords(rows, getActorContext(ctx.user));
         return { success: true };
       }),
 
@@ -725,7 +760,7 @@ export const appRouter = router({
         newInsurance: z.string().optional(), // optional insurance change for new period
         authValidUntil: z.number().nullable().optional(), // Unix ms timestamp for expiry
       }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const authDate = input.authDate ? new Date(input.authDate + "T00:00:00Z") : null;
         const { newVisitIds } = await approveAndCreateNewBatch(
           input.patientId,
@@ -733,6 +768,7 @@ export const appRouter = router({
           authDate,
           input.newInsurance,
           input.authValidUntil ?? undefined,
+          getActorContext(ctx.user),
         );
         return { success: true, newVisitCount: newVisitIds.length };
       }),
@@ -746,16 +782,23 @@ export const appRouter = router({
     // showing) to authStatus=pending + today's dateAshSubmitted
     markAsRequested: normalProtectedProcedure
       .input(z.object({ patientId: z.string().uuid() }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const visitId = await getMarkAsRequestedTargetVisitId(input.patientId);
         if (!visitId) throw new TRPCError({ code: "NOT_FOUND", message: "No visit records found for this patient" });
         const today = new Date();
         const todayMidnight = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+        const actor = getActorContext(ctx.user);
         await updateVisitRecord(visitId, {
           authStatus: "pending",
           dateAshSubmitted: todayMidnight,
-        });
+        }, actor);
         return { success: true, visitId, date: todayMidnight.toISOString().split("T")[0] };
+      }),
+
+    historyForPatient: normalProtectedProcedure
+      .input(z.object({ patientId: z.string().uuid() }))
+      .query(async ({ input }) => {
+        return listHistoryForEntity("visit_record", input.patientId);
       }),
   }),
 
@@ -794,7 +837,7 @@ export const appRouter = router({
         referenceNo: z.string().nullable().optional(),
         lmn: z.string().nullable().optional(),
       }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const claimId = await createClaimRecord({
           patientId: input.patientId,
           authPeriod: input.authPeriod,
@@ -821,7 +864,7 @@ export const appRouter = router({
           dateOfAppeal: parseDate(input.dateOfAppeal),
           referenceNo: input.referenceNo ?? null,
           lmn: input.lmn ?? null,
-        });
+        }, getActorContext(ctx.user));
         return { success: true, claimId };
       }),
 
@@ -851,7 +894,7 @@ export const appRouter = router({
         dateOfAppeal: z.string().nullable().optional(),
         referenceNo: z.string().nullable().optional(),
       }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const { id, ...data } = input;
         // Alert-triggering statuses — if staff changes to one of these,
         // reset is_resolved so the claim re-appears in the follow-up panel
@@ -886,19 +929,21 @@ export const appRouter = router({
           dateReceived: data.dateReceived !== undefined ? parseDate(data.dateReceived) : undefined,
           dateOfAppeal: data.dateOfAppeal !== undefined ? parseDate(data.dateOfAppeal) : undefined,
           referenceNo: data.referenceNo ?? undefined,
-        });
+        }, getActorContext(ctx.user));
         return { success: true };
       }),
 
     delete: adminOrOwnerProcedure
       .input(z.object({ id: z.string().uuid(), patientId: z.string().uuid() }))
       .mutation(async ({ input, ctx }) => {
-        const actorId = ctx.user.clinicUser?.clinicUserId ?? ctx.user.id ?? null;
+        const actor = getActorContext(ctx.user);
         try {
           await deleteClaimRecordWithAudit({
             claimId: input.id,
             patientId: input.patientId,
-            actorId,
+            actorId: actor.actorId,
+            actorType: actor.actorType,
+            actorDisplay: actor.actorDisplay,
           });
         } catch (err) {
           if (err instanceof ClaimRecordNotFoundError) {
@@ -946,7 +991,7 @@ export const appRouter = router({
         // matching behavior for those callers).
         sourceLineIndex: z.number().int().min(0).nullable().optional(),
       }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         try {
           await upsertClaimRecord({
             patientId: input.patientId,
@@ -975,7 +1020,7 @@ export const appRouter = router({
             dateOfAppeal: parseDate(input.dateOfAppeal),
             referenceNo: input.referenceNo ?? null,
             lmn: input.lmn ?? null,
-          });
+          }, getActorContext(ctx.user));
         } catch (err) {
           if (err instanceof ClaimLineIdentityAmbiguousError) {
             throw new TRPCError({ code: "CONFLICT", message: err.message });
@@ -983,6 +1028,12 @@ export const appRouter = router({
           throw err;
         }
         return { success: true };
+      }),
+
+    historyForClaim: normalProtectedProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .query(async ({ input }) => {
+        return listHistoryForEntity("claim_record", input.id);
       }),
 
     /**
@@ -1061,7 +1112,13 @@ export const appRouter = router({
           unitsBilled: z.number().nullable().optional(),
         })),
       }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
+        const actor = getActorContext(ctx.user);
+        // One id per commit click (the user's final save action) groups every
+        // line this call writes — distinct from any id an earlier automated
+        // extraction step may have used — so the Activity Log can show them
+        // as one related event set (see import_batch_id in the P4-P17 migration).
+        const importBatchId = randomUUID();
         const results: Array<{ lineKey: string; status: 'saved' | 'failed'; error?: string }> = [];
         for (const line of input.lines) {
           try {
@@ -1076,6 +1133,8 @@ export const appRouter = router({
               diagnosisCodes: line.diagnosisCodes ?? null,
               modifier: line.modifier ?? null,
               unitsBilled: line.unitsBilled ?? null,
+              actor,
+              importBatchId,
             });
             results.push({ lineKey: line.lineKey, status: 'saved' });
           } catch (err: any) {
@@ -1145,10 +1204,16 @@ export const appRouter = router({
           patientId: z.string().uuid(),
         })).optional(),
       }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ input, ctx }) => {
         const { supabase } = await import('./supabase');
         const allPatients = await getAllPatients();
         const uploadType = input.uploadType ?? 'reimbursement';
+        const actor = getActorContext(ctx.user);
+        // One id for this entire import request groups every claim it
+        // touches — the initiating user is `actor` above; this id is what
+        // distinguishes one bulk save from another in the Activity Log (see
+        // import_batch_id in the P4-P17 migration).
+        const importBatchId = randomUUID();
 
         // Validate confirmedMatches structurally before any import work runs:
         // every groupIndex must refer to a group actually present in this
@@ -1335,6 +1400,8 @@ export const appRouter = router({
                     diagnosisCodes: line.diagnosisCodes ?? null,
                     modifier: line.modifier ?? null,
                     unitsBilled: line.unitsBilled ?? null,
+                    actor,
+                    importBatchId,
                   });
                   claimsImported++;
                 }
@@ -1390,7 +1457,7 @@ export const appRouter = router({
                       dateReceived: parseDate(claim.dateReceived),
                       dateOfAppeal: parseDate(claim.dateOfAppeal),
                       lmn: claim.lmn ?? null,
-                    });
+                    }, actor, importBatchId);
                     claimsImported++;
                   } catch (lineErr) {
                     if (lineErr instanceof ClaimLineIdentityAmbiguousError) {
@@ -1542,6 +1609,35 @@ export const appRouter = router({
             patientId: row.patient_id as string,
           }))
         );
+      }),
+  }),
+
+  // ── Activity Log (P4-P17) ───────────────────────────────────────────────────
+  // Cross-entity, paginated, filterable view over audit_logs — owner/admin
+  // only, same gate as Staff Management (adminOrOwnerProcedure). Read-only:
+  // there is no mutation here, and audit_logs itself has no browser-reachable
+  // write path at all (service_role-only, see the P4-P17 migration's RLS).
+  activityLog: router({
+    list: adminOrOwnerProcedure
+      .input(z.object({
+        actorId: z.string().uuid().optional(),
+        entityType: z.enum(['patient', 'visit_record', 'claim_record', 'insurer_catalog', 'clinic_user']).optional(),
+        action: z.string().optional(),
+        dateFrom: z.string().nullable().optional(), // ISO date string "YYYY-MM-DD"
+        dateTo: z.string().nullable().optional(),
+        page: z.number().int().min(0).default(0),
+        pageSize: z.number().int().min(1).max(200).default(50),
+      }))
+      .query(async ({ input }) => {
+        return listActivityLog({
+          actorId: input.actorId ?? null,
+          entityType: input.entityType ?? null,
+          action: input.action ?? null,
+          dateFrom: parseDate(input.dateFrom),
+          dateTo: parseDate(input.dateTo),
+          page: input.page,
+          pageSize: input.pageSize,
+        });
       }),
   }),
 });
