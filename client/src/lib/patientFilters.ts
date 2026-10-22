@@ -36,3 +36,21 @@ export function matchesPatientFilters(
   }
   return true;
 }
+
+/**
+ * True when an Insurance filter selection no longer points at anything: the
+ * value isn't a current catalog name or alias, and no patient (active or
+ * discharged) stores it. A permanently deleted insurer (P4-P21) always meets
+ * both conditions, since deletion is refused while any record uses it. A
+ * legacy free-text insurer that patients still store is never stale, even
+ * though it has no catalog entry.
+ */
+export function isStaleInsurerSelection(
+  selected: string,
+  catalog: ReadonlyArray<{ name: string; aliases: string[] }>,
+  patients: ReadonlyArray<{ insurance: string }>
+): boolean {
+  if (!selected) return false;
+  if (catalog.some(entry => entry.name === selected || entry.aliases.includes(selected))) return false;
+  return !patients.some(p => p.insurance === selected);
+}

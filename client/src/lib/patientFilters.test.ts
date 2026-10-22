@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { matchesPatientFilters } from './patientFilters';
+import { isStaleInsurerSelection, matchesPatientFilters } from './patientFilters';
 
 const patient = (id: string, insurance: string) => ({ id, insurance });
 
@@ -46,5 +46,30 @@ describe('matchesPatientFilters', () => {
     expect(matchesPatientFilters(patient('1', 'United Healthcare Medicare'), scope)).toBe(true);
     expect(matchesPatientFilters(patient('2', 'United Healthcare Medicare Advantage'), scope)).toBe(true);
     expect(matchesPatientFilters(patient('3', 'United Healthcare'), scope)).toBe(false);
+  });
+});
+
+describe('isStaleInsurerSelection (P4-P21)', () => {
+  const catalog = [
+    { name: 'Aetna', aliases: [] },
+    { name: 'United Healthcare Medicare Advantage', aliases: ['United Healthcare Medicare'] },
+  ];
+  const patients = [{ insurance: 'Aetna' }, { insurance: 'Legacy Free Text Co' }];
+
+  it('an empty selection is never stale', () => {
+    expect(isStaleInsurerSelection('', catalog, patients)).toBe(false);
+  });
+
+  it('a current catalog name or alias is not stale', () => {
+    expect(isStaleInsurerSelection('Aetna', catalog, [])).toBe(false);
+    expect(isStaleInsurerSelection('United Healthcare Medicare', catalog, [])).toBe(false);
+  });
+
+  it('a permanently deleted insurer (gone from catalog, used by no patient) is stale', () => {
+    expect(isStaleInsurerSelection('Typo Insurer', catalog, patients)).toBe(true);
+  });
+
+  it('an uncatalogued value that patients still store is kept', () => {
+    expect(isStaleInsurerSelection('Legacy Free Text Co', catalog, patients)).toBe(false);
   });
 });

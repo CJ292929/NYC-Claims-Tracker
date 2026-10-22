@@ -214,6 +214,7 @@ export async function createPatient(
 
   if (error) {
     console.error("[Supabase] createPatient:", error);
+    mapInsurerAssignmentError(error);
     throw error;
   }
   return id as string;
@@ -251,6 +252,7 @@ export async function updatePatient(
   });
   if (error) {
     console.error("[Supabase] updatePatient:", error);
+    mapInsurerAssignmentError(error);
     throw error;
   }
 }
@@ -1983,4 +1985,62 @@ export async function reactivateInsurerCatalogEntry(
     throw new Error(`reactivateInsurerCatalogEntry: row ${id} not found after update`);
   }
   return updated;
+}
+
+/** Thrown by delete_insurer_catalog_with_audit (P0040) when any patient,
+ *  visit, or claim row — active or historical — still stores this entry's
+ *  name or one of its aliases. Nothing was deleted. */
+export class InsurerInUseError extends Error {
+  constructor() {
+    super("This insurance company is used by existing records and cannot be permanently deleted.");
+    this.name = "InsurerInUseError";
+  }
+}
+
+export class InsurerCatalogEntryNotFoundError extends Error {
+  constructor(id: string) {
+    super(`Insurance company ${id} not found`);
+    this.name = "InsurerCatalogEntryNotFoundError";
+  }
+}
+
+/** Thrown when a patient write assigns an insurer that was permanently
+ *  deleted — either concurrently with this write, or earlier from a form
+ *  whose insurer list was already stale (P0041, raised by the
+ *  guard_insurer_assignment trigger; see the P4-P21 migration). */
+export class InsurerDeletedError extends Error {
+  constructor() {
+    super("This insurance company was permanently deleted. Choose a different insurance company.");
+    this.name = "InsurerDeletedError";
+  }
+}
+
+function mapInsurerAssignmentError(error: { code?: string }): void {
+  if (error.code === "P0041") throw new InsurerDeletedError();
+}
+
+/** Permanent delete (P4-P21). One Postgres transaction locks the exact row by
+ *  id, rejects if any patient/visit/claim (incl. discharged/historical rows)
+ *  references its name or aliases, then deletes it, tombstones the name so
+ *  re-run seeds can't recreate it, and writes the INSURER_PERMANENT_DELETE
+ *  audit row — all or nothing. Never touches patient/visit/claim rows.
+ *  Callers (insurance.permanentDelete) are responsible for the admin/owner
+ *  authorization check; this function does not re-check it. */
+export async function permanentlyDeleteInsurerCatalogEntry(
+  id: string,
+  actor: ActorContext
+): Promise<void> {
+  const { error } = await supabase.rpc("delete_insurer_catalog_with_audit", {
+    p_id: id,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
+
+  if (error) {
+    console.error("[Supabase] permanentlyDeleteInsurerCatalogEntry:", error);
+    if (error.code === "P0040") throw new InsurerInUseError();
+    if (error.code === "P0032") throw new InsurerCatalogEntryNotFoundError(id);
+    throw error;
+  }
 }

@@ -43,6 +43,11 @@ describe('parseCsvRow', () => {
     expect(skipReason).toBe('Row 5: Missing patient name');
   });
 
+  it('leaves a blank insurance blank instead of substituting a hard-coded insurer (P4-P21)', () => {
+    const { row } = parseCsvRow({ 'Patient Name': 'John Doe', Insurance: '' }, 1);
+    expect(row?.insurance).toBe('');
+  });
+
   it('recognizes "Date ASH Submitted" as the authorization-submitted date', () => {
     const { row } = parseCsvRow({ 'Patient Name': 'John Doe', 'Date ASH Submitted': '2026-01-15' }, 1);
     expect(row?.dateAshSubmitted).toBe('2026-01-15');

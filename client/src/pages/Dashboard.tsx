@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical, Settings, History } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical, Settings, History, EyeOff } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
@@ -19,7 +19,7 @@ import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch, classifyPatientMatch } from '@shared/nameMatch';
 import { insurerMatchValues } from '@shared/insuranceCatalog';
 import { parseCsvText, parseCsvRow, normalizePatientName, emptyCsvImportSummary, type CsvImportSummary } from '@/lib/csvImport';
-import { matchesPatientFilters } from '@/lib/patientFilters';
+import { isStaleInsurerSelection, matchesPatientFilters } from '@/lib/patientFilters';
 import { routeToNavSection, navSectionToRoute } from '@/lib/navSection';
 import { canManageStaff as canManageStaffAuthGate } from '@/lib/authGate';
 import { StatusBadge } from '@/components/dashboard/StatusBadge';
@@ -368,10 +368,14 @@ export default function Dashboard() {
   const [newInsuranceName, setNewInsuranceName] = useState('');
   const [showManageInsurance, setShowManageInsurance] = useState(false);
   const [insurerPendingDelete, setInsurerPendingDelete] = useState<{ id: string; name: string } | null>(null);
+  const [insurerPendingPermanentDelete, setInsurerPendingPermanentDelete] = useState<{ id: string; name: string } | null>(null);
+  const [permanentDeleteError, setPermanentDeleteError] = useState<string | null>(null);
   const [historyInsurerId, setHistoryInsurerId] = useState<string | null>(null);
   const [selectedInsurance, setSelectedInsurance] = useState<string>('Aetna');
   const [newPatientName, setNewPatientName] = useState('');
-  const [newPatientInsurance, setNewPatientInsurance] = useState('Aetna');
+  // No hard-coded default insurer: a fixed name could have been permanently
+  // deleted from the catalog (P4-P21). Staff pick from the active list.
+  const [newPatientInsurance, setNewPatientInsurance] = useState('');
   const [newPatientAuthorized, setNewPatientAuthorized] = useState('');
   const [newPatientAuthDate, setNewPatientAuthDate] = useState('');
   const [newPatientAuthValidUntil, setNewPatientAuthValidUntil] = useState('');
@@ -600,7 +604,7 @@ export default function Dashboard() {
   // Single shared insurer catalog — patient forms, the Insurance filter
   // panel, and AuthAlertPanel's "New Authorization" dialog all read from
   // this same list so none of them can drift out of sync with another.
-  const { data: insurerCatalog = [] } = trpc.insurance.list.useQuery();
+  const { data: insurerCatalog = [], isSuccess: insurerCatalogLoaded } = trpc.insurance.list.useQuery();
   // Filters/counts use the FULL catalog (active + inactive) — a deactivated
   // insurer's existing patients must stay filterable/countable (P4-P13).
   const insuranceList = useMemo(() => insurerCatalog.map(entry => entry.name), [insurerCatalog]);
@@ -756,16 +760,40 @@ export default function Dashboard() {
     createInsurer.mutate({ name: newInsuranceName });
   };
 
-  // Soft-delete only — see insurance.delete in server/routers.ts. Never
-  // touches patient/visit/claim rows; just hides this entry from future
-  // new-selection dropdowns.
+  // Soft delete ("Deactivate") — see insurance.delete in server/routers.ts.
+  // Never touches patient/visit/claim rows; just hides this entry from
+  // future new-selection dropdowns.
   const deleteInsurer = trpc.insurance.delete.useMutation({
     onSuccess: () => {
       utils.insurance.list.invalidate();
-      toast.success('Insurance company removed from new-selection lists');
+      toast.success('Insurance company deactivated');
       setInsurerPendingDelete(null);
     },
     onError: (e) => toast.error(e.message),
+  });
+
+  // Permanent delete (P4-P21) — see insurance.permanentDelete. The server
+  // refuses entries any record uses; on any failure the confirmation stays
+  // open with the reason and the entry stays in the list. The single-flight
+  // guard (not just `disabled`) blocks a second click landing before the
+  // pending state re-renders — see client/src/lib/concurrencyGuards.ts.
+  const permanentDeleteGuardRef = useRef(createSingleFlightGuard());
+  const permanentlyDeleteInsurer = trpc.insurance.permanentDelete.useMutation({
+    onSettled: () => permanentDeleteGuardRef.current.exit(),
+    onSuccess: () => {
+      // insurance.* covers the catalog list (management dialog, filters,
+      // patient forms, AuthAlertPanel) and the deleted entry's history.
+      utils.insurance.invalidate();
+      utils.activityLog.invalidate();
+      toast.success('Insurance company permanently deleted');
+      setPermanentDeleteError(null);
+      setInsurerPendingPermanentDelete(null);
+    },
+    onError: (e) => {
+      setPermanentDeleteError(e.message);
+      // A concurrent delete already removed it — refresh so it disappears.
+      if (e.data?.code === 'NOT_FOUND') utils.insurance.list.invalidate();
+    },
   });
 
   const reactivateInsurer = trpc.insurance.reactivate.useMutation({
@@ -1093,6 +1121,21 @@ export default function Dashboard() {
     setSelectedClaimsFilter('all');
   };
 
+  // After a permanent insurer delete (P4-P21) — or on load, if the initial
+  // default insurer no longer exists — drop selections that point at nothing.
+  // Waits for the catalog and patient queries so an empty in-flight list is
+  // never mistaken for "everything was deleted".
+  useEffect(() => {
+    if (!insurerCatalogLoaded || patientsLoading) return;
+    if (isStaleInsurerSelection(selectedInsurance, insurerCatalog, patients)) {
+      setSelectedInsurance('');
+    }
+    if (newPatientInsurance && !activeInsuranceNames.includes(newPatientInsurance)) {
+      setNewPatientInsurance('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [insurerCatalogLoaded, insurerCatalog, patientsLoading, patients]);
+
   // Shared between the desktop Patient Workspace filters panel and the mobile
   // Filters sheet so the two never drift.
   const insuranceCounts = useMemo(
@@ -1197,7 +1240,7 @@ export default function Dashboard() {
       setNewPatientAuthorized('');
       setNewPatientAuthDate('');
       setNewPatientAuthValidUntil('');
-      setNewPatientInsurance('Aetna');
+      setNewPatientInsurance('');
     } catch (e: any) {
       toast.error(`Failed to add patient: ${e.message}`);
     }
@@ -4647,8 +4690,9 @@ export default function Dashboard() {
         <DialogHeader>
           <DialogTitle className="text-brand-blue">Manage Insurance Companies</DialogTitle>
           <DialogDescription>
-            Removing a company hides it from new patient/claim forms. It never deletes or changes any
-            existing patient, visit, or claim already stored under that name.
+            Deactivate hides a company from new patient/claim forms and can be undone. Delete Insurance
+            Company permanently removes an unused company from the catalog. Neither ever changes an
+            existing patient, visit, or claim.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-1 max-h-[55vh] overflow-y-auto pr-1">
@@ -4658,17 +4702,17 @@ export default function Dashboard() {
           {insurerCatalog.map(entry => (
             <div
               key={entry.id}
-              className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2 ${entry.isActive ? 'border-brand-cream-dark' : 'border-brand-cream-dark bg-muted/40'}`}
+              className={`flex flex-col gap-2 rounded-lg border px-3 py-2 ${entry.isActive ? 'border-brand-cream-dark' : 'border-brand-cream-dark bg-muted/40'}`}
             >
               <div className="min-w-0">
                 <p className={`text-sm font-medium truncate ${entry.isActive ? 'text-foreground' : 'text-muted-foreground line-through'}`}>
                   {entry.name}
                 </p>
                 {!entry.isActive && (
-                  <p className="text-xs text-muted-foreground">Removed — hidden from new selections</p>
+                  <p className="text-xs text-muted-foreground">Deactivated — hidden from new selections</p>
                 )}
               </div>
-              <div className="flex items-center gap-1.5 shrink-0">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <Button
                   size="sm"
                   variant="outline"
@@ -4682,11 +4726,11 @@ export default function Dashboard() {
                   <Button
                     size="sm"
                     variant="outline"
-                    className="gap-1.5 text-destructive hover:text-destructive"
+                    className="gap-1.5"
                     onClick={() => setInsurerPendingDelete({ id: entry.id, name: entry.name })}
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Delete
+                    <EyeOff className="w-3.5 h-3.5" />
+                    Deactivate
                   </Button>
                 ) : (
                   <Button
@@ -4700,6 +4744,19 @@ export default function Dashboard() {
                     Reactivate
                   </Button>
                 )}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5 text-destructive hover:text-destructive"
+                  aria-label={`Delete Insurance Company ${entry.name}`}
+                  onClick={() => {
+                    setPermanentDeleteError(null);
+                    setInsurerPendingPermanentDelete({ id: entry.id, name: entry.name });
+                  }}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Delete Insurance Company
+                </Button>
               </div>
             </div>
           ))}
@@ -4718,7 +4775,7 @@ export default function Dashboard() {
     <AlertDialog open={insurerPendingDelete !== null} onOpenChange={(open) => { if (!open) setInsurerPendingDelete(null); }}>
       <AlertDialogContent className="bg-white">
         <AlertDialogHeader>
-          <AlertDialogTitle className="text-brand-blue text-xl">Delete Insurance Company?</AlertDialogTitle>
+          <AlertDialogTitle className="text-brand-blue text-xl">Deactivate Insurance Company?</AlertDialogTitle>
           <AlertDialogDescription className="text-muted-foreground">
             {insurerPendingDelete && (
               <>
@@ -4741,7 +4798,60 @@ export default function Dashboard() {
             }}
           >
             {deleteInsurer.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-            Delete
+            Deactivate
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+
+  const permanentDeleteInsurerConfirmDialog = (
+    <AlertDialog
+      open={insurerPendingPermanentDelete !== null}
+      onOpenChange={(open) => {
+        // Not dismissable mid-request: the outcome must be visible here.
+        if (!open && !permanentlyDeleteInsurer.isPending) {
+          setInsurerPendingPermanentDelete(null);
+          setPermanentDeleteError(null);
+        }
+      }}
+    >
+      <AlertDialogContent className="bg-white">
+        <AlertDialogHeader>
+          <AlertDialogTitle className="text-brand-blue text-xl">Delete Insurance Company?</AlertDialogTitle>
+          <AlertDialogDescription className="text-muted-foreground">
+            {insurerPendingPermanentDelete && (
+              <>
+                Permanently delete ‘{insurerPendingPermanentDelete.name}’? This cannot be undone.
+                <br />
+                The company will be removed from the insurance catalog.
+              </>
+            )}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {permanentDeleteError && (
+          <p role="alert" className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{permanentDeleteError}</span>
+          </p>
+        )}
+        <AlertDialogFooter>
+          <AlertDialogCancel className="border-brand-cream-dark text-brand-blue hover:bg-brand-cream" disabled={permanentlyDeleteInsurer.isPending}>
+            Cancel
+          </AlertDialogCancel>
+          <AlertDialogAction
+            className="bg-destructive hover:bg-destructive/90 text-white"
+            disabled={permanentlyDeleteInsurer.isPending}
+            onClick={(e) => {
+              // Keep the dialog open until the server answers; onSuccess closes it.
+              e.preventDefault();
+              if (!insurerPendingPermanentDelete || !permanentDeleteGuardRef.current.tryEnter()) return;
+              setPermanentDeleteError(null);
+              permanentlyDeleteInsurer.mutate({ id: insurerPendingPermanentDelete.id });
+            }}
+          >
+            {permanentlyDeleteInsurer.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Trash2 className="w-4 h-4 mr-2" />}
+            Permanently Delete
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -4832,6 +4942,7 @@ export default function Dashboard() {
         {bulkUploadDialog}
         {patientActionDialogs}
         {deleteInsurerConfirmDialog}
+        {permanentDeleteInsurerConfirmDialog}
       </DashboardShell>
     );
   }
