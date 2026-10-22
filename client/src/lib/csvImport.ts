@@ -73,7 +73,9 @@ export function parseCsvRow(row: Record<string, string>, rowIndex: number): CsvR
   return {
     row: {
       name,
-      insurance: getField(row, 'Insurance', 'Insurance Company') || 'Aetna',
+      // Blank stays blank — never substitute a hard-coded insurer, which may
+      // have been permanently deleted from the catalog (P4-P21).
+      insurance: getField(row, 'Insurance', 'Insurance Company') || '',
       authorized: Number.isNaN(authorized) ? 0 : authorized,
       authDate: getField(row, 'Authorization Date') || null,
       dateOfService: getField(row, 'Date of Service') || null,

@@ -158,6 +158,9 @@ __export(db_exports, {
   ClaimRecordPatientMismatchError: () => ClaimRecordPatientMismatchError,
   ClinicUserConflictError: () => ClinicUserConflictError,
   FOLLOW_UP_STALE_DAYS: () => FOLLOW_UP_STALE_DAYS,
+  InsurerCatalogEntryNotFoundError: () => InsurerCatalogEntryNotFoundError,
+  InsurerDeletedError: () => InsurerDeletedError,
+  InsurerInUseError: () => InsurerInUseError,
   LastActiveAccountManagerError: () => LastActiveAccountManagerError,
   adminResetClinicUserPassword: () => adminResetClinicUserPassword,
   aggregateClaimStatusCounts: () => aggregateClaimStatusCounts,
@@ -198,6 +201,7 @@ __export(db_exports, {
   listHistoryForEntity: () => listHistoryForEntity,
   listInsurerCatalog: () => listInsurerCatalog,
   patientHasAnyClaimRecords: () => patientHasAnyClaimRecords,
+  permanentlyDeleteInsurerCatalogEntry: () => permanentlyDeleteInsurerCatalogEntry,
   reactivateClinicUser: () => reactivateClinicUser,
   reactivateInsurerCatalogEntry: () => reactivateInsurerCatalogEntry,
   setPatientActive: () => setPatientActive,
@@ -349,6 +353,7 @@ async function createPatient(data, actor) {
   });
   if (error) {
     console.error("[Supabase] createPatient:", error);
+    mapInsurerAssignmentError(error);
     throw error;
   }
   return id;
@@ -373,6 +378,7 @@ async function updatePatient(id, data, actor) {
   });
   if (error) {
     console.error("[Supabase] updatePatient:", error);
+    mapInsurerAssignmentError(error);
     throw error;
   }
 }
@@ -1223,7 +1229,24 @@ async function reactivateInsurerCatalogEntry(id, actor) {
   }
   return updated;
 }
-var LastActiveAccountManagerError, ClinicUserConflictError, FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, dateOnly, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, REIMBURSEMENT_EVIDENCE_COLUMNS, ClaimLineIdentityAmbiguousError;
+function mapInsurerAssignmentError(error) {
+  if (error.code === "P0041") throw new InsurerDeletedError();
+}
+async function permanentlyDeleteInsurerCatalogEntry(id, actor) {
+  const { error } = await supabase.rpc("delete_insurer_catalog_with_audit", {
+    p_id: id,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay
+  });
+  if (error) {
+    console.error("[Supabase] permanentlyDeleteInsurerCatalogEntry:", error);
+    if (error.code === "P0040") throw new InsurerInUseError();
+    if (error.code === "P0032") throw new InsurerCatalogEntryNotFoundError(id);
+    throw error;
+  }
+}
+var LastActiveAccountManagerError, ClinicUserConflictError, FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, dateOnly, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, REIMBURSEMENT_EVIDENCE_COLUMNS, ClaimLineIdentityAmbiguousError, InsurerInUseError, InsurerCatalogEntryNotFoundError, InsurerDeletedError;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
@@ -1305,6 +1328,24 @@ var init_db = __esm({
         this.cptCodes = cptCodes;
         this.sourceLineIndex = sourceLineIndex;
         this.name = "ClaimLineIdentityAmbiguousError";
+      }
+    };
+    InsurerInUseError = class extends Error {
+      constructor() {
+        super("This insurance company is used by existing records and cannot be permanently deleted.");
+        this.name = "InsurerInUseError";
+      }
+    };
+    InsurerCatalogEntryNotFoundError = class extends Error {
+      constructor(id) {
+        super(`Insurance company ${id} not found`);
+        this.name = "InsurerCatalogEntryNotFoundError";
+      }
+    };
+    InsurerDeletedError = class extends Error {
+      constructor() {
+        super("This insurance company was permanently deleted. Choose a different insurance company.");
+        this.name = "InsurerDeletedError";
       }
     };
   }
@@ -4654,13 +4695,20 @@ var appRouter = router({
         // Unix ms timestamp
       })
     ).mutation(async ({ input, ctx }) => {
-      const id = await createPatient({
-        name: input.name,
-        insurance: input.insurance,
-        authDate: parseDate2(input.authDate),
-        authValidUntil: input.authValidUntil ?? null
-      }, getActorContext(ctx.user));
-      return { id };
+      try {
+        const id = await createPatient({
+          name: input.name,
+          insurance: input.insurance,
+          authDate: parseDate2(input.authDate),
+          authValidUntil: input.authValidUntil ?? null
+        }, getActorContext(ctx.user));
+        return { id };
+      } catch (err) {
+        if (err instanceof InsurerDeletedError) {
+          throw new TRPCError3({ code: "CONFLICT", message: err.message });
+        }
+        throw err;
+      }
     }),
     update: normalProtectedProcedure.input(
       z2.object({
@@ -4681,14 +4729,21 @@ var appRouter = router({
       const { id, authDate, authValidUntil, claimsStatus, ...rest } = input;
       const before = await getPatientById(id);
       if (!before) throw new TRPCError3({ code: "NOT_FOUND", message: "Patient not found" });
-      await updatePatient(id, {
-        ...rest,
-        ...authDate !== void 0 ? { authDate: parseDate2(authDate) } : {},
-        ...authValidUntil !== void 0 ? { authValidUntil } : {},
-        // Field omitted entirely → key absent → updatePatient leaves the
-        // column untouched. Field present as "none" → explicit clear (NULL).
-        ...claimsStatus !== void 0 ? { claimsStatus: claimsStatus === "none" ? null : claimsStatus } : {}
-      }, getActorContext(ctx.user));
+      try {
+        await updatePatient(id, {
+          ...rest,
+          ...authDate !== void 0 ? { authDate: parseDate2(authDate) } : {},
+          ...authValidUntil !== void 0 ? { authValidUntil } : {},
+          // Field omitted entirely → key absent → updatePatient leaves the
+          // column untouched. Field present as "none" → explicit clear (NULL).
+          ...claimsStatus !== void 0 ? { claimsStatus: claimsStatus === "none" ? null : claimsStatus } : {}
+        }, getActorContext(ctx.user));
+      } catch (err) {
+        if (err instanceof InsurerDeletedError) {
+          throw new TRPCError3({ code: "CONFLICT", message: err.message });
+        }
+        throw err;
+      }
       return { success: true };
     }),
     delete: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
@@ -4744,7 +4799,7 @@ var appRouter = router({
         throw err;
       }
     }),
-    // Soft delete (P4-P13) — admin/owner only. Hides the entry from
+    // Soft delete / "Deactivate" (P4-P13) — admin/owner only. Hides the entry from
     // new-selection dropdowns without touching any patient/visit/claim
     // record (those store the insurer name as free text, not an FK into
     // this table) and without deleting the catalog row itself.
@@ -4765,6 +4820,29 @@ var appRouter = router({
         throw new TRPCError3({ code: "NOT_FOUND", message: "Insurance company not found" });
       }
       return await reactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user));
+    }),
+    // Permanent delete (P4-P21) — admin/owner only, for an entry nothing
+    // uses (e.g. a typo). Targets the exact catalog id. The reference check,
+    // the delete, and its audit row all run in one locked Postgres
+    // transaction (delete_insurer_catalog_with_audit), so a concurrent
+    // patient/visit/claim assignment can't slip in between check and delete.
+    // Insurers still in use stay on the soft-delete path above.
+    permanentDelete: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
+      try {
+        await permanentlyDeleteInsurerCatalogEntry(input.id, getActorContext(ctx.user));
+      } catch (err) {
+        if (err instanceof InsurerInUseError) {
+          throw new TRPCError3({ code: "CONFLICT", message: err.message });
+        }
+        if (err instanceof InsurerCatalogEntryNotFoundError) {
+          throw new TRPCError3({
+            code: "NOT_FOUND",
+            message: "This insurance company no longer exists. It may already have been deleted."
+          });
+        }
+        throw err;
+      }
+      return { success: true, id: input.id };
     }),
     // Same gate as create/delete/reactivate — insurer catalog management is
     // admin/owner only, so its history is too (unlike patient/visit/claim

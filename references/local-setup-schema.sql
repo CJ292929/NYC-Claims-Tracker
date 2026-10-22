@@ -692,6 +692,10 @@ BEGIN
   IF p_id IS NULL THEN
     v_after := jsonb_populate_record(NULL::public.insurer_catalog, p_data);
 
+    -- P4-P21: a deliberate re-add clears this name's permanent-delete tombstone.
+    DELETE FROM public.insurer_catalog_deleted_names
+    WHERE normalized_name = public.normalize_insurer_name(v_after.name);
+
     INSERT INTO public.insurer_catalog (
       name, created_by, created_by_type
     ) VALUES (
@@ -713,7 +717,8 @@ BEGIN
 
     RETURN v_id;
   ELSE
-    SELECT * INTO v_before FROM public.insurer_catalog WHERE id = p_id FOR UPDATE;
+    -- P4-P21: NO KEY UPDATE so deactivate/reactivate don't block guard_insurer_assignment.
+    SELECT * INTO v_before FROM public.insurer_catalog WHERE id = p_id FOR NO KEY UPDATE;
     IF NOT FOUND THEN
       RAISE EXCEPTION 'insurer_catalog_not_found: %', p_id USING ERRCODE = 'P0032';
     END IF;
@@ -752,6 +757,190 @@ $$;
 
 REVOKE ALL ON FUNCTION public.write_insurer_catalog_with_audit(uuid, jsonb, uuid, text, text, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.write_insurer_catalog_with_audit(uuid, jsonb, uuid, text, text, text) TO service_role;
+
+-- ─── Permanent insurer delete (P4-P21; see
+-- supabase/migrations/20261023000000_p4_p21_insurer_permanent_delete.sql) ─
+-- Same rule as shared/insuranceCatalog.ts normalizeInsurerName and the
+-- insurer_catalog.normalized_name generated column.
+CREATE OR REPLACE FUNCTION public.normalize_insurer_name(p_value text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog
+AS $$
+  SELECT lower(btrim(regexp_replace(p_value, '\s+', ' ', 'g')));
+$$;
+
+-- ─── 3: tombstones ─────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.insurer_catalog_deleted_names (
+  normalized_name text PRIMARY KEY,
+  deleted_insurer_id uuid NOT NULL,
+  deleted_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.insurer_catalog_deleted_names ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.insurer_catalog_deleted_names NO FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON public.insurer_catalog_deleted_names FROM PUBLIC, anon, authenticated;
+GRANT ALL ON public.insurer_catalog_deleted_names TO service_role;
+
+CREATE OR REPLACE FUNCTION public.skip_deleted_insurer_reinsert()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.insurer_catalog_deleted_names
+    WHERE normalized_name = public.normalize_insurer_name(NEW.name)
+  ) THEN
+    RETURN NULL;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS insurer_catalog_skip_deleted_reinsert ON public.insurer_catalog;
+CREATE TRIGGER insurer_catalog_skip_deleted_reinsert
+  BEFORE INSERT ON public.insurer_catalog
+  FOR EACH ROW EXECUTE FUNCTION public.skip_deleted_insurer_reinsert();
+
+-- ─── 2: assignment guard ───────────────────────────────────────────────────
+-- TG_ARGV[0] names the referencing column on the table the trigger is on.
+CREATE OR REPLACE FUNCTION public.guard_insurer_assignment()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  v_new text := public.normalize_insurer_name(to_jsonb(NEW) ->> TG_ARGV[0]);
+  v_ids uuid[];
+  v_locked integer;
+BEGIN
+  IF v_new IS NULL OR v_new = '' THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'UPDATE'
+     AND public.normalize_insurer_name(to_jsonb(OLD) ->> TG_ARGV[0]) IS NOT DISTINCT FROM v_new THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT array_agg(c.id) INTO v_ids
+  FROM public.insurer_catalog c
+  WHERE c.normalized_name = v_new
+     OR EXISTS (SELECT 1 FROM unnest(c.aliases) a WHERE public.normalize_insurer_name(a) = v_new);
+
+  IF v_ids IS NULL THEN
+    IF EXISTS (SELECT 1 FROM public.insurer_catalog_deleted_names WHERE normalized_name = v_new) THEN
+      RAISE EXCEPTION 'This insurance company was permanently deleted. Choose a different insurance company.'
+        USING ERRCODE = 'P0041';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  -- Blocks while a permanent delete of any of these rows is in flight; a row
+  -- that delete removed is simply not returned once it commits.
+  SELECT count(*) INTO v_locked FROM (
+    SELECT 1 FROM public.insurer_catalog WHERE id = ANY(v_ids) FOR KEY SHARE
+  ) locked;
+
+  IF v_locked < cardinality(v_ids) THEN
+    RAISE EXCEPTION 'This insurance company was permanently deleted. Choose a different insurance company.'
+      USING ERRCODE = 'P0041';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS patients_guard_insurer_assignment ON public.patients;
+CREATE TRIGGER patients_guard_insurer_assignment
+  BEFORE INSERT OR UPDATE OF insurance ON public.patients
+  FOR EACH ROW EXECUTE FUNCTION public.guard_insurer_assignment('insurance');
+
+DROP TRIGGER IF EXISTS visit_records_guard_insurer_assignment ON public.visit_records;
+CREATE TRIGGER visit_records_guard_insurer_assignment
+  BEFORE INSERT OR UPDATE OF insurance_company ON public.visit_records
+  FOR EACH ROW EXECUTE FUNCTION public.guard_insurer_assignment('insurance_company');
+
+DROP TRIGGER IF EXISTS claims_records_guard_insurer_assignment ON public.claims_records;
+CREATE TRIGGER claims_records_guard_insurer_assignment
+  BEFORE INSERT OR UPDATE OF insurance_billed ON public.claims_records
+  FOR EACH ROW EXECUTE FUNCTION public.guard_insurer_assignment('insurance_billed');
+
+-- ─── 1: delete_insurer_catalog_with_audit ──────────────────────────────────
+CREATE OR REPLACE FUNCTION public.delete_insurer_catalog_with_audit(
+  p_id uuid,
+  p_actor_id uuid,
+  p_actor_type text,
+  p_actor_display text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  v_row public.insurer_catalog;
+  v_values text[];
+  v_patients integer;
+  v_visits integer;
+  v_claims integer;
+BEGIN
+  SELECT * INTO v_row FROM public.insurer_catalog WHERE id = p_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'insurer_catalog_not_found: %', p_id USING ERRCODE = 'P0032';
+  END IF;
+
+  SELECT array_agg(DISTINCT v) INTO v_values
+  FROM (
+    SELECT public.normalize_insurer_name(x) AS v
+    FROM unnest(array_prepend(v_row.name, v_row.aliases)) AS x
+  ) s
+  WHERE v IS NOT NULL AND v <> '';
+
+  SELECT count(*) INTO v_patients FROM public.patients
+  WHERE public.normalize_insurer_name(insurance) = ANY(v_values);
+  SELECT count(*) INTO v_visits FROM public.visit_records
+  WHERE public.normalize_insurer_name(insurance_company) = ANY(v_values);
+  SELECT count(*) INTO v_claims FROM public.claims_records
+  WHERE public.normalize_insurer_name(insurance_billed) = ANY(v_values);
+
+  IF v_patients + v_visits + v_claims > 0 THEN
+    RAISE EXCEPTION 'insurer_catalog_in_use: %', p_id
+      USING ERRCODE = 'P0040',
+            DETAIL = format('patients=%s visits=%s claims=%s', v_patients, v_visits, v_claims);
+  END IF;
+
+  DELETE FROM public.insurer_catalog WHERE id = p_id;
+
+  INSERT INTO public.insurer_catalog_deleted_names (normalized_name, deleted_insurer_id)
+  SELECT unnest(v_values), p_id
+  ON CONFLICT (normalized_name) DO UPDATE
+    SET deleted_insurer_id = EXCLUDED.deleted_insurer_id, deleted_at = now();
+
+  INSERT INTO public.audit_logs (
+    entity_type, entity_id, actor_id, actor_type, actor_display,
+    action, before_data, after_data
+  ) VALUES (
+    'insurer_catalog', p_id, p_actor_id, p_actor_type, p_actor_display,
+    'INSURER_PERMANENT_DELETE',
+    jsonb_build_object(
+      'id', v_row.id,
+      'name', v_row.name,
+      'aliases', to_jsonb(v_row.aliases),
+      'is_active', v_row.is_active,
+      'created_at', v_row.created_at
+    ),
+    NULL
+  );
+
+  RETURN p_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.delete_insurer_catalog_with_audit(uuid, uuid, text, text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.delete_insurer_catalog_with_audit(uuid, uuid, text, text) TO service_role;
+
 
 -- ─── approve_authorization_with_audit (P4-P17R: atomic authorization approval + batch + audit) ─
 -- Folds approveAndCreateNewBatch's writes (approve period, patch patient,

@@ -48,6 +48,10 @@ import {
   createInsurerCatalogEntry,
   deactivateInsurerCatalogEntry,
   reactivateInsurerCatalogEntry,
+  permanentlyDeleteInsurerCatalogEntry,
+  InsurerInUseError,
+  InsurerCatalogEntryNotFoundError,
+  InsurerDeletedError,
   findCms1500EnrichmentCandidates,
   patientHasAnyClaimRecords,
   applyCms1500Enrichment,
@@ -539,13 +543,20 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ input, ctx }) => {
-        const id = await createPatient({
-          name: input.name,
-          insurance: input.insurance,
-          authDate: parseDate(input.authDate),
-          authValidUntil: input.authValidUntil ?? null,
-        }, getActorContext(ctx.user));
-        return { id };
+        try {
+          const id = await createPatient({
+            name: input.name,
+            insurance: input.insurance,
+            authDate: parseDate(input.authDate),
+            authValidUntil: input.authValidUntil ?? null,
+          }, getActorContext(ctx.user));
+          return { id };
+        } catch (err: unknown) {
+          if (err instanceof InsurerDeletedError) {
+            throw new TRPCError({ code: "CONFLICT", message: err.message });
+          }
+          throw err;
+        }
       }),
 
     update: normalProtectedProcedure
@@ -575,14 +586,21 @@ export const appRouter = router({
         // row update and its audit_logs entry in one transaction, and skips
         // the audit row entirely when nothing actually changed — no
         // separate diff/audit step needed here anymore.
-        await updatePatient(id, {
-          ...rest,
-          ...(authDate !== undefined ? { authDate: parseDate(authDate) } : {}),
-          ...(authValidUntil !== undefined ? { authValidUntil } : {}),
-          // Field omitted entirely → key absent → updatePatient leaves the
-          // column untouched. Field present as "none" → explicit clear (NULL).
-          ...(claimsStatus !== undefined ? { claimsStatus: claimsStatus === 'none' ? null : claimsStatus } : {}),
-        }, getActorContext(ctx.user));
+        try {
+          await updatePatient(id, {
+            ...rest,
+            ...(authDate !== undefined ? { authDate: parseDate(authDate) } : {}),
+            ...(authValidUntil !== undefined ? { authValidUntil } : {}),
+            // Field omitted entirely → key absent → updatePatient leaves the
+            // column untouched. Field present as "none" → explicit clear (NULL).
+            ...(claimsStatus !== undefined ? { claimsStatus: claimsStatus === 'none' ? null : claimsStatus } : {}),
+          }, getActorContext(ctx.user));
+        } catch (err: unknown) {
+          if (err instanceof InsurerDeletedError) {
+            throw new TRPCError({ code: "CONFLICT", message: err.message });
+          }
+          throw err;
+        }
 
         return { success: true };
       }),
@@ -661,7 +679,7 @@ export const appRouter = router({
         }
       }),
 
-    // Soft delete (P4-P13) — admin/owner only. Hides the entry from
+    // Soft delete / "Deactivate" (P4-P13) — admin/owner only. Hides the entry from
     // new-selection dropdowns without touching any patient/visit/claim
     // record (those store the insurer name as free text, not an FK into
     // this table) and without deleting the catalog row itself.
@@ -687,6 +705,32 @@ export const appRouter = router({
           throw new TRPCError({ code: "NOT_FOUND", message: "Insurance company not found" });
         }
         return await reactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user));
+      }),
+
+    // Permanent delete (P4-P21) — admin/owner only, for an entry nothing
+    // uses (e.g. a typo). Targets the exact catalog id. The reference check,
+    // the delete, and its audit row all run in one locked Postgres
+    // transaction (delete_insurer_catalog_with_audit), so a concurrent
+    // patient/visit/claim assignment can't slip in between check and delete.
+    // Insurers still in use stay on the soft-delete path above.
+    permanentDelete: adminOrOwnerProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .mutation(async ({ input, ctx }) => {
+        try {
+          await permanentlyDeleteInsurerCatalogEntry(input.id, getActorContext(ctx.user));
+        } catch (err: unknown) {
+          if (err instanceof InsurerInUseError) {
+            throw new TRPCError({ code: "CONFLICT", message: err.message });
+          }
+          if (err instanceof InsurerCatalogEntryNotFoundError) {
+            throw new TRPCError({
+              code: "NOT_FOUND",
+              message: "This insurance company no longer exists. It may already have been deleted.",
+            });
+          }
+          throw err;
+        }
+        return { success: true, id: input.id };
       }),
 
     // Same gate as create/delete/reactivate — insurer catalog management is

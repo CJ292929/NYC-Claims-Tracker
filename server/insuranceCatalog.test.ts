@@ -11,16 +11,38 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TrpcContext } from "./_core/context";
 import type { AuthenticatedUser, ClinicStaffInfo } from "./_core/sdk";
 
-const { dbMock } = vi.hoisted(() => ({
-  dbMock: {
-    listInsurerCatalog: vi.fn(),
-    getInsurerCatalogEntryByNormalizedName: vi.fn(),
-    getInsurerCatalogEntryById: vi.fn(),
-    createInsurerCatalogEntry: vi.fn(),
-    deactivateInsurerCatalogEntry: vi.fn(),
-    reactivateInsurerCatalogEntry: vi.fn(),
-  },
-}));
+const { dbMock } = vi.hoisted(() => {
+  // Same messages as the real classes in server/db.ts — the router forwards
+  // err.message to the client verbatim.
+  class InsurerInUseError extends Error {
+    constructor() {
+      super("This insurance company is used by existing records and cannot be permanently deleted.");
+    }
+  }
+  class InsurerCatalogEntryNotFoundError extends Error {}
+  class InsurerDeletedError extends Error {
+    constructor() {
+      super("This insurance company was permanently deleted. Choose a different insurance company.");
+    }
+  }
+  return {
+    dbMock: {
+      listInsurerCatalog: vi.fn(),
+      getInsurerCatalogEntryByNormalizedName: vi.fn(),
+      getInsurerCatalogEntryById: vi.fn(),
+      createInsurerCatalogEntry: vi.fn(),
+      deactivateInsurerCatalogEntry: vi.fn(),
+      reactivateInsurerCatalogEntry: vi.fn(),
+      permanentlyDeleteInsurerCatalogEntry: vi.fn(),
+      createPatient: vi.fn(),
+      updatePatient: vi.fn(),
+      getPatientById: vi.fn(),
+      InsurerInUseError,
+      InsurerCatalogEntryNotFoundError,
+      InsurerDeletedError,
+    },
+  };
+});
 
 vi.mock("./db", () => dbMock);
 vi.mock("./_core/env", () => ({
@@ -299,5 +321,84 @@ describe("insurance.reactivate — deliberate restore (P4-P13)", () => {
     dbMock.getInsurerCatalogEntryById.mockResolvedValue(undefined);
     await expect(ownerCaller().insurance.reactivate({ id: INACTIVE_CATALOG_ROW.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(dbMock.reactivateInsurerCatalogEntry).not.toHaveBeenCalled();
+  });
+});
+
+describe("insurance.permanentDelete — permanent delete (P4-P21)", () => {
+  beforeEach(() => {
+    dbMock.permanentlyDeleteInsurerCatalogEntry.mockResolvedValue(undefined);
+  });
+
+  it("owner admin can permanently delete an unused insurer, targeting the exact catalog id", async () => {
+    await expect(ownerCaller().insurance.permanentDelete({ id: CATALOG_ROW.id }))
+      .resolves.toEqual({ success: true, id: CATALOG_ROW.id });
+    expect(dbMock.permanentlyDeleteInsurerCatalogEntry).toHaveBeenCalledWith(
+      CATALOG_ROW.id,
+      expect.objectContaining({ actorType: "owner" })
+    );
+  });
+
+  it("clinic admin can permanently delete an unused insurer", async () => {
+    await expect(clinicAdminCaller().insurance.permanentDelete({ id: CATALOG_ROW.id })).resolves.toMatchObject({ success: true });
+    expect(dbMock.permanentlyDeleteInsurerCatalogEntry).toHaveBeenCalledWith(
+      CATALOG_ROW.id,
+      expect.objectContaining({ actorType: "clinic_user" })
+    );
+  });
+
+  it("clinic staff (non-admin) is denied server-side", async () => {
+    await expect(clinicStaffCaller().insurance.permanentDelete({ id: CATALOG_ROW.id })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(dbMock.permanentlyDeleteInsurerCatalogEntry).not.toHaveBeenCalled();
+  });
+
+  it("unauthenticated caller is denied", async () => {
+    await expect(callerFor(null).insurance.permanentDelete({ id: CATALOG_ROW.id })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    expect(dbMock.permanentlyDeleteInsurerCatalogEntry).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-uuid id (no fuzzy/name targeting)", async () => {
+    await expect(ownerCaller().insurance.permanentDelete({ id: "Aetna" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(dbMock.permanentlyDeleteInsurerCatalogEntry).not.toHaveBeenCalled();
+  });
+
+  it("a referenced insurer is refused with the readable in-use message", async () => {
+    dbMock.permanentlyDeleteInsurerCatalogEntry.mockRejectedValue(new dbMock.InsurerInUseError());
+    await expect(ownerCaller().insurance.permanentDelete({ id: CATALOG_ROW.id })).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: "This insurance company is used by existing records and cannot be permanently deleted.",
+    });
+  });
+
+  it("an already-deleted id is a readable NOT_FOUND", async () => {
+    dbMock.permanentlyDeleteInsurerCatalogEntry.mockRejectedValue(new dbMock.InsurerCatalogEntryNotFoundError("x"));
+    await expect(ownerCaller().insurance.permanentDelete({ id: CATALOG_ROW.id })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+      message: "This insurance company no longer exists. It may already have been deleted.",
+    });
+  });
+
+  it("never falls back to the soft-delete path or touches patient data", async () => {
+    await ownerCaller().insurance.permanentDelete({ id: CATALOG_ROW.id });
+    expect(dbMock.deactivateInsurerCatalogEntry).not.toHaveBeenCalled();
+    expect(dbMock.updatePatient).not.toHaveBeenCalled();
+    expect(dbMock.createPatient).not.toHaveBeenCalled();
+  });
+});
+
+describe("patients.create/update — assigning a permanently deleted insurer (P4-P21)", () => {
+  it("create surfaces the deleted-insurer guard as a readable CONFLICT", async () => {
+    dbMock.createPatient.mockRejectedValue(new dbMock.InsurerDeletedError());
+    await expect(clinicStaffCaller().patients.create({ name: "Jane Doe", insurance: "Typo Insurer" })).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: "This insurance company was permanently deleted. Choose a different insurance company.",
+    });
+  });
+
+  it("update surfaces the deleted-insurer guard as a readable CONFLICT", async () => {
+    dbMock.getPatientById.mockResolvedValue({ id: CATALOG_ROW.id, name: "Jane Doe", insurance: "Aetna" });
+    dbMock.updatePatient.mockRejectedValue(new dbMock.InsurerDeletedError());
+    await expect(
+      clinicStaffCaller().patients.update({ id: CATALOG_ROW.id, insurance: "Typo Insurer" })
+    ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });
