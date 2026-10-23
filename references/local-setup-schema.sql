@@ -857,17 +857,14 @@ CREATE TRIGGER patients_guard_insurer_assignment
   BEFORE INSERT OR UPDATE OF insurance ON public.patients
   FOR EACH ROW EXECUTE FUNCTION public.guard_insurer_assignment('insurance');
 
+-- P4-P22: patients.insurance only. visit_records / claims_records record
+-- historical insurer text (incl. a deleted insurer a patient still carries,
+-- copied into new visit batches), so they are deliberately not guarded.
 DROP TRIGGER IF EXISTS visit_records_guard_insurer_assignment ON public.visit_records;
-CREATE TRIGGER visit_records_guard_insurer_assignment
-  BEFORE INSERT OR UPDATE OF insurance_company ON public.visit_records
-  FOR EACH ROW EXECUTE FUNCTION public.guard_insurer_assignment('insurance_company');
-
 DROP TRIGGER IF EXISTS claims_records_guard_insurer_assignment ON public.claims_records;
-CREATE TRIGGER claims_records_guard_insurer_assignment
-  BEFORE INSERT OR UPDATE OF insurance_billed ON public.claims_records
-  FOR EACH ROW EXECUTE FUNCTION public.guard_insurer_assignment('insurance_billed');
 
--- ─── 1: delete_insurer_catalog_with_audit ──────────────────────────────────
+-- ─── 1: delete_insurer_catalog_with_audit (P4-P22: catalog-only; see
+-- supabase/migrations/20261024000000_p4_p22_insurer_catalog_only_delete.sql) ─
 CREATE OR REPLACE FUNCTION public.delete_insurer_catalog_with_audit(
   p_id uuid,
   p_actor_id uuid,
@@ -886,6 +883,16 @@ DECLARE
   v_visits integer;
   v_claims integer;
 BEGIN
+  -- Never delete through a foreign key: an FK's ON DELETE action would change
+  -- records this function promises to leave untouched.
+  IF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_constraint
+    WHERE contype = 'f' AND confrelid = 'public.insurer_catalog'::regclass
+  ) THEN
+    RAISE EXCEPTION 'insurer_catalog_has_foreign_keys: refusing to delete %', p_id
+      USING ERRCODE = 'P0042';
+  END IF;
+
   SELECT * INTO v_row FROM public.insurer_catalog WHERE id = p_id FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'insurer_catalog_not_found: %', p_id USING ERRCODE = 'P0032';
@@ -898,18 +905,14 @@ BEGIN
   ) s
   WHERE v IS NOT NULL AND v <> '';
 
+  -- Informational only (recorded in the audit row) — records that store
+  -- this name keep it; nothing here blocks the delete.
   SELECT count(*) INTO v_patients FROM public.patients
   WHERE public.normalize_insurer_name(insurance) = ANY(v_values);
   SELECT count(*) INTO v_visits FROM public.visit_records
   WHERE public.normalize_insurer_name(insurance_company) = ANY(v_values);
   SELECT count(*) INTO v_claims FROM public.claims_records
   WHERE public.normalize_insurer_name(insurance_billed) = ANY(v_values);
-
-  IF v_patients + v_visits + v_claims > 0 THEN
-    RAISE EXCEPTION 'insurer_catalog_in_use: %', p_id
-      USING ERRCODE = 'P0040',
-            DETAIL = format('patients=%s visits=%s claims=%s', v_patients, v_visits, v_claims);
-  END IF;
 
   DELETE FROM public.insurer_catalog WHERE id = p_id;
 
@@ -929,7 +932,10 @@ BEGIN
       'name', v_row.name,
       'aliases', to_jsonb(v_row.aliases),
       'is_active', v_row.is_active,
-      'created_at', v_row.created_at
+      'created_at', v_row.created_at,
+      'retained_references', jsonb_build_object(
+        'patients', v_patients, 'visits', v_visits, 'claims', v_claims
+      )
     ),
     NULL
   );

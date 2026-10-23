@@ -19,7 +19,7 @@ import { trpc } from '@/lib/trpc';
 import { findMatchingPatient, fuzzyNameMatch, classifyPatientMatch } from '@shared/nameMatch';
 import { insurerMatchValues } from '@shared/insuranceCatalog';
 import { parseCsvText, parseCsvRow, normalizePatientName, emptyCsvImportSummary, type CsvImportSummary } from '@/lib/csvImport';
-import { isStaleInsurerSelection, matchesPatientFilters } from '@/lib/patientFilters';
+import { historicalInsurerNames, isStaleInsurerSelection, matchesPatientFilters } from '@/lib/patientFilters';
 import { routeToNavSection, navSectionToRoute } from '@/lib/navSection';
 import { canManageStaff as canManageStaffAuthGate } from '@/lib/authGate';
 import { StatusBadge } from '@/components/dashboard/StatusBadge';
@@ -608,6 +608,13 @@ export default function Dashboard() {
   // Filters/counts use the FULL catalog (active + inactive) — a deactivated
   // insurer's existing patients must stay filterable/countable (P4-P13).
   const insuranceList = useMemo(() => insurerCatalog.map(entry => entry.name), [insurerCatalog]);
+  // Insurers patients still record that aren't in the catalog — notably a
+  // permanently deleted one (P4-P22), whose records keep their insurer text.
+  // Filter-only "Historical insurers" group; never offered for new selection.
+  const historicalInsuranceList = useMemo(
+    () => historicalInsurerNames(insurerCatalog, patients),
+    [insurerCatalog, patients]
+  );
   // New-selection dropdowns (Add/Edit Patient) show active insurers only —
   // see activeInsuranceNamesFor below for the Edit dialog's extra rule that
   // preserves a patient's current (possibly now-inactive) insurer.
@@ -772,11 +779,14 @@ export default function Dashboard() {
     onError: (e) => toast.error(e.message),
   });
 
-  // Permanent delete (P4-P21) — see insurance.permanentDelete. The server
-  // refuses entries any record uses; on any failure the confirmation stays
-  // open with the reason and the entry stays in the list. The single-flight
-  // guard (not just `disabled`) blocks a second click landing before the
-  // pending state re-renders — see client/src/lib/concurrencyGuards.ts.
+  // Permanent delete (P4-P21, P4-P22) — see insurance.permanentDelete.
+  // Removes the catalog entry only; records keep their insurer text and it
+  // reappears solely under the filter's "Historical insurers" group. The
+  // success toast runs only after the server has the DB's confirmation; on
+  // any failure the confirmation stays open with the reason and the entry
+  // stays in the list. The single-flight guard (not just `disabled`) blocks
+  // a second click landing before the pending state re-renders — see
+  // client/src/lib/concurrencyGuards.ts.
   const permanentDeleteGuardRef = useRef(createSingleFlightGuard());
   const permanentlyDeleteInsurer = trpc.insurance.permanentDelete.useMutation({
     onSettled: () => permanentDeleteGuardRef.current.exit(),
@@ -1133,19 +1143,30 @@ export default function Dashboard() {
     if (newPatientInsurance && !activeInsuranceNames.includes(newPatientInsurance)) {
       setNewPatientInsurance('');
     }
+    // Edit Patient: a value picked from the list before it was deleted is
+    // dropped back to what the patient actually has recorded (kept even if
+    // that is the deleted insurer — records keep their insurer, P4-P22).
+    if (
+      editPatientInsurance &&
+      !activeInsuranceNames.includes(editPatientInsurance) &&
+      editPatientInsurance !== selectedPatient?.insurance
+    ) {
+      setEditPatientInsurance(selectedPatient?.insurance ?? '');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [insurerCatalogLoaded, insurerCatalog, patientsLoading, patients]);
 
   // Shared between the desktop Patient Workspace filters panel and the mobile
   // Filters sheet so the two never drift.
   const insuranceCounts = useMemo(
-    () => Object.fromEntries(
-      insurerCatalog.map(entry => {
+    () => Object.fromEntries([
+      ...insurerCatalog.map(entry => {
         const matchValues = insurerMatchValues(entry);
         return [entry.name, activePatients.filter(p => matchValues.includes(p.insurance)).length];
-      })
-    ),
-    [insurerCatalog, activePatients]
+      }),
+      ...historicalInsuranceList.map(name => [name, activePatients.filter(p => p.insurance === name).length]),
+    ]),
+    [insurerCatalog, historicalInsuranceList, activePatients]
   );
 
   const handleSelectInsurance = (insurance: string) => {
@@ -4691,8 +4712,8 @@ export default function Dashboard() {
           <DialogTitle className="text-brand-blue">Manage Insurance Companies</DialogTitle>
           <DialogDescription>
             Deactivate hides a company from new patient/claim forms and can be undone. Delete Insurance
-            Company permanently removes an unused company from the catalog. Neither ever changes an
-            existing patient, visit, or claim.
+            Company permanently removes it from the catalog. Neither ever changes an existing patient,
+            visit, or claim — those keep their recorded insurance information.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-1 max-h-[55vh] overflow-y-auto pr-1">
@@ -4822,9 +4843,10 @@ export default function Dashboard() {
           <AlertDialogDescription className="text-muted-foreground">
             {insurerPendingPermanentDelete && (
               <>
-                Permanently delete ‘{insurerPendingPermanentDelete.name}’? This cannot be undone.
+                Permanently delete ‘{insurerPendingPermanentDelete.name}’ from the insurance catalog?
                 <br />
-                The company will be removed from the insurance catalog.
+                Existing patient, visit, and claim records will keep their recorded insurance
+                information. This cannot be undone.
               </>
             )}
           </AlertDialogDescription>
@@ -4913,6 +4935,7 @@ export default function Dashboard() {
           {filterChipsElement}
           <PatientRecordsWorkspace
             insuranceList={insuranceList}
+            historicalInsuranceList={historicalInsuranceList}
             insuranceCounts={insuranceCounts}
             selectedInsurance={selectedInsurance}
             onSelectInsurance={handleSelectInsurance}
@@ -4967,6 +4990,7 @@ export default function Dashboard() {
             searchQuery={dischargedSearchQuery}
             onSearchQueryChange={setDischargedSearchQuery}
             insuranceList={insuranceList}
+            historicalInsuranceList={historicalInsuranceList}
             insuranceCounts={insuranceCounts}
             selectedInsurance={selectedInsurance}
             onSelectInsurance={handleSelectInsurance}

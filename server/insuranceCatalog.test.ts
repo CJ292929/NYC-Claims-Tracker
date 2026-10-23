@@ -14,9 +14,9 @@ import type { AuthenticatedUser, ClinicStaffInfo } from "./_core/sdk";
 const { dbMock } = vi.hoisted(() => {
   // Same messages as the real classes in server/db.ts — the router forwards
   // err.message to the client verbatim.
-  class InsurerInUseError extends Error {
+  class InsurerCatalogHasForeignKeysError extends Error {
     constructor() {
-      super("This insurance company is used by existing records and cannot be permanently deleted.");
+      super("Insurance companies can't be permanently deleted until a database foreign key on the catalog is reviewed.");
     }
   }
   class InsurerCatalogEntryNotFoundError extends Error {}
@@ -37,7 +37,7 @@ const { dbMock } = vi.hoisted(() => {
       createPatient: vi.fn(),
       updatePatient: vi.fn(),
       getPatientById: vi.fn(),
-      InsurerInUseError,
+      InsurerCatalogHasForeignKeysError,
       InsurerCatalogEntryNotFoundError,
       InsurerDeletedError,
     },
@@ -329,7 +329,7 @@ describe("insurance.permanentDelete — permanent delete (P4-P21)", () => {
     dbMock.permanentlyDeleteInsurerCatalogEntry.mockResolvedValue(undefined);
   });
 
-  it("owner admin can permanently delete an unused insurer, targeting the exact catalog id", async () => {
+  it("owner admin can permanently delete an insurer, targeting the exact catalog id", async () => {
     await expect(ownerCaller().insurance.permanentDelete({ id: CATALOG_ROW.id }))
       .resolves.toEqual({ success: true, id: CATALOG_ROW.id });
     expect(dbMock.permanentlyDeleteInsurerCatalogEntry).toHaveBeenCalledWith(
@@ -338,7 +338,7 @@ describe("insurance.permanentDelete — permanent delete (P4-P21)", () => {
     );
   });
 
-  it("clinic admin can permanently delete an unused insurer", async () => {
+  it("clinic admin can permanently delete an insurer", async () => {
     await expect(clinicAdminCaller().insurance.permanentDelete({ id: CATALOG_ROW.id })).resolves.toMatchObject({ success: true });
     expect(dbMock.permanentlyDeleteInsurerCatalogEntry).toHaveBeenCalledWith(
       CATALOG_ROW.id,
@@ -361,11 +361,25 @@ describe("insurance.permanentDelete — permanent delete (P4-P21)", () => {
     expect(dbMock.permanentlyDeleteInsurerCatalogEntry).not.toHaveBeenCalled();
   });
 
-  it("a referenced insurer is refused with the readable in-use message", async () => {
-    dbMock.permanentlyDeleteInsurerCatalogEntry.mockRejectedValue(new dbMock.InsurerInUseError());
+  it("a referenced insurer is no longer refused: the router has no in-use path (P4-P22)", async () => {
+    // The DB deletes the catalog row regardless of references; the router
+    // just forwards the confirmed delete.
+    dbMock.permanentlyDeleteInsurerCatalogEntry.mockResolvedValue(undefined);
+    await expect(ownerCaller().insurance.permanentDelete({ id: CATALOG_ROW.id }))
+      .resolves.toEqual({ success: true, id: CATALOG_ROW.id });
+  });
+
+  it("a foreign key into the catalog is a readable PRECONDITION_FAILED, never a success", async () => {
+    dbMock.permanentlyDeleteInsurerCatalogEntry.mockRejectedValue(new dbMock.InsurerCatalogHasForeignKeysError());
     await expect(ownerCaller().insurance.permanentDelete({ id: CATALOG_ROW.id })).rejects.toMatchObject({
-      code: "CONFLICT",
-      message: "This insurance company is used by existing records and cannot be permanently deleted.",
+      code: "PRECONDITION_FAILED",
+    });
+  });
+
+  it("an unexpected DB failure is surfaced as an error, never a success", async () => {
+    dbMock.permanentlyDeleteInsurerCatalogEntry.mockRejectedValue(new Error("connection reset"));
+    await expect(ownerCaller().insurance.permanentDelete({ id: CATALOG_ROW.id })).rejects.toMatchObject({
+      code: "INTERNAL_SERVER_ERROR",
     });
   });
 

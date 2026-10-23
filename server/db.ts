@@ -1987,16 +1987,6 @@ export async function reactivateInsurerCatalogEntry(
   return updated;
 }
 
-/** Thrown by delete_insurer_catalog_with_audit (P0040) when any patient,
- *  visit, or claim row — active or historical — still stores this entry's
- *  name or one of its aliases. Nothing was deleted. */
-export class InsurerInUseError extends Error {
-  constructor() {
-    super("This insurance company is used by existing records and cannot be permanently deleted.");
-    this.name = "InsurerInUseError";
-  }
-}
-
 export class InsurerCatalogEntryNotFoundError extends Error {
   constructor(id: string) {
     super(`Insurance company ${id} not found`);
@@ -2007,7 +1997,9 @@ export class InsurerCatalogEntryNotFoundError extends Error {
 /** Thrown when a patient write assigns an insurer that was permanently
  *  deleted — either concurrently with this write, or earlier from a form
  *  whose insurer list was already stale (P0041, raised by the
- *  guard_insurer_assignment trigger; see the P4-P21 migration). */
+ *  guard_insurer_assignment trigger on patients.insurance; see the P4-P21
+ *  and P4-P22 migrations). A patient that already stored the name before
+ *  the delete keeps it, and saving it unchanged is never rejected. */
 export class InsurerDeletedError extends Error {
   constructor() {
     super("This insurance company was permanently deleted. Choose a different insurance company.");
@@ -2019,18 +2011,30 @@ function mapInsurerAssignmentError(error: { code?: string }): void {
   if (error.code === "P0041") throw new InsurerDeletedError();
 }
 
-/** Permanent delete (P4-P21). One Postgres transaction locks the exact row by
- *  id, rejects if any patient/visit/claim (incl. discharged/historical rows)
- *  references its name or aliases, then deletes it, tombstones the name so
- *  re-run seeds can't recreate it, and writes the INSURER_PERMANENT_DELETE
- *  audit row — all or nothing. Never touches patient/visit/claim rows.
+/** Thrown (P0042) if a foreign key into insurer_catalog ever exists: its ON
+ *  DELETE action could change records, so the DB refuses to delete. */
+export class InsurerCatalogHasForeignKeysError extends Error {
+  constructor() {
+    super("Insurance companies can't be permanently deleted until a database foreign key on the catalog is reviewed.");
+    this.name = "InsurerCatalogHasForeignKeysError";
+  }
+}
+
+/** Permanent catalog-only delete (P4-P21, P4-P22). One Postgres transaction
+ *  locks the exact row by id, deletes it, tombstones its name/aliases so
+ *  re-run seeds and backfills can't recreate it, and writes the
+ *  INSURER_PERMANENT_DELETE audit row (with counts of the records that still
+ *  carry the name) — all or nothing. Records that store the name are NOT a
+ *  blocker and are never touched: patient/visit/claim insurer values are
+ *  free text with no FK into the catalog, so they keep exactly what they
+ *  recorded. Resolves only once the DB has confirmed it deleted `id`.
  *  Callers (insurance.permanentDelete) are responsible for the admin/owner
  *  authorization check; this function does not re-check it. */
 export async function permanentlyDeleteInsurerCatalogEntry(
   id: string,
   actor: ActorContext
 ): Promise<void> {
-  const { error } = await supabase.rpc("delete_insurer_catalog_with_audit", {
+  const { data: deletedId, error } = await supabase.rpc("delete_insurer_catalog_with_audit", {
     p_id: id,
     p_actor_id: actor.actorId,
     p_actor_type: actor.actorType,
@@ -2039,8 +2043,11 @@ export async function permanentlyDeleteInsurerCatalogEntry(
 
   if (error) {
     console.error("[Supabase] permanentlyDeleteInsurerCatalogEntry:", error);
-    if (error.code === "P0040") throw new InsurerInUseError();
     if (error.code === "P0032") throw new InsurerCatalogEntryNotFoundError(id);
+    if (error.code === "P0042") throw new InsurerCatalogHasForeignKeysError();
     throw error;
+  }
+  if (deletedId !== id) {
+    throw new Error(`permanentlyDeleteInsurerCatalogEntry: DB did not confirm deleting ${id}`);
   }
 }
