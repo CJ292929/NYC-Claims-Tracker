@@ -1,12 +1,17 @@
 /**
  * server/insurerPermanentDelete.pg.integration.test.ts
  *
- * Real-Postgres tests for P4-P21's permanent insurer delete
- * (supabase/migrations/20261023000000_p4_p21_insurer_permanent_delete.sql):
- * reference blocking by name and alias, atomic delete + audit, tombstones
- * that stop re-run seeds from recreating a deleted entry, and the
- * assignment/deletion race. The race only exists under genuinely concurrent
- * Postgres transactions, which the mocked-Supabase unit tests can't produce.
+ * Real-Postgres tests for the permanent insurer delete — P4-P21
+ * (supabase/migrations/20261023000000_p4_p21_insurer_permanent_delete.sql)
+ * as changed by P4-P22
+ * (supabase/migrations/20261024000000_p4_p22_insurer_catalog_only_delete.sql):
+ * catalog-only deletion that succeeds even when records store the name
+ * (by name, alias, or a casing/spacing variant) and leaves every patient,
+ * visit, claim, and earlier audit row unchanged; atomic delete + audit; the
+ * foreign-key refusal; tombstones that stop re-run seeds/backfills from
+ * recreating a deleted entry; and the assignment/deletion race. The race
+ * only exists under genuinely concurrent Postgres transactions, which the
+ * mocked-Supabase unit tests can't produce.
  *
  * Same harness as lastAdminGuard.pg.integration.test.ts: a disposable
  * `postgres:16` Docker container loaded with references/local-setup-schema.sql
@@ -144,6 +149,21 @@ async function insertPatient(insurance: string, isActive = true): Promise<string
   return id;
 }
 
+/** Every row that could reference an insurer, plus all audit rows other than
+ *  the delete's own — compared before/after a delete to prove nothing but
+ *  the catalog row (and its new audit/tombstone rows) changed. */
+async function recordsSnapshot(): Promise<string> {
+  const [{ snap }] = await q<{ snap: unknown }>(`
+    SELECT jsonb_build_object(
+      'patients', (SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY p.id), '[]') FROM patients p),
+      'visits', (SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY v.id), '[]') FROM visit_records v),
+      'claims', (SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY c.id), '[]') FROM claims_records c),
+      'audits', (SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY a.id), '[]') FROM audit_logs a
+                 WHERE a.action <> 'INSURER_PERMANENT_DELETE')
+    ) AS snap`);
+  return JSON.stringify(snap);
+}
+
 function uniqueName(label: string) {
   return `P4P21 ${label} ${randomUUID().slice(0, 8)}`;
 }
@@ -206,46 +226,111 @@ describe.skipIf(!HAS_DOCKER)("insurer permanent delete (real Postgres)", () => {
     expect(await q(`SELECT 1 FROM audit_logs WHERE entity_id = $1`, [id])).toHaveLength(0);
   }, 30_000);
 
-  it("blocks when a discharged (inactive) patient still stores the name, changing nothing", async () => {
-    const name = uniqueName("Discharged Ref");
-    const id = await createInsurer(name);
-    const patientId = await insertPatient(name, false);
-
-    expect(await deleteInsurer(id)).toMatchObject({ ok: false, code: "P0040" });
-    expect(await catalogRowExists(id)).toBe(true);
-    const [patient] = await q<{ insurance: string }>(`SELECT insurance FROM patients WHERE id = $1`, [patientId]);
-    expect(patient.insurance).toBe(name);
-    expect(await q(`SELECT 1 FROM audit_logs WHERE entity_id = $1 AND action = 'INSURER_PERMANENT_DELETE'`, [id])).toHaveLength(0);
-    expect(await q(`SELECT 1 FROM insurer_catalog_deleted_names WHERE deleted_insurer_id = $1`, [id])).toHaveLength(0);
-  }, 30_000);
-
-  it("blocks on a historical visit record that stores an ALIAS (case/spacing-insensitive)", async () => {
-    const name = uniqueName("Renamed");
+  it("deletes a referenced insurer from the catalog; every record and earlier audit row is unchanged", async () => {
+    const name = uniqueName("Referenced");
     const alias = uniqueName("Pre Rename");
     const id = await createInsurer(name, [alias]);
-    const patientId = await insertPatient("Some Other Insurer");
+    const unrelated = await createInsurer(uniqueName("Unrelated"));
+
+    const active = await insertPatient(name);
+    const discharged = await insertPatient(name, false);
+    // A casing/spacing variant — invisible to the UI's exact-match filter
+    // count, which is why such entries used to look unused yet be blocked.
+    const variant = await insertPatient(`  ${name.toUpperCase().replace(/ /g, "  ")} `);
+    await q(`INSERT INTO visit_records (patient_id, auth_period, insurance_company) VALUES ($1, 1, $2), ($3, 1, $4)`,
+      [active, name, discharged, alias]);
+    await q(`INSERT INTO claims_records (patient_id, auth_period, insurance_billed) VALUES ($1, 1, $2)`, [variant, alias]);
     await q(
-      `INSERT INTO visit_records (patient_id, auth_period, insurance_company) VALUES ($1, 1, $2)`,
-      [patientId, `  ${alias.toUpperCase().replace(/ /g, "   ")} `]
+      `INSERT INTO audit_logs (entity_type, entity_id, patient_id, actor_type, actor_display, action, before_data, after_data)
+       VALUES ('patient', $1, $1, 'owner', 'Test Owner', 'PATIENT_UPDATE', '{"insurance": "x"}', $2::jsonb)`,
+      [active, JSON.stringify({ insurance: name })]
     );
 
-    expect(await deleteInsurer(id)).toMatchObject({ ok: false, code: "P0040" });
-    expect(await catalogRowExists(id)).toBe(true);
+    const before = await recordsSnapshot();
+    expect(await deleteInsurer(id)).toEqual({ ok: true });
+
+    expect(await catalogRowExists(id)).toBe(false);
+    expect(await catalogRowExists(unrelated)).toBe(true);
+    expect(await recordsSnapshot()).toBe(before);
+
+    const [audit] = await q<{ before_data: { id: string; name: string; retained_references: Record<string, number> } }>(
+      `SELECT before_data FROM audit_logs WHERE entity_id = $1 AND action = 'INSURER_PERMANENT_DELETE'`, [id]
+    );
+    expect(audit.before_data).toMatchObject({ id, name, retained_references: { patients: 3, visits: 2, claims: 1 } });
   }, 30_000);
 
-  it("blocks on a claim record that stores the name", async () => {
-    const name = uniqueName("Claim Ref");
-    const id = await createInsurer(name);
-    const patientId = await insertPatient("Some Other Insurer");
-    await q(`INSERT INTO claims_records (patient_id, auth_period, insurance_billed) VALUES ($1, 1, $2)`, [patientId, name]);
+  it("an unreferenced delete records zero retained references", async () => {
+    const id = await createInsurer(uniqueName("Unreferenced"));
+    expect(await deleteInsurer(id)).toEqual({ ok: true });
+    const [audit] = await q<{ before_data: { retained_references: Record<string, number> } }>(
+      `SELECT before_data FROM audit_logs WHERE entity_id = $1 AND action = 'INSURER_PERMANENT_DELETE'`, [id]
+    );
+    expect(audit.before_data.retained_references).toEqual({ patients: 0, visits: 0, claims: 0 });
+  }, 30_000);
 
-    expect(await deleteInsurer(id)).toMatchObject({ ok: false, code: "P0040" });
+  it("after a referenced delete, records carrying the name keep working; only a new patient selection is refused", async () => {
+    const name = uniqueName("Still Recorded");
+    const id = await createInsurer(name);
+    const patientId = await insertPatient(name);
+    await q(`INSERT INTO visit_records (patient_id, auth_period, insurance_company, sessions_authorized) VALUES ($1, 1, $2, 1)`, [patientId, name]);
+    expect(await deleteInsurer(id)).toEqual({ ok: true });
+
+    // Editing other fields — and re-saving the same insurer — is allowed.
+    expect(await settle(q(`UPDATE patients SET name = name || ' (edited)', insurance = insurance WHERE id = $1`, [patientId])))
+      .toEqual({ ok: true });
+
+    // A new authorization batch copies the patient's recorded insurer into
+    // new visit rows; that is history, not a new selection.
+    expect(await settle(q(
+      `SELECT approve_authorization_with_audit($1, 1, 2, NULL, NULL, false, NULL, NULL, 'owner', 'Test Owner')`, [patientId]
+    ))).toEqual({ ok: true });
+    const visits = await q<{ insurance_company: string }>(
+      `SELECT insurance_company FROM visit_records WHERE patient_id = $1 AND auth_period = 2`, [patientId]
+    );
+    expect(visits).toHaveLength(2);
+    expect(visits.every((v) => v.insurance_company === name)).toBe(true);
+
+    // A historical EOB billed to the deleted insurer still imports.
+    expect(await settle(q(`INSERT INTO claims_records (patient_id, auth_period, insurance_billed) VALUES ($1, 1, $2)`, [patientId, name])))
+      .toEqual({ ok: true });
+
+    // Choosing the deleted insurer for another patient IS a new selection.
+    const other = await insertPatient(uniqueName("Other Insurer"));
+    expect(await settle(q(`UPDATE patients SET insurance = $2 WHERE id = $1`, [other, name])))
+      .toMatchObject({ ok: false, code: "P0041" });
+    const [otherRow] = await q<{ insurance: string }>(`SELECT insurance FROM patients WHERE id = $1`, [other]);
+    expect(otherRow.insurance).not.toBe(name);
+  }, 30_000);
+
+  it("refuses (P0042) rather than delete through a foreign key into the catalog", async () => {
+    const id = await createInsurer(uniqueName("FK Guard"));
+    const client = await connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`CREATE TABLE p4p22_fk_probe (insurer_id uuid REFERENCES insurer_catalog(id) ON DELETE CASCADE)`);
+      expect(await settle(deleteSql(client, id))).toMatchObject({ ok: false, code: "P0042" });
+      await client.query("ROLLBACK");
+    } finally {
+      await client.end();
+    }
     expect(await catalogRowExists(id)).toBe(true);
+    // The real schema has no FK into the catalog, so the guard never fires there.
+    expect(await q(`SELECT 1 FROM pg_constraint WHERE contype = 'f' AND confrelid = 'insurer_catalog'::regclass`)).toHaveLength(0);
+  }, 30_000);
+
+  it("only service_role can execute the delete function (no anon/authenticated path)", async () => {
+    const [row] = await q<{ anon: boolean; authed: boolean; service: boolean }>(`
+      SELECT has_function_privilege('anon', 'delete_insurer_catalog_with_audit(uuid, uuid, text, text)', 'EXECUTE') AS anon,
+             has_function_privilege('authenticated', 'delete_insurer_catalog_with_audit(uuid, uuid, text, text)', 'EXECUTE') AS authed,
+             has_function_privilege('service_role', 'delete_insurer_catalog_with_audit(uuid, uuid, text, text)', 'EXECUTE') AS service`);
+    expect(row).toEqual({ anon: false, authed: false, service: true });
   }, 30_000);
 
   it("rolls the delete back when the audit insert fails (delete + audit are atomic)", async () => {
     const name = uniqueName("Audit Rollback");
     const id = await createInsurer(name);
+    await insertPatient(name);
+    const before = await recordsSnapshot();
 
     // audit_logs_actor_type_check rejects this — the audit INSERT is the last
     // statement in the function, after the DELETE and tombstone insert.
@@ -254,6 +339,8 @@ describe.skipIf(!HAS_DOCKER)("insurer permanent delete (real Postgres)", () => {
 
     expect(await catalogRowExists(id)).toBe(true);
     expect(await q(`SELECT 1 FROM insurer_catalog_deleted_names WHERE deleted_insurer_id = $1`, [id])).toHaveLength(0);
+    expect(await q(`SELECT 1 FROM audit_logs WHERE entity_id = $1 AND action = 'INSURER_PERMANENT_DELETE'`, [id])).toHaveLength(0);
+    expect(await recordsSnapshot()).toBe(before);
   }, 30_000);
 
   it("re-running the seed migrations does not recreate a deleted seeded entry", async () => {
@@ -266,6 +353,22 @@ describe.skipIf(!HAS_DOCKER)("insurer permanent delete (real Postgres)", () => {
     }
     expect(await q(`SELECT 1 FROM insurer_catalog WHERE normalized_name = 'hanover'`)).toHaveLength(0);
   }, 120_000);
+
+  it("re-running the patients/visits backfill migration does not recreate a deleted REFERENCED entry", async () => {
+    // 20261004000000 backfills insurer_catalog from DISTINCT patients.insurance
+    // and visit_records.insurance_company — exactly the values a referenced
+    // delete leaves behind.
+    const name = uniqueName("Backfill");
+    const id = await createInsurer(name);
+    const patientId = await insertPatient(name);
+    await q(`INSERT INTO visit_records (patient_id, auth_period, insurance_company) VALUES ($1, 1, $2)`, [patientId, name]);
+    expect(await deleteInsurer(id)).toEqual({ ok: true });
+
+    psqlFile(path.join(MIGRATIONS_DIR, "20261004000000_insurer_catalog.sql"));
+    expect(await q(`SELECT 1 FROM insurer_catalog WHERE normalized_name = lower($1)`, [name])).toHaveLength(0);
+    const [patient] = await q<{ insurance: string }>(`SELECT insurance FROM patients WHERE id = $1`, [patientId]);
+    expect(patient.insurance).toBe(name);
+  }, 60_000);
 
   it("a deliberate admin re-add clears the tombstone and recreates the entry", async () => {
     const name = uniqueName("Re Add");
@@ -291,7 +394,7 @@ describe.skipIf(!HAS_DOCKER)("insurer permanent delete (real Postgres)", () => {
     expect(await settle(insertPatient(uniqueName("Never Catalogued")))).toEqual({ ok: true });
   }, 30_000);
 
-  it("concurrent: assignment commits first → the delete waits for it, then is blocked", async () => {
+  it("concurrent: assignment commits first → the delete waits for it, then succeeds; the record keeps its insurer", async () => {
     const name = uniqueName("Race Assign First");
     const id = await createInsurer(name);
 
@@ -305,8 +408,14 @@ describe.skipIf(!HAS_DOCKER)("insurer permanent delete (real Postgres)", () => {
       expect(await isBlocked(pendingDelete)).toBe(true);
 
       await assigner.query("COMMIT");
-      expect(await pendingDelete).toMatchObject({ ok: false, code: "P0040" });
-      expect(await catalogRowExists(id)).toBe(true);
+      expect(await pendingDelete).toEqual({ ok: true });
+      expect(await catalogRowExists(id)).toBe(false);
+      const [patient] = await q<{ insurance: string }>(`SELECT insurance FROM patients WHERE name = 'race patient'`);
+      expect(patient.insurance).toBe(name);
+      const [audit] = await q<{ before_data: { retained_references: { patients: number } } }>(
+        `SELECT before_data FROM audit_logs WHERE entity_id = $1 AND action = 'INSURER_PERMANENT_DELETE'`, [id]
+      );
+      expect(audit.before_data.retained_references.patients).toBe(1);
     } finally {
       await assigner.end();
       await deleter.end();

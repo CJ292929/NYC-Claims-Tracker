@@ -49,7 +49,7 @@ import {
   deactivateInsurerCatalogEntry,
   reactivateInsurerCatalogEntry,
   permanentlyDeleteInsurerCatalogEntry,
-  InsurerInUseError,
+  InsurerCatalogHasForeignKeysError,
   InsurerCatalogEntryNotFoundError,
   InsurerDeletedError,
   findCms1500EnrichmentCandidates,
@@ -707,20 +707,20 @@ export const appRouter = router({
         return await reactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user));
       }),
 
-    // Permanent delete (P4-P21) — admin/owner only, for an entry nothing
-    // uses (e.g. a typo). Targets the exact catalog id. The reference check,
-    // the delete, and its audit row all run in one locked Postgres
-    // transaction (delete_insurer_catalog_with_audit), so a concurrent
-    // patient/visit/claim assignment can't slip in between check and delete.
-    // Insurers still in use stay on the soft-delete path above.
+    // Permanent delete (P4-P21, P4-P22) — admin/owner only. Removes the
+    // exact catalog id from the catalog even when patients/visits/claims
+    // still store its name: those columns are free text (no FK), so every
+    // record keeps its recorded insurer and nothing is reassigned or merged.
+    // The delete, its tombstone, and its audit row run in one locked
+    // Postgres transaction (delete_insurer_catalog_with_audit).
     permanentDelete: adminOrOwnerProcedure
       .input(z.object({ id: z.string().uuid() }))
       .mutation(async ({ input, ctx }) => {
         try {
           await permanentlyDeleteInsurerCatalogEntry(input.id, getActorContext(ctx.user));
         } catch (err: unknown) {
-          if (err instanceof InsurerInUseError) {
-            throw new TRPCError({ code: "CONFLICT", message: err.message });
+          if (err instanceof InsurerCatalogHasForeignKeysError) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: err.message });
           }
           if (err instanceof InsurerCatalogEntryNotFoundError) {
             throw new TRPCError({

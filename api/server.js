@@ -159,8 +159,8 @@ __export(db_exports, {
   ClinicUserConflictError: () => ClinicUserConflictError,
   FOLLOW_UP_STALE_DAYS: () => FOLLOW_UP_STALE_DAYS,
   InsurerCatalogEntryNotFoundError: () => InsurerCatalogEntryNotFoundError,
+  InsurerCatalogHasForeignKeysError: () => InsurerCatalogHasForeignKeysError,
   InsurerDeletedError: () => InsurerDeletedError,
-  InsurerInUseError: () => InsurerInUseError,
   LastActiveAccountManagerError: () => LastActiveAccountManagerError,
   adminResetClinicUserPassword: () => adminResetClinicUserPassword,
   aggregateClaimStatusCounts: () => aggregateClaimStatusCounts,
@@ -1233,7 +1233,7 @@ function mapInsurerAssignmentError(error) {
   if (error.code === "P0041") throw new InsurerDeletedError();
 }
 async function permanentlyDeleteInsurerCatalogEntry(id, actor) {
-  const { error } = await supabase.rpc("delete_insurer_catalog_with_audit", {
+  const { data: deletedId, error } = await supabase.rpc("delete_insurer_catalog_with_audit", {
     p_id: id,
     p_actor_id: actor.actorId,
     p_actor_type: actor.actorType,
@@ -1241,12 +1241,15 @@ async function permanentlyDeleteInsurerCatalogEntry(id, actor) {
   });
   if (error) {
     console.error("[Supabase] permanentlyDeleteInsurerCatalogEntry:", error);
-    if (error.code === "P0040") throw new InsurerInUseError();
     if (error.code === "P0032") throw new InsurerCatalogEntryNotFoundError(id);
+    if (error.code === "P0042") throw new InsurerCatalogHasForeignKeysError();
     throw error;
   }
+  if (deletedId !== id) {
+    throw new Error(`permanentlyDeleteInsurerCatalogEntry: DB did not confirm deleting ${id}`);
+  }
 }
-var LastActiveAccountManagerError, ClinicUserConflictError, FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, dateOnly, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, REIMBURSEMENT_EVIDENCE_COLUMNS, ClaimLineIdentityAmbiguousError, InsurerInUseError, InsurerCatalogEntryNotFoundError, InsurerDeletedError;
+var LastActiveAccountManagerError, ClinicUserConflictError, FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, dateOnly, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, REIMBURSEMENT_EVIDENCE_COLUMNS, ClaimLineIdentityAmbiguousError, InsurerCatalogEntryNotFoundError, InsurerDeletedError, InsurerCatalogHasForeignKeysError;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
@@ -1330,12 +1333,6 @@ var init_db = __esm({
         this.name = "ClaimLineIdentityAmbiguousError";
       }
     };
-    InsurerInUseError = class extends Error {
-      constructor() {
-        super("This insurance company is used by existing records and cannot be permanently deleted.");
-        this.name = "InsurerInUseError";
-      }
-    };
     InsurerCatalogEntryNotFoundError = class extends Error {
       constructor(id) {
         super(`Insurance company ${id} not found`);
@@ -1346,6 +1343,12 @@ var init_db = __esm({
       constructor() {
         super("This insurance company was permanently deleted. Choose a different insurance company.");
         this.name = "InsurerDeletedError";
+      }
+    };
+    InsurerCatalogHasForeignKeysError = class extends Error {
+      constructor() {
+        super("Insurance companies can't be permanently deleted until a database foreign key on the catalog is reviewed.");
+        this.name = "InsurerCatalogHasForeignKeysError";
       }
     };
   }
@@ -4821,18 +4824,18 @@ var appRouter = router({
       }
       return await reactivateInsurerCatalogEntry(input.id, getActorContext(ctx.user));
     }),
-    // Permanent delete (P4-P21) — admin/owner only, for an entry nothing
-    // uses (e.g. a typo). Targets the exact catalog id. The reference check,
-    // the delete, and its audit row all run in one locked Postgres
-    // transaction (delete_insurer_catalog_with_audit), so a concurrent
-    // patient/visit/claim assignment can't slip in between check and delete.
-    // Insurers still in use stay on the soft-delete path above.
+    // Permanent delete (P4-P21, P4-P22) — admin/owner only. Removes the
+    // exact catalog id from the catalog even when patients/visits/claims
+    // still store its name: those columns are free text (no FK), so every
+    // record keeps its recorded insurer and nothing is reassigned or merged.
+    // The delete, its tombstone, and its audit row run in one locked
+    // Postgres transaction (delete_insurer_catalog_with_audit).
     permanentDelete: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
       try {
         await permanentlyDeleteInsurerCatalogEntry(input.id, getActorContext(ctx.user));
       } catch (err) {
-        if (err instanceof InsurerInUseError) {
-          throw new TRPCError3({ code: "CONFLICT", message: err.message });
+        if (err instanceof InsurerCatalogHasForeignKeysError) {
+          throw new TRPCError3({ code: "PRECONDITION_FAILED", message: err.message });
         }
         if (err instanceof InsurerCatalogEntryNotFoundError) {
           throw new TRPCError3({

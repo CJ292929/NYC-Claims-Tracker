@@ -23,6 +23,7 @@ interface RecordsPatient {
  *  explicitly pick someone. */
 export function PatientRecordsWorkspace({
   insuranceList,
+  historicalInsuranceList,
   insuranceCounts,
   selectedInsurance,
   onSelectInsurance,
@@ -49,6 +50,7 @@ export function PatientRecordsWorkspace({
   onViewFullRecords,
 }: {
   insuranceList: string[];
+  historicalInsuranceList?: string[];
   insuranceCounts: Record<string, number>;
   selectedInsurance: string;
   onSelectInsurance: (insurance: string) => void;
@@ -77,6 +79,7 @@ export function PatientRecordsWorkspace({
   const filtersPanel = (
     <PatientFilters
       insuranceList={insuranceList}
+      historicalInsuranceList={historicalInsuranceList}
       insuranceCounts={insuranceCounts}
       selectedInsurance={selectedInsurance}
       onSelectInsurance={onSelectInsurance}

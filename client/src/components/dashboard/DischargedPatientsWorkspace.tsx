@@ -29,6 +29,7 @@ export function DischargedPatientsWorkspace({
   searchQuery,
   onSearchQueryChange,
   insuranceList,
+  historicalInsuranceList,
   insuranceCounts,
   selectedInsurance,
   onSelectInsurance,
@@ -53,6 +54,7 @@ export function DischargedPatientsWorkspace({
   searchQuery: string;
   onSearchQueryChange: (value: string) => void;
   insuranceList: string[];
+  historicalInsuranceList?: string[];
   insuranceCounts: Record<string, number>;
   selectedInsurance: string;
   onSelectInsurance: (insurance: string) => void;
@@ -128,6 +130,7 @@ export function DischargedPatientsWorkspace({
                       <div className="px-4 pb-4">
                         <PatientFilters
                           insuranceList={insuranceList}
+                          historicalInsuranceList={historicalInsuranceList}
                           insuranceCounts={insuranceCounts}
                           selectedInsurance={selectedInsurance}
                           onSelectInsurance={onSelectInsurance}

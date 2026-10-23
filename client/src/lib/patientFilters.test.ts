@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isStaleInsurerSelection, matchesPatientFilters } from './patientFilters';
+import { historicalInsurerNames, isStaleInsurerSelection, matchesPatientFilters } from './patientFilters';
 
 const patient = (id: string, insurance: string) => ({ id, insurance });
 
@@ -71,5 +71,44 @@ describe('isStaleInsurerSelection (P4-P21)', () => {
 
   it('an uncatalogued value that patients still store is kept', () => {
     expect(isStaleInsurerSelection('Legacy Free Text Co', catalog, patients)).toBe(false);
+  });
+});
+
+describe('historicalInsurerNames (P4-P22)', () => {
+  const catalog = [
+    { name: 'Aetna', aliases: [] },
+    { name: 'United Healthcare Medicare Advantage', aliases: ['United Healthcare Medicare'] },
+  ];
+
+  it('lists recorded values not in the catalog (deleted or legacy), deduped and sorted', () => {
+    const patients = [
+      { insurance: 'Synthetic Deleted Co' },
+      { insurance: 'Aetna' },
+      { insurance: 'Synthetic Deleted Co' },
+      { insurance: 'Legacy Free Text Co' },
+    ];
+    expect(historicalInsurerNames(catalog, patients)).toEqual(['Legacy Free Text Co', 'Synthetic Deleted Co']);
+  });
+
+  it('never lists a current catalog name or alias, or blank values', () => {
+    const patients = [{ insurance: 'Aetna' }, { insurance: 'United Healthcare Medicare' }, { insurance: '' }, { insurance: '  ' }];
+    expect(historicalInsurerNames(catalog, patients)).toEqual([]);
+  });
+
+  it('matches exactly, like the filter itself: a different-casing spelling is its own historical entry', () => {
+    expect(historicalInsurerNames(catalog, [{ insurance: 'AETNA' }])).toEqual(['AETNA']);
+  });
+
+  it('after deleting a referenced insurer, its patients stay filterable under the historical value', () => {
+    const before = [...catalog, { name: 'Synthetic Referenced Co', aliases: [] }];
+    const patients = [patient('p1', 'Synthetic Referenced Co'), patient('p2', 'Aetna')];
+    expect(historicalInsurerNames(before, patients)).toEqual([]);
+
+    const after = catalog; // the catalog row is gone; patient rows unchanged
+    const [historical] = historicalInsurerNames(after, patients);
+    expect(historical).toBe('Synthetic Referenced Co');
+    expect(isStaleInsurerSelection(historical, after, patients)).toBe(false);
+    const scope = { selectedInsurance: historical, selectedClaimsFilter: 'all', patientIdsByStatus: {} };
+    expect(patients.filter(p => matchesPatientFilters(p, scope)).map(p => p.id)).toEqual(['p1']);
   });
 });
