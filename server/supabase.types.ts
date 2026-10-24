@@ -84,6 +84,10 @@ export interface VisitRecordRow {
   total_insurance_reimbursement: number | null;  // numeric(10,2)
   total_patient_due: number | null;              // numeric(10,2)
   total_patient_paid: number | null;             // numeric(10,2)
+  // P4-P23 per-session workflow fields (nullable, no default — NULL = unset).
+  assignment_of_benefits: "yes" | "no" | null;
+  submission_status: "ready_to_file" | "hold" | "do_not_file" | null;
+  remarks: string | null;                        // ≤ 2000 chars
   created_by: string | null;
   created_by_type: ActorType | null;
   updated_by: string | null;

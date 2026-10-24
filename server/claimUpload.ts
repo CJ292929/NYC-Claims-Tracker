@@ -17,13 +17,14 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { invokeLLM } from './_core/llm';
 import { ENV } from './_core/env';
-import { requireAuthenticatedUser } from './_core/requireAuth';
+import { requireSuperAdmin } from './_core/requireAuth';
 import { tryTemplateExtraction, parseCMS1500, PatientBoundaryError, type ExtractedClaim, type PatientClaimGroup } from './insuranceTemplates';
 import { extractClaimsWithAI, detectInsuranceType, KNOWN_INSURER_NAMES, reconcileClaimStatusWithPaymentEvidence, type ExtractionSource } from './aiClaimExtractor';
 
-// requireAuthenticatedUser (server/_core/requireAuth.ts) runs before multer
-// so an unauthenticated request never reaches file parsing, template
-// extraction, or any AI/LLM call.
+// requireSuperAdmin (server/_core/requireAuth.ts) runs before multer so an
+// unauthenticated or non-Super-Admin request (P4-P23: Claims extraction is
+// Super Admin only) never reaches file parsing, template extraction, or any
+// AI/LLM call.
 
 // Fields the regex/template parsers are known to leave null for some document
 // layouts (Meritain EOBs never print these at all; CMS1500's layout-dependent
@@ -446,7 +447,7 @@ export function registerClaimUploadRoute(app: Express) {
 
   router.post(
     '/api/claims/upload-extract',
-    requireAuthenticatedUser,
+    requireSuperAdmin,
     (req, res, next) => {
       upload.single('file')(req, res, (err) => {
         if (err instanceof multer.MulterError) {

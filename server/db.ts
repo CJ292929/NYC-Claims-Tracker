@@ -64,6 +64,9 @@ function toVisitRecord(row: any): VisitRecord {
     totalInsuranceReimbursement: row.total_insurance_reimbursement ?? null,
     totalPatientDue: row.total_patient_due ?? null,
     totalPatientPaid: row.total_patient_paid ?? null,
+    assignmentOfBenefits: row.assignment_of_benefits ?? null,
+    submissionStatus: row.submission_status ?? null,
+    remarks: row.remarks ?? null,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   };
@@ -370,8 +373,18 @@ export async function listActivityLog(filters: {
   dateTo?: Date | null;
   page: number;
   pageSize: number;
+  /** P4-P23: drop claim audit rows (entity_type claim_record, or a legacy
+   *  CLAIM* action with no entity_type) in the query itself so pagination
+   *  totals stay accurate for non-Super-Admin callers. */
+  excludeClaims?: boolean;
 }): Promise<{ rows: AuditLogRow[]; total: number }> {
   let query = supabase.from("audit_logs").select("*", { count: "exact" });
+
+  if (filters.excludeClaims) {
+    // entity_type is NULL on legacy rows, and NULL <> 'claim_record' is NULL
+    // (not true) in SQL — so NULL must be allowed explicitly.
+    query = query.or("entity_type.is.null,entity_type.neq.claim_record").not("action", "ilike", "CLAIM%");
+  }
 
   if (filters.actorId) query = query.eq("actor_id", filters.actorId);
   if (filters.entityType) query = query.eq("entity_type", filters.entityType);
@@ -440,6 +453,20 @@ export async function getVisitsByPatientId(patientId: string): Promise<VisitReco
     return [];
   }
   return (data ?? []).map(toVisitRecord);
+}
+
+export async function getVisitRecordById(id: string): Promise<VisitRecord | undefined> {
+  const { data, error } = await supabase
+    .from("visit_records")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Supabase] getVisitRecordById:", error);
+    throw error;
+  }
+  return data ? toVisitRecord(data) : undefined;
 }
 
 /** Atomically inserts a single visit_records row and its VISIT_RECORD_CREATE
@@ -511,6 +538,9 @@ export async function updateVisitRecord(
     totalInsuranceReimbursement?: number | null;
     totalPatientDue?: number | null;
     totalPatientPaid?: number | null;
+    assignmentOfBenefits?: "yes" | "no" | null;
+    submissionStatus?: "ready_to_file" | "hold" | "do_not_file" | null;
+    remarks?: string | null;
   },
   actor: ActorContext,
   options?: { action?: string; patientId?: string }
@@ -532,6 +562,9 @@ export async function updateVisitRecord(
   if (data.totalInsuranceReimbursement !== undefined) payload.total_insurance_reimbursement = data.totalInsuranceReimbursement;
   if (data.totalPatientDue !== undefined) payload.total_patient_due = data.totalPatientDue;
   if (data.totalPatientPaid !== undefined) payload.total_patient_paid = data.totalPatientPaid;
+  if (data.assignmentOfBenefits !== undefined) payload.assignment_of_benefits = data.assignmentOfBenefits;
+  if (data.submissionStatus !== undefined) payload.submission_status = data.submissionStatus;
+  if (data.remarks !== undefined) payload.remarks = data.remarks;
 
   if (Object.keys(payload).length === 0) return;
 

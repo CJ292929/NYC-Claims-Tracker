@@ -89,14 +89,14 @@ describe('POST /api/claims/upload-extract auth boundary', () => {
     expect(JSON.parse(text)).toEqual({ error: 'Authentication required' });
   });
 
-  it('passes an authenticated request through the auth boundary', async () => {
+  it('passes an authenticated Super Admin request through the auth boundary', async () => {
     authenticateRequest.mockResolvedValueOnce({
       id: 1,
       openId: 'sample-user',
       email: 'sample@example.com',
       name: 'Sample User',
       loginMethod: 'manus',
-      role: 'user',
+      role: 'admin',
       createdAt: new Date(),
       updatedAt: new Date(),
       lastSignedIn: new Date(),
@@ -110,6 +110,33 @@ describe('POST /api/claims/upload-extract auth boundary', () => {
     });
 
     expect(res.status).not.toBe(401);
+    expect(res.status).not.toBe(403);
     expect(authenticateRequest).toHaveBeenCalledTimes(1);
   });
+
+  // P4-P23: CMS1500/EOB extraction is Super Admin only. Clinic admins and
+  // staff — and a non-admin owner-style session — get 403 before multer or
+  // any extraction runs, with a body that says nothing about claims data.
+  const base = {
+    id: 'u', openId: 'clinic_x', email: null, name: 'x', loginMethod: 'password',
+    createdAt: new Date(), updatedAt: new Date(), lastSignedIn: new Date(),
+  };
+  const clinic = (role: 'admin' | 'staff') => ({
+    ...base, role: 'user',
+    clinicUser: { clinicUserId: 'c1', username: 'x', name: 'X', email: null, department: null, role, mustChangePassword: false },
+  });
+  for (const [label, user] of [
+    ['clinic admin', clinic('admin')],
+    ['clinic staff', clinic('staff')],
+    ['non-admin owner-style session', { ...base, role: 'user' }],
+  ] as const) {
+    it(`rejects a ${label} with 403 before reading the upload`, async () => {
+      authenticateRequest.mockResolvedValueOnce(user as any);
+      const form = new FormData();
+      form.append('file', new Blob(['%PDF-1.4'], { type: 'application/pdf' }), 'x.pdf');
+      const res = await fetch(`${baseUrl}/api/claims/upload-extract`, { method: 'POST', body: form });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: expect.stringMatching(/Super Admin/) });
+    });
+  }
 });

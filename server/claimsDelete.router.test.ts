@@ -123,16 +123,12 @@ describe("claims.delete authorization", () => {
     });
   });
 
-  it("clinic admin can delete a claim", async () => {
-    const result = await clinicAdminCaller().claims.delete({ id: CLAIM_ID, patientId: PATIENT_ID });
-    expect(result).toEqual({ success: true });
-    expect(dbMock.deleteClaimRecordWithAudit).toHaveBeenCalledWith({
-      claimId: CLAIM_ID,
-      patientId: PATIENT_ID,
-      actorId: "clinic-admin-1",
-      actorType: "clinic_user",
-      actorDisplay: "Clinic User",
-    });
+  // P4-P23: Claims are Super Admin only — a clinic admin is no longer allowed.
+  it("denies clinic admin (claims are Super Admin only)", async () => {
+    await expect(
+      clinicAdminCaller().claims.delete({ id: CLAIM_ID, patientId: PATIENT_ID })
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(dbMock.deleteClaimRecordWithAudit).not.toHaveBeenCalled();
   });
 
   it("denies clinic staff (non-admin)", async () => {

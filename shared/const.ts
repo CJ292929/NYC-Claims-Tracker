@@ -5,3 +5,4 @@ export const UNAUTHED_ERR_MSG = 'Please login (10001)';
 export const NOT_ADMIN_ERR_MSG = 'You do not have required permission (10002)';
 export const PASSWORD_CHANGE_REQUIRED_ERR_MSG = 'Password change required (10003)';
 export const MIN_CLINIC_PASSWORD_LENGTH = 8;
+export const CLAIMS_ACCESS_DENIED_ERR_MSG = 'Claims access is restricted to the Super Admin (10004)';

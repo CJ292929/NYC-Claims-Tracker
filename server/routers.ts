@@ -4,7 +4,11 @@ import { TRPCError } from "@trpc/server";
 import { COOKIE_NAME, MIN_CLINIC_PASSWORD_LENGTH } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { adminOrOwnerProcedure, normalProtectedProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { adminOrOwnerProcedure, normalProtectedProcedure, protectedProcedure, publicProcedure, router, superAdminProcedure } from "./_core/trpc";
+import { isSuperAdmin } from "./_core/superAdmin";
+import { redactAuditRows, redactPatient, redactVisitRecord, VISIT_FINANCIAL_FIELDS } from "./claimsRedaction";
+import { sessionWorkflowFieldsInput } from "@shared/sessionWorkflowFields";
+import { CLAIMS_ACCESS_DENIED_ERR_MSG } from "@shared/const";
 import {
   getAllPatients,
   getPatientById,
@@ -13,6 +17,7 @@ import {
   deletePatient,
   setPatientActive,
   getVisitsByPatientId,
+  getVisitRecordById,
   createVisitRecord,
   updateVisitRecord,
   bulkCreateVisitRecords,
@@ -143,6 +148,19 @@ function toSafeStaff(user: ClinicUser) {
   return safe;
 }
 
+// P4-P23: the per-session financial totals are Claims financial data —
+// writable by the Super Admin only. Rejected (not silently dropped) so a
+// caller can't believe a value was saved.
+function assertMayWriteVisitFinancials(
+  user: Parameters<typeof isSuperAdmin>[0],
+  input: Partial<Record<(typeof VISIT_FINANCIAL_FIELDS)[number], unknown>>
+) {
+  if (isSuperAdmin(user)) return;
+  if (VISIT_FINANCIAL_FIELDS.some(field => input[field] !== undefined)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
+  }
+}
+
 // ─── Routers ──────────────────────────────────────────────────────────────────
 
 export const appRouter = router({
@@ -166,6 +184,8 @@ export const appRouter = router({
           department: staff.department,
           role: staff.role,
           mustChangePassword: staff.mustChangePassword,
+          // Always false for a clinic session — see server/_core/superAdmin.ts.
+          isSuperAdmin: false as boolean,
         };
       }
 
@@ -175,6 +195,10 @@ export const appRouter = router({
         name: user.name,
         email: user.email,
         role: user.role,
+        // P4-P23 client capability for Claims access. Computed by the same
+        // isSuperAdmin() every server-side Claims gate uses, so the UI can
+        // never show Claims to a session the server would refuse.
+        isSuperAdmin: isSuperAdmin(user),
       };
     }),
     logout: publicProcedure.mutation(({ ctx }) => {
@@ -521,16 +545,18 @@ export const appRouter = router({
 
   // ── Patients ────────────────────────────────────────────────────────────────
   patients: router({
-    list: normalProtectedProcedure.query(async () => {
-      return getAllPatients();
+    // claimsStatus is claim data — omitted for everyone but the Super Admin.
+    list: normalProtectedProcedure.query(async ({ ctx }) => {
+      const superAdmin = isSuperAdmin(ctx.user);
+      return (await getAllPatients()).map(p => redactPatient(p, superAdmin));
     }),
 
     get: normalProtectedProcedure
       .input(z.object({ id: z.string().uuid() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const patient = await getPatientById(input.id);
         if (!patient) throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
-        return patient;
+        return redactPatient(patient, isSuperAdmin(ctx.user));
       }),
 
     create: normalProtectedProcedure
@@ -579,6 +605,11 @@ export const appRouter = router({
       .mutation(async ({ input, ctx }) => {
         const { id, authDate, authValidUntil, claimsStatus, ...rest } = input;
 
+        // P4-P23: claims_status is claim data — only the Super Admin may set it.
+        if (claimsStatus !== undefined && !isSuperAdmin(ctx.user)) {
+          throw new TRPCError({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
+        }
+
         const before = await getPatientById(id);
         if (!before) throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
 
@@ -626,8 +657,8 @@ export const appRouter = router({
 
     history: normalProtectedProcedure
       .input(z.object({ id: z.string().uuid() }))
-      .query(async ({ input }) => {
-        return listHistoryForEntity("patient", input.id);
+      .query(async ({ ctx, input }) => {
+        return redactAuditRows(await listHistoryForEntity("patient", input.id), isSuperAdmin(ctx.user));
       }),
   }),
 
@@ -738,22 +769,27 @@ export const appRouter = router({
     // history, which any authenticated staff member can read).
     history: adminOrOwnerProcedure
       .input(z.object({ id: z.string().uuid() }))
-      .query(async ({ input }) => {
-        return listHistoryForEntity("insurer_catalog", input.id);
+      .query(async ({ ctx, input }) => {
+        // Strips the retained claims COUNT from permanent-delete rows for
+        // non-Super-Admins (see claimsRedaction.ts).
+        return redactAuditRows(await listHistoryForEntity("insurer_catalog", input.id), isSuperAdmin(ctx.user));
       }),
   }),
 
   // ── Visit Records ────────────────────────────────────────────────────────────
   visits: router({
+    // Per-session financial totals are Super Admin only (P4-P23).
     listByPatient: normalProtectedProcedure
       .input(z.object({ patientId: z.string().uuid() }))
-      .query(async ({ input }) => {
-        return getVisitsByPatientId(input.patientId);
+      .query(async ({ ctx, input }) => {
+        const superAdmin = isSuperAdmin(ctx.user);
+        return (await getVisitsByPatientId(input.patientId)).map(v => redactVisitRecord(v, superAdmin));
       }),
 
     create: normalProtectedProcedure
       .input(visitRecordInput.extend({ patientId: z.string().uuid() }))
       .mutation(async ({ input, ctx }) => {
+        assertMayWriteVisitFinancials(ctx.user, input);
         const { patientId, dateOfService, dateAshSubmitted, ...rest } = input;
         const id = await createVisitRecord({
           patientId,
@@ -767,6 +803,7 @@ export const appRouter = router({
     update: normalProtectedProcedure
       .input(visitRecordInput.extend({ id: z.string().uuid() }))
       .mutation(async ({ input, ctx }) => {
+        assertMayWriteVisitFinancials(ctx.user, input);
         const { id, dateOfService, dateAshSubmitted, ...rest } = input;
         await updateVisitRecord(id, {
           ...rest,
@@ -776,7 +813,44 @@ export const appRouter = router({
         return { success: true };
       }),
 
-
+    // P4-P23: per-session workflow fields (Assignment of Benefits, Submission
+    // Status, Remarks). Same gate as visits.update — every authenticated
+    // Admin/Staff who can edit authorization sessions can edit these.
+    // Partial: only keys present in the input are written (null clears);
+    // the audited RPC diffs before/after under a row lock, writes the
+    // audit row in the same transaction, and skips it entirely for a no-op.
+    // Returns the row's stored values so the client can reconcile.
+    updateSessionFields: normalProtectedProcedure
+      .input(sessionWorkflowFieldsInput.extend({
+        id: z.string().uuid(),
+        patientId: z.string().uuid(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const { id, patientId, ...fields } = input;
+        if (Object.values(fields).every(v => v === undefined)) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "No session fields to update" });
+        }
+        try {
+          await updateVisitRecord(id, fields, getActorContext(ctx.user), {
+            action: "SESSION_FIELDS_UPDATE",
+            patientId,
+          });
+        } catch (err: unknown) {
+          const code = (err as { code?: string })?.code;
+          if (code === "P0030") throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
+          if (code === "P0031") throw new TRPCError({ code: "BAD_REQUEST", message: "This session does not belong to the selected patient." });
+          if (code === "23514") throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid session field value" });
+          throw err;
+        }
+        const saved = await getVisitRecordById(id);
+        if (!saved) throw new TRPCError({ code: "NOT_FOUND", message: "Session not found" });
+        return {
+          id: saved.id,
+          assignmentOfBenefits: saved.assignmentOfBenefits,
+          submissionStatus: saved.submissionStatus,
+          remarks: saved.remarks,
+        };
+      }),
 
     bulkCreate: normalProtectedProcedure
       .input(
@@ -852,19 +926,22 @@ export const appRouter = router({
 
     historyForPatient: normalProtectedProcedure
       .input(z.object({ patientId: z.string().uuid() }))
-      .query(async ({ input }) => {
-        return listHistoryForEntity("visit_record", input.patientId);
+      .query(async ({ ctx, input }) => {
+        return redactAuditRows(await listHistoryForEntity("visit_record", input.patientId), isSuperAdmin(ctx.user));
       }),
   }),
 
+  // P4-P23: the whole Claims surface — rows, financial totals, history,
+  // follow-up/status aggregates, CMS1500/EOB enrichment and bulk import —
+  // is Super Admin only (superAdminProcedure, server/_core/trpc.ts).
   claims: router({
-    getByPatientAndPeriod: normalProtectedProcedure
+    getByPatientAndPeriod: superAdminProcedure
       .input(z.object({ patientId: z.string().uuid(), authPeriod: z.number() }))
       .query(async ({ input }) => {
         return await getClaimsByPatientAndPeriod(input.patientId, input.authPeriod);
       }),
 
-    create: normalProtectedProcedure
+    create: superAdminProcedure
       .input(z.object({
         patientId: z.string().uuid(),
         authPeriod: z.number(),
@@ -923,7 +1000,7 @@ export const appRouter = router({
         return { success: true, claimId };
       }),
 
-    update: normalProtectedProcedure
+    update: superAdminProcedure
       .input(z.object({
         id: z.string().uuid(),
         placeOfService: z.string().nullable().optional(),
@@ -988,7 +1065,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    delete: adminOrOwnerProcedure
+    delete: superAdminProcedure
       .input(z.object({ id: z.string().uuid(), patientId: z.string().uuid() }))
       .mutation(async ({ input, ctx }) => {
         const actor = getActorContext(ctx.user);
@@ -1012,7 +1089,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    upsert: normalProtectedProcedure
+    upsert: superAdminProcedure
       .input(z.object({
         patientId: z.string().uuid(),
         authPeriod: z.number(),
@@ -1085,7 +1162,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    historyForClaim: normalProtectedProcedure
+    historyForClaim: superAdminProcedure
       .input(z.object({ id: z.string().uuid() }))
       .query(async ({ input }) => {
         return listHistoryForEntity("claim_record", input.id);
@@ -1111,7 +1188,7 @@ export const appRouter = router({
      *     the commit, never auto-applied like a confirmed 'matched' line
      *   - 2+ candidates -> 'needs_selection' (staff must pick which row)
      */
-    cms1500EnrichmentPreview: normalProtectedProcedure
+    cms1500EnrichmentPreview: superAdminProcedure
       .input(z.object({
         patientId: z.string().uuid(),
         lines: z.array(z.object({
@@ -1153,7 +1230,7 @@ export const appRouter = router({
      * (no_match/no_claims/needs_selection without a pick) are simply absent
      * from `lines` and so are never sent here at all.
      */
-    cms1500EnrichmentCommit: normalProtectedProcedure
+    cms1500EnrichmentCommit: superAdminProcedure
       .input(z.object({
         patientId: z.string().uuid(),
         lines: z.array(z.object({
@@ -1204,7 +1281,7 @@ export const appRouter = router({
      * Matches patient names (case-insensitive) against dashboard patients,
      * finds each patient's latest auth period, and saves all their claims.
      */
-    bulkImportFromEOB: normalProtectedProcedure
+    bulkImportFromEOB: superAdminProcedure
       .input(z.object({
         uploadType: z.enum(['reimbursement', 'cms1500']).default('reimbursement'),
         patientGroups: z.array(z.object({
@@ -1560,7 +1637,7 @@ export const appRouter = router({
         return { results };
       }),
 
-    markResolved: normalProtectedProcedure
+    markResolved: superAdminProcedure
       .input(z.object({ id: z.string().uuid() }))
       .mutation(async ({ input }) => {
         const { supabase } = await import('./supabase');
@@ -1573,7 +1650,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    getFollowUpClaims: normalProtectedProcedure
+    getFollowUpClaims: superAdminProcedure
       .input(z.object({ insurance: z.string().optional() }).optional())
       .query(async ({ input }) => {
         // Fetch every unresolved claim in a status that can ever need follow-up,
@@ -1638,7 +1715,7 @@ export const appRouter = router({
         return sortByFollowUpUrgency(classified);
       }),
 
-    getStatusCounts: normalProtectedProcedure
+    getStatusCounts: superAdminProcedure
       .input(z.object({ insurance: z.string().optional() }).optional())
       .query(async ({ input }) => {
         // Powers the "Claims Status" sidebar panel. Always counts claims_records
@@ -1683,8 +1760,13 @@ export const appRouter = router({
         page: z.number().int().min(0).default(0),
         pageSize: z.number().int().min(1).max(200).default(50),
       }))
-      .query(async ({ input }) => {
-        return listActivityLog({
+      .query(async ({ ctx, input }) => {
+        // P4-P23: clinic admins keep the Activity Log, minus Claims.
+        const superAdmin = isSuperAdmin(ctx.user);
+        if (!superAdmin && input.entityType === "claim_record") {
+          throw new TRPCError({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
+        }
+        const result = await listActivityLog({
           actorId: input.actorId ?? null,
           entityType: input.entityType ?? null,
           action: input.action ?? null,
@@ -1692,7 +1774,9 @@ export const appRouter = router({
           dateTo: parseDate(input.dateTo),
           page: input.page,
           pageSize: input.pageSize,
+          excludeClaims: !superAdmin,
         });
+        return { ...result, rows: redactAuditRows(result.rows, superAdmin) };
       }),
   }),
 });

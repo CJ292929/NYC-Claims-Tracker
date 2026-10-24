@@ -1,4 +1,5 @@
-import { NOT_ADMIN_ERR_MSG, PASSWORD_CHANGE_REQUIRED_ERR_MSG, UNAUTHED_ERR_MSG } from '@shared/const';
+import { CLAIMS_ACCESS_DENIED_ERR_MSG, NOT_ADMIN_ERR_MSG, PASSWORD_CHANGE_REQUIRED_ERR_MSG, UNAUTHED_ERR_MSG } from '@shared/const';
+import { isSuperAdmin } from "./superAdmin";
 import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import { ZodError } from "zod";
@@ -99,6 +100,20 @@ export const adminOrOwnerProcedure = normalProtectedProcedure.use(async opts => 
   const isOwnerAdmin = !ctx.user.clinicUser && ctx.user.role === 'admin';
   if (!isClinicAdmin && !isOwnerAdmin) {
     throw new TRPCError({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
+  }
+
+  return next({ ctx });
+});
+
+/** P4-P23: every Claims endpoint (claims.*) — Super Admin only. Clinic
+ * admins and staff are denied with the same generic message regardless of
+ * whether the requested claim exists, so the error reveals nothing about
+ * claim data. See server/_core/superAdmin.ts for the identity mapping. */
+export const superAdminProcedure = normalProtectedProcedure.use(async opts => {
+  const { ctx, next } = opts;
+
+  if (!isSuperAdmin(ctx.user)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
   }
 
   return next({ ctx });

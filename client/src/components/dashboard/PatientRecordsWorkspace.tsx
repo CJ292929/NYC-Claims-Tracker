@@ -12,7 +12,7 @@ interface RecordsPatient {
   id: string;
   name: string;
   insurance: string;
-  claimsStatus: string;
+  claimsStatus?: string;
   isActive: boolean;
 }
 

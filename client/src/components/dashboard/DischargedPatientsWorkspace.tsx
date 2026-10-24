@@ -12,7 +12,7 @@ interface DischargedPatient {
   id: string;
   name: string;
   insurance: string;
-  claimsStatus: string;
+  claimsStatus?: string;
   isActive: boolean;
   dischargeDate: number | null;
   dischargeReason: string | null;

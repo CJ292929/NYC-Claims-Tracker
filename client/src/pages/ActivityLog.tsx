@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
 import { trpc } from "@/lib/trpc";
-import { canManageStaff } from "@/lib/authGate";
+import { canAccessClaims, canManageStaff } from "@/lib/authGate";
 import { navSectionToRoute } from "@/lib/navSection";
 import type { NavSection } from "@/components/dashboard/DashboardSidebar";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
@@ -107,6 +107,7 @@ export default function ActivityLog() {
       onSignOut={handleSignOut}
       signingOut={logoutMutation.isPending}
       canManageStaff={canManageStaff(authUser)}
+      canAccessClaims={canAccessClaims(authUser)}
       topbarTitle="Activity Log"
       topbarSubtitle="Who created, edited, imported, or deleted records, and when."
     >
@@ -132,7 +133,8 @@ export default function ActivityLog() {
                 <SelectTrigger><SelectValue placeholder="All types" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All types</SelectItem>
-                  {Object.entries(ENTITY_LABELS).map(([value, label]) => (
+                  {/* Claim history is Super Admin only (P4-P23) — the server rejects the filter otherwise. */}
+                  {Object.entries(ENTITY_LABELS).filter(([value]) => value !== "claim_record" || canAccessClaims(authUser)).map(([value, label]) => (
                     <SelectItem key={value} value={value}>{label}</SelectItem>
                   ))}
                 </SelectContent>
