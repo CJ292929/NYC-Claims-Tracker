@@ -139,6 +139,11 @@ export interface ClaimRecord {
   referenceNo: string | null;
   lmn: string | null;           // letter of medical necessity note/reference
   isResolved: boolean;          // staff has cleared this claim from the follow-up queue
+  // P4-P24: source provenance (null on pre-P4-P24 rows).
+  cms1500DocumentId: string | null;
+  cms1500LineKey: string | null;
+  eobDocumentId: string | null;
+  eobLineKey: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

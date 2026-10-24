@@ -342,13 +342,13 @@ For each service line, extract EVERY one of these fields when it appears anywher
 - dateOfService: MM/DD/YYYY format (from Box 24A)
 - placeOfService: place of service code (from Box 24B)
 - cptCodes: CPT/HCPCS code(s), comma-separated if multiple (from Box 24D)
-- diagnosisCodes: ICD-10 diagnosis codes, comma-separated (from Box 21)
+- diagnosisCodes: ONLY the ICD-10 code(s) this line's own Box 24E diagnosis pointer references (e.g. pointer "AC" → Box 21 entries A and C), comma-separated in pointer order. Never list every Box 21 code on every line. Null if the pointer is not readable.
 - unitsBilled: units/days billed (from Box 24G — labeled "DAYS OR UNITS")
 - modifier: modifier codes if present (from Box 24D, immediately after the CPT code)
 - chargeAmount: total charge amount for this line (numeric only, from Box 24F)
 - claimSubmittedDate: MM/DD/YYYY format — the physician/supplier signature date (from Box 31, usually printed after "SIGNED"/"DATE")
 - insuranceBilled: the NUMERIC billing/group/payer identifier printed near Box 11 — e.g. "Group #", "Group Number", "Group No", "Group ID", "Billing ID", "Billing Number", "Payer ID", "Payer Number", or a slash-separated identifier like "16404/137040261". This is NEVER the insurance plan/payer name (do not write "Aetna", "Blue Cross", etc. here). If no such numeric identifier is visible on the form, use null.
-- visitNumber: The service line number from Box 24 of the CMS-1500 form. Assign integers 1, 2, 3, ... in the order the service lines appear top-to-bottom in Box 24. The first service line is visitNumber 1, the second is visitNumber 2, and so on. This is a positional value — do NOT search for a label. Return as integer.
+- visitNumber: Always null. A CMS-1500 form has no visit-number box, and a Box 24 row position is not a visit number.
 
 IMPORTANT:
 - Patient name is REQUIRED - never leave it null or empty
@@ -432,7 +432,7 @@ IMPORTANT:
     insuranceBilled: { type: ["string", "null"] },
     visitNumber: {
       type: ["integer", "null"],
-      description: "Box 24 service line position (1-6), assigned top-to-bottom in printed order — not a text label.",
+      description: "Always null — a CMS-1500 has no visit-number box and a row position is not a visit number.",
     },
   } as const;
 
@@ -565,6 +565,8 @@ IMPORTANT:
     for (const claim of normalizedClaims) {
       sanitizeInsuranceBilled(claim);
       sanitizeVisitNumber(claim);
+      // P4-P24: never a positional or guessed visit number, whatever the model returned.
+      if (uploadType === "cms1500") claim.visitNumber = null;
       reconcileClaimStatusWithPaymentEvidence(claim);
     }
 

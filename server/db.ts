@@ -11,6 +11,7 @@ import { normalizeUsername, escapeLikePattern } from "./_core/username";
 import type { User, Patient, VisitRecord, ClinicUser, InsertVisitRecord, InsurerCatalogEntry } from "../drizzle/schema";
 import { determineActivePeriod, deriveAuthPeriodMetrics, getPeriodMetrics } from "@shared/authPeriodMetrics";
 import { deriveAuthorizationUrgency } from "@shared/authUrgency";
+import type { ExistingClaimLine } from "@shared/claimImport";
 import type { ActorContext } from "./actorIdentity";
 
 // ─── Row adapters (Supabase snake_case → app camelCase) ───────────────────────
@@ -1318,7 +1319,7 @@ const dateOnly = (d: Date | null | undefined) => (d ? d.toISOString().split("T")
  * the snake_case keys write_claim_record_with_audit's p_data jsonb expects,
  * including ONLY keys actually present on `data` (not just non-null) — this
  * preserves createClaimRecord's "always write every column" behavior and
- * updateClaimRecord/upsertClaimRecord's "only patch fields explicitly
+ * updateClaimRecord's "only patch fields explicitly
  * provided" behavior, matching exactly what each call site passed in before
  * this was centralized through the shared RPC. */
 function claimFieldsToPayload(data: ClaimRecordFields): Record<string, unknown> {
@@ -1491,395 +1492,186 @@ export async function deleteClaimRecordWithAudit(params: {
   }
 }
 
-// ─── CMS1500 enrichment (P4-P10) ────────────────────────────────────────────
-// A CMS1500 upload never creates or writes a financial/claim row by itself —
-// it only fills in clinical detail (visit #, diagnosis, modifier, units) on a
-// row that a Reimbursement/EOB upload already created. These three functions
-// implement that: find candidate existing rows across ALL auth periods for
-// the patient (never just the latest), then patch ONLY the clinical fields
-// on a specific, re-validated row. charge_amount, insurance_reimbursement,
-// patient_amount_paid, patient_amount_due, and every other payment field are
-// never read from or written by this path.
+// ─── CMS1500-first import (P4-P24) ──────────────────────────────────────────
+// Reads that feed the import preview, and the two audited RPCs that are the
+// only write path for imported lines (see
+// supabase/migrations/20261026000000_p4_p24_cms1500_first_claim_lines.sql).
+// The RPCs re-check every rule the preview shows, so a stale or hand-built
+// request cannot create an EOB-first row, cross a patient boundary, or
+// apply one payment line twice.
 
-export type Cms1500EnrichmentCandidate = {
-  id: string;
-  authPeriod: number;
-  chargeAmount: number | null;
-  insuranceReimbursement: number | null;
-  patientAmountPaid: number | null;
-  patientAmountDue: number | null;
-  visitNumber: number | null;
-  diagnosisCodes: string | null;
-  modifier: string | null;
-  unitsBilled: number | null;
-  // claims_records has no column recording how a row was created (manual
-  // entry, a legacy/pre-fix CMS1500 insert, or an actual Reimbursement/EOB
-  // upload) — true provenance is unavailable. This is a best-effort proxy:
-  // true when at least one field that ONLY a Reimbursement/EOB upload ever
-  // writes is present (not null) on the row, INCLUDING an explicit zero —
-  // a denied or zero-payment EOB line is still a real reimbursement row, so
-  // a zero value counts as evidence the same as a positive one. False means
-  // every one of those fields is still null, which is exactly what a bare
-  // manual entry or an old pre-fix CMS1500-only insert would look like —
-  // callers must not label that case "matched" without staff confirmation.
-  hasReimbursementEvidence: boolean;
-};
+const EXISTING_LINE_COLUMNS = [
+  "id", "auth_period", "date_of_service", "cpt_codes", "modifier", "units_billed", "diagnosis_codes",
+  "charge_amount", "insurance_reimbursement", "patient_amount_due", "patient_amount_paid", "claim_status",
+  "cms1500_document_id", "cms1500_line_key", "eob_document_id", "eob_line_key",
+].join(", ");
 
-const REIMBURSEMENT_EVIDENCE_COLUMNS = [
-  "insurance_reimbursement",
-  "patient_amount_paid",
-  "patient_amount_due",
-  "oa_claim_number",
-  "check_date",
-  "check_number_virtual_card",
-  "reference_no",
-  "payment_received",
-] as const;
+const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 
-/**
- * Finds existing claims_records rows for this patient that share the exact
- * service date and CPT code(s) with a CMS1500 line — searched across every
- * auth period the patient has, not just their latest one, since a
- * Reimbursement row for an older visit may have been imported before a
- * CMS1500 upload that enriches it arrives. Returns all matches; the caller
- * decides what to do with 0 (no match / upload reimbursement first), 1
- * (auto-match if hasReimbursementEvidence, else needs confirmation), or 2+
- * (requires explicit staff selection) results.
- */
-export async function findCms1500EnrichmentCandidates(
-  patientId: string,
-  dateOfService: Date,
-  cptCodes: string | null
-): Promise<Cms1500EnrichmentCandidate[]> {
-  const dosStr = dateOfService.toISOString().split("T")[0];
-  let query = supabase
+/** Every claim row for this patient on any of the given dates, across all periods. */
+export async function listPatientClaimLinesOnDates(patientId: string, dates: string[]): Promise<ExistingClaimLine[]> {
+  const unique = Array.from(new Set(dates.filter(Boolean)));
+  if (unique.length === 0) return [];
+  const { data, error } = await supabase
     .from("claims_records")
-    .select([
-      "id", "auth_period", "charge_amount", "insurance_reimbursement",
-      "patient_amount_paid", "patient_amount_due", "visit_number",
-      "diagnosis_codes", "modifier", "units_billed",
-      ...REIMBURSEMENT_EVIDENCE_COLUMNS,
-    ].join(", "))
+    .select(EXISTING_LINE_COLUMNS)
     .eq("patient_id", patientId)
-    .eq("date_of_service", dosStr);
-
-  query = cptCodes ? query.eq("cpt_codes", cptCodes) : query.is("cpt_codes", null);
-
-  const { data, error } = await query;
+    .in("date_of_service", unique)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
   if (error) {
-    console.error("[Supabase] findCms1500EnrichmentCandidates:", error);
+    console.error("[Supabase] listPatientClaimLinesOnDates:", error);
     throw error;
   }
   return (data ?? []).map((r: any) => ({
     id: r.id,
     authPeriod: r.auth_period,
-    chargeAmount: r.charge_amount,
-    insuranceReimbursement: r.insurance_reimbursement,
-    patientAmountPaid: r.patient_amount_paid,
-    patientAmountDue: r.patient_amount_due,
-    visitNumber: r.visit_number,
-    diagnosisCodes: r.diagnosis_codes,
+    dateOfService: r.date_of_service,
+    cptCodes: r.cpt_codes,
     modifier: r.modifier,
     unitsBilled: r.units_billed,
-    hasReimbursementEvidence: REIMBURSEMENT_EVIDENCE_COLUMNS.some(col => r[col] !== null && r[col] !== undefined),
+    diagnosisCodes: r.diagnosis_codes,
+    chargeAmount: numOrNull(r.charge_amount),
+    insuranceReimbursement: numOrNull(r.insurance_reimbursement),
+    patientAmountDue: numOrNull(r.patient_amount_due),
+    patientAmountPaid: numOrNull(r.patient_amount_paid),
+    claimStatus: r.claim_status,
+    cms1500DocumentId: r.cms1500_document_id ?? null,
+    cms1500LineKey: r.cms1500_line_key ?? null,
+    eobDocumentId: r.eob_document_id ?? null,
+    eobLineKey: r.eob_line_key ?? null,
   }));
 }
 
-/** True if this patient has ANY claims_records row at all, in any period —
- *  used to distinguish "no reimbursement file uploaded yet" from "a
- *  reimbursement file exists but this particular date/CPT isn't in it". */
-export async function patientHasAnyClaimRecords(patientId: string): Promise<boolean> {
-  const { count, error } = await supabase
-    .from("claims_records")
-    .select("id", { count: "exact", head: true })
+/** The patient's visit rows reduced to (period, date) — input to resolveAuthPeriod. */
+export async function listPatientVisitPeriodDates(patientId: string): Promise<Array<{ authPeriod: number; dateOfService: string | null }>> {
+  const { data, error } = await supabase
+    .from("visit_records")
+    .select("auth_period, date_of_service")
     .eq("patient_id", patientId);
   if (error) {
-    console.error("[Supabase] patientHasAnyClaimRecords:", error);
+    console.error("[Supabase] listPatientVisitPeriodDates:", error);
     throw error;
   }
-  return (count ?? 0) > 0;
+  return (data ?? []).map((r: any) => ({ authPeriod: r.auth_period ?? 1, dateOfService: r.date_of_service ?? null }));
 }
 
-/**
- * Patches ONLY visit_number / diagnosis_codes / modifier / units_billed on an
- * existing claim row, after re-validating server-side that `claimRecordId`
- * actually belongs to `patientId` and still matches `dateOfService` +
- * `cptCodes` — a client's earlier preview selection is never trusted blindly
- * at commit time. Never inserts a new row; never touches charge_amount or
- * any payment field. Fields left undefined/null preserve whatever the row
- * already had (so a missing EOB modifier, for instance, doesn't block
- * saving a diagnosis code this call does carry).
- */
-export async function applyCms1500Enrichment(params: {
-  claimRecordId: string;
-  patientId: string;
-  dateOfService: Date;
-  cptCodes: string | null;
-  visitNumber?: number | null;
-  diagnosisCodes?: string | null;
-  modifier?: string | null;
-  unitsBilled?: number | null;
-  actor: ActorContext;
-  importBatchId?: string | null;
-}): Promise<void> {
-  const dosStr = params.dateOfService.toISOString().split("T")[0];
-
-  let ownershipQuery = supabase
-    .from("claims_records")
+/** The document row for an uploaded file, if any line from it was ever saved. */
+export async function findClaimImportDocumentId(kind: "cms1500" | "eob", sha256: string): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("claim_import_documents")
     .select("id")
-    .eq("id", params.claimRecordId)
-    .eq("patient_id", params.patientId)
-    .eq("date_of_service", dosStr);
-  ownershipQuery = params.cptCodes ? ownershipQuery.eq("cpt_codes", params.cptCodes) : ownershipQuery.is("cpt_codes", null);
-
-  const { data: owned, error: ownErr } = await ownershipQuery.maybeSingle();
-  if (ownErr) {
-    console.error("[Supabase] applyCms1500Enrichment (ownership check):", ownErr);
-    throw ownErr;
+    .eq("document_kind", kind)
+    .eq("content_sha256", sha256)
+    .maybeSingle();
+  if (error) {
+    console.error("[Supabase] findClaimImportDocumentId:", error);
+    throw error;
   }
-  if (!owned) {
-    throw new Error("Selected claim row does not belong to this patient or no longer matches the service date/CPT code.");
-  }
+  return data ? (data as { id: string }).id : null;
+}
 
-  const patch: Record<string, unknown> = {};
-  if (params.visitNumber != null) patch.visit_number = params.visitNumber;
-  if (params.diagnosisCodes != null) patch.diagnosis_codes = params.diagnosisCodes;
-  if (params.modifier != null) patch.modifier = params.modifier;
-  if (params.unitsBilled != null) patch.units_billed = params.unitsBilled;
+export type ClaimImportRpcReason =
+  | "not_found" | "patient_mismatch" | "needs_selection" | "cms1500_required" | "already_reconciled"
+  | "source_line_already_saved" | "already_has_cms1500" | "incompatible" | "invalid_input" | "existing_financials"
+  | "period_required";
 
-  if (Object.keys(patch).length === 0) return; // nothing to enrich — idempotent no-op
+const IMPORT_RPC_REASONS: Record<string, ClaimImportRpcReason> = {
+  P0010: "not_found",
+  P0011: "patient_mismatch",
+  P0021: "needs_selection",
+  P0022: "cms1500_required",
+  P0023: "already_reconciled",
+  P0024: "source_line_already_saved",
+  P0025: "already_has_cms1500",
+  P0026: "incompatible",
+  P0027: "invalid_input",
+  P0028: "existing_financials",
+  P0029: "period_required",
+};
 
-  // write_claim_record_with_audit re-locks the row by id + patient_id and
-  // writes the patch + its audit entry in one transaction (see the P4-P17
-  // migration), closing the not-found/wrong-patient race the same way the
-  // ownership check above already did for date/CPT. A date/CPT change in
-  // the brief window between that check and this call is not re-validated
-  // at the SQL layer here (unlike the single-row predicate-scoped UPDATE
-  // this replaced) — an accepted, narrow trade-off for reusing the shared
-  // atomic write+audit path rather than hand-rolling it per call site.
-  try {
-    await writeClaimRecordWithAudit({
-      id: params.claimRecordId,
-      patientId: params.patientId,
-      payload: patch,
-      actor: params.actor,
-      action: "CLAIM_RECORD_CMS1500_ENRICHMENT",
-      importBatchId: params.importBatchId,
-    });
-  } catch (err) {
-    // Preserve this function's established error wording (callers —
-    // cms1500EnrichmentCommit's per-line try/catch, bulkImportFromEOB —
-    // surface err.message directly) regardless of which of the RPC's two
-    // failure codes fired.
-    if (err instanceof ClaimRecordNotFoundError || err instanceof ClaimRecordPatientMismatchError) {
-      throw new Error("Selected claim row does not belong to this patient or no longer matches the service date/CPT code.");
-    }
-    throw err;
+/** A rule the database refused the line on — a review item, not a crash. */
+export class ClaimImportRuleError extends Error {
+  constructor(public readonly reason: ClaimImportRpcReason, message: string) {
+    super(message);
+    this.name = "ClaimImportRuleError";
   }
 }
 
-/**
- * Thrown by upsertClaimRecord when it cannot safely tell whether a repeated
- * same-date/same-CPT source line (sourceLineIndex >= 1) is a genuinely new
- * line or a case where an existing pre-P4-P14 row (source_line_index IS
- * NULL — created before this disambiguation existed) might already be the
- * result of the old collapse-and-overwrite bug this change fixes. Rather
- * than guess, the caller must surface this to staff as a row needing manual
- * review instead of inserting a possibly-duplicate row or silently leaving
- * the second line out. See the migration
- * 20261017000000_claims_source_line_index_and_needs_review.sql and
- * server/upsertClaimRecord.idempotency.test.ts.
- */
-export class ClaimLineIdentityAmbiguousError extends Error {
-  constructor(
-    public readonly patientId: string,
-    public readonly dateOfService: string,
-    public readonly cptCodes: string | null,
-    public readonly sourceLineIndex: number
-  ) {
-    super(
-      `Cannot safely save repeated line #${sourceLineIndex + 1} for CPT ${cptCodes ?? "(none)"} on ${dateOfService}: ` +
-      `an existing claim row at this patient/date/CPT predates per-line identity tracking and might already represent ` +
-      `merged or overwritten data from more than one source line. Needs manual review before saving.`
-    );
-    this.name = "ClaimLineIdentityAmbiguousError";
-  }
+function throwImportRpcError(fn: string, error: { code?: string; message?: string }): never {
+  const reason = error.code ? IMPORT_RPC_REASONS[error.code] : undefined;
+  if (reason) throw new ClaimImportRuleError(reason, error.message ?? reason);
+  console.error(`[Supabase] ${fn}:`, error);
+  throw error;
 }
 
-/**
- * Upsert a claim record by (patient_id, auth_period, date_of_service, cpt_codes),
- * optionally disambiguated further by sourceLineIndex (P4-P14).
- *
- * If a matching record already exists, only the non-null fields in `data` are
- * merged into it (existing values are preserved for fields not provided by this
- * upload type).  If no match is found, a new record is inserted.
- *
- * This allows CMS1500 and Reimbursement uploads to populate the same row:
- *   - CMS1500 first → inserts row with CPT/Charge/Diagnosis/DOS
- *   - Reimbursement later → finds that row and patches Ins.Reimb/Check/EFT
- *   (or vice-versa)
- *
- * sourceLineIndex (P4-P14): when two or more source service lines share the
- * same (patient, auth_period, date_of_service, cpt_codes) — e.g. two
- * legitimate 97530 lines billed on the same date — the base match key alone
- * cannot tell them apart and the second upsert would silently overwrite the
- * first (see server/upsertClaimRecord.idempotency.test.ts's documented
- * "[KNOWN LIMITATION]" case). Callers that can enumerate a document's lines
- * in a stable order (server/routers.ts bulkImportFromEOB,
- * client/src/pages/Dashboard.tsx handleSaveExtractedClaims) pass each line's
- * 0-based position within its (date, CPT) group here. Re-importing the same
- * document reproduces the same indices in the same order, so idempotency is
- * preserved: index 0 patches the first row, index 1 patches the second, etc.
- * Rows written before this column existed have source_line_index = NULL
- * ("legacy slot") and are treated as index 0 for backward compatibility; a
- * legacy row found while this import asks for index >= 1 throws
- * ClaimLineIdentityAmbiguousError instead of guessing. Callers that don't
- * pass sourceLineIndex at all (manual single-row edits) get the exact prior
- * behavior — matched ignoring the column entirely.
- */
-export async function upsertClaimRecord(data: {
+export type ClaimImportSource = { sha256: string; fileName: string | null; pageCount: number | null };
+export type ClaimImportWriteResult = { status: "created" | "associated" | "updated" | "unchanged" | "saved"; claimId: string; authPeriod: number; documentId: string };
+
+function toWriteResult(data: any): ClaimImportWriteResult {
+  return { status: data.status, claimId: data.claim_id, authPeriod: data.auth_period, documentId: data.document_id };
+}
+
+export async function commitCms1500Line(params: {
   patientId: string;
-  authPeriod: number;
-  placeOfService?: string | null;
-  dateOfService?: Date | null;
-  visitNumber?: number | null;
-  cptCodes?: string | null;
-  unitsBilled?: number | null;
-  diagnosisCodes?: string | null;
-  modifier?: string | null;
-  chargeAmount?: number | null;
-  insuranceReimbursement?: number | null;
-  patientAmountPaid?: number | null;
-  patientAmountDue?: number | null;
-  insuranceBilled?: string | null;
-  oaClaimNumber?: string | null;
-  claimSubmittedDate?: Date | null;
-  expireBcbsClaimNumber?: string | null;
-  claimStatus?: 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | 'needs_review';
-  paymentReceived?: number | null;
-  checkDate?: Date | null;
-  checkNumberVirtualCard?: string | null;
-  dateReceived?: Date | null;
-  dateOfAppeal?: Date | null;
-  referenceNo?: string | null;
-  lmn?: string | null;
-  sourceLineIndex?: number | null;
-}, actor: ActorContext, importBatchId?: string | null): Promise<string> {
-  const dosStr = data.dateOfService ? data.dateOfService.toISOString().split("T")[0] : null;
+  authPeriod: number | null;
+  source: ClaimImportSource;
+  lineKey: string;
+  siblingLineKeys: string[];
+  targetClaimId: string | null;
+  allowNewDistinct: boolean;
+  data: Record<string, unknown>;
+  actor: ActorContext;
+  importBatchId: string;
+}): Promise<ClaimImportWriteResult> {
+  const { data, error } = await supabase.rpc("commit_cms1500_line_with_audit", {
+    p_patient_id: params.patientId,
+    p_auth_period: params.authPeriod,
+    p_content_sha256: params.source.sha256,
+    p_file_name: params.source.fileName,
+    p_page_count: params.source.pageCount,
+    p_line_key: params.lineKey,
+    p_sibling_line_keys: params.siblingLineKeys,
+    p_target_claim_id: params.targetClaimId,
+    p_allow_new_distinct: params.allowNewDistinct,
+    p_data: params.data,
+    p_actor_id: params.actor.actorId,
+    p_actor_type: params.actor.actorType,
+    p_actor_display: params.actor.actorDisplay,
+    p_import_batch_id: params.importBatchId,
+  });
+  if (error) throwImportRpcError("commitCms1500Line", error as { code?: string; message?: string });
+  return toWriteResult(data);
+}
 
-  const baseQuery = () => {
-    let q = supabase
-      .from("claims_records")
-      .select("id")
-      .eq("patient_id", data.patientId)
-      .eq("auth_period", data.authPeriod)
-      .eq("date_of_service", dosStr as string);
-    q = data.cptCodes ? q.eq("cpt_codes", data.cptCodes) : q.is("cpt_codes", null);
-    return q;
-  };
-
-  // Try to find an existing record matching patient + auth_period + date_of_service + cpt_codes
-  // (null cpt_codes is treated as a wildcard match only when both sides are null)
-  let existingId: string | null = null;
-  let promoteLegacyRow = false;
-
-  if (dosStr) {
-    if (data.sourceLineIndex != null) {
-      const { data: exact, error: exactErr } = await baseQuery().eq("source_line_index", data.sourceLineIndex).maybeSingle();
-      if (exactErr) {
-        console.error("[Supabase] upsertClaimRecord (exact line-index lookup):", exactErr);
-        throw exactErr;
-      }
-      existingId = exact ? (exact as { id: string }).id : null;
-
-      if (!existingId) {
-        const { data: legacy, error: legacyErr } = await baseQuery().is("source_line_index", null).maybeSingle();
-        if (legacyErr) {
-          // maybeSingle() here NEVER errors for zero matching rows -- the
-          // Supabase client only synthesizes an error (code PGRST116) when
-          // the underlying result array has length > 1, enforced entirely
-          // client-side (see node_modules/@supabase/postgrest-js
-          // PostgrestBuilder.ts's isMaybeSingle handling: `if (data.length
-          // > 1) { error = { code: 'PGRST116', ... } }`, with the zero- and
-          // one-row cases falling through to `data = null` / `data =
-          // data[0]` and no error at all). So PGRST116 here specifically
-          // means more than one legacy (NULL-index) row already exists at
-          // this key -- the genuine ambiguous-identity case this error type
-          // exists for -- and is never a stand-in for "no rows found."
-          // Any OTHER error here (missing column/table, permissions,
-          // network) is a real database/schema failure, not an identity
-          // question -- rethrowing it as-is lets callers tell "this needs
-          // staff review" apart from "the database itself is broken"
-          // instead of every failure looking identical.
-          if (legacyErr.code === "PGRST116") {
-            throw new ClaimLineIdentityAmbiguousError(data.patientId, dosStr, data.cptCodes ?? null, data.sourceLineIndex);
-          }
-          console.error("[Supabase] upsertClaimRecord (legacy line-index lookup):", legacyErr);
-          throw legacyErr;
-        }
-        const legacyId = legacy ? (legacy as { id: string }).id : null;
-
-        if (legacyId && data.sourceLineIndex === 0) {
-          existingId = legacyId;
-          promoteLegacyRow = true; // stamp source_line_index = 0 on this previously-untagged row
-        } else if (legacyId && data.sourceLineIndex > 0) {
-          throw new ClaimLineIdentityAmbiguousError(data.patientId, dosStr, data.cptCodes ?? null, data.sourceLineIndex);
-        }
-      }
-    } else {
-      // No line index supplied (manual single-row edits/creates) — exact prior
-      // behavior, matching regardless of source_line_index.
-      const { data: existing, error } = await baseQuery().maybeSingle();
-      if (error) {
-        console.error("[Supabase] upsertClaimRecord (lookup):", error);
-        throw error;
-      }
-      existingId = existing ? (existing as { id: string }).id : null;
-    }
-  }
-
-  if (existingId) {
-    // Patch only the non-null fields provided by this upload
-    const patch: Record<string, unknown> = {};
-    if (data.placeOfService != null) patch.place_of_service = data.placeOfService;
-    if (data.visitNumber != null) patch.visit_number = data.visitNumber;
-    if (data.cptCodes != null) patch.cpt_codes = data.cptCodes;
-    if (data.unitsBilled != null) patch.units_billed = data.unitsBilled;
-    if (data.diagnosisCodes != null) patch.diagnosis_codes = data.diagnosisCodes;
-    if (data.modifier != null) patch.modifier = data.modifier;
-    if (data.chargeAmount != null) patch.charge_amount = data.chargeAmount;
-    if (data.insuranceReimbursement != null) patch.insurance_reimbursement = data.insuranceReimbursement;
-    if (data.patientAmountPaid != null) patch.patient_amount_paid = data.patientAmountPaid;
-    if (data.patientAmountDue != null) patch.patient_amount_due = data.patientAmountDue;
-    if (data.insuranceBilled != null) patch.insurance_billed = data.insuranceBilled;
-    if (data.oaClaimNumber != null) patch.oa_claim_number = data.oaClaimNumber;
-    if (data.claimSubmittedDate != null) patch.claim_submitted_date = data.claimSubmittedDate.toISOString().split("T")[0];
-    if (data.expireBcbsClaimNumber != null) patch.expire_bcbs_claim_number = data.expireBcbsClaimNumber;
-    if (data.claimStatus != null) patch.claim_status = data.claimStatus;
-    if (data.paymentReceived != null) patch.payment_received = data.paymentReceived;
-    if (data.checkDate != null) patch.check_date = data.checkDate.toISOString().split("T")[0];
-    if (data.checkNumberVirtualCard != null) patch.check_number_virtual_card = data.checkNumberVirtualCard;
-    if (data.dateReceived != null) patch.date_received = data.dateReceived.toISOString().split("T")[0];
-    if (data.dateOfAppeal != null) patch.date_of_appeal = data.dateOfAppeal.toISOString().split("T")[0];
-    if (data.referenceNo != null) patch.reference_no = data.referenceNo;
-    if (data.lmn != null) patch.lmn = data.lmn;
-    if (promoteLegacyRow) patch.source_line_index = 0;
-
-    if (Object.keys(patch).length > 0) {
-      await writeClaimRecordWithAudit({
-        id: existingId,
-        patientId: data.patientId,
-        payload: patch,
-        actor,
-        action: "CLAIM_RECORD_UPDATE",
-        importBatchId,
-      });
-    }
-    return existingId;
-  }
-
-  // No existing record — insert a new one
-  return createClaimRecord(data, actor, importBatchId);
+export async function applyEobLine(params: {
+  patientId: string;
+  source: ClaimImportSource;
+  lineKey: string;
+  targetClaimId: string;
+  match: { date_of_service: string; cpt_codes: string };
+  confirmReplace: boolean;
+  data: Record<string, unknown>;
+  actor: ActorContext;
+  importBatchId: string;
+}): Promise<ClaimImportWriteResult> {
+  const { data, error } = await supabase.rpc("apply_eob_line_with_audit", {
+    p_patient_id: params.patientId,
+    p_content_sha256: params.source.sha256,
+    p_file_name: params.source.fileName,
+    p_page_count: params.source.pageCount,
+    p_line_key: params.lineKey,
+    p_target_claim_id: params.targetClaimId,
+    p_match: params.match,
+    p_confirm_replace: params.confirmReplace,
+    p_data: params.data,
+    p_actor_id: params.actor.actorId,
+    p_actor_type: params.actor.actorType,
+    p_actor_display: params.actor.actorDisplay,
+    p_import_batch_id: params.importBatchId,
+  });
+  if (error) throwImportRpcError("applyEobLine", error as { code?: string; message?: string });
+  return toWriteResult(data);
 }
 
 // ─── Insurer catalog (P4-P7) ────────────────────────────────────────────────

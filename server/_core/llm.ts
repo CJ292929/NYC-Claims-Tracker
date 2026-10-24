@@ -473,6 +473,13 @@ const toAnthropicContentBlock = (
     return { type: "text", text: part.text };
   }
   if (part.type === "image_url") {
+    // Inline images (data:image/png;base64,...) — e.g. a rendered scanned
+    // CMS-1500 page — must go as a base64 source; Anthropic's url source
+    // only accepts http(s) URLs.
+    const inline = part.image_url.url.match(/^data:(image\/[a-z+.-]+);base64,/i);
+    if (inline) {
+      return { type: "image", source: { type: "base64", media_type: inline[1].toLowerCase(), data: dataUriToBase64(part.image_url.url) } };
+    }
     return { type: "image", source: { type: "url", url: part.image_url.url } };
   }
   if (part.type === "file") {

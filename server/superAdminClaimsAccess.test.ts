@@ -34,17 +34,18 @@ const { dbMock } = vi.hoisted(() => {
       createClaimRecord: fn(),
       updateClaimRecord: fn(),
       deleteClaimRecordWithAudit: fn(),
-      upsertClaimRecord: fn(),
-      findCms1500EnrichmentCandidates: fn(),
-      patientHasAnyClaimRecords: fn(),
-      applyCms1500Enrichment: fn(),
+      listPatientClaimLinesOnDates: fn(),
+      listPatientVisitPeriodDates: fn(),
+      findClaimImportDocumentId: fn(),
+      commitCms1500Line: fn(),
+      applyEobLine: fn(),
       classifyClaimFollowUp: fn(),
       sortByFollowUpUrgency: fn(),
       aggregateClaimStatusCounts: fn(),
       InsurerDeletedError: class extends Error {},
       ClaimRecordNotFoundError: class extends Error {},
       ClaimRecordPatientMismatchError: class extends Error {},
-      ClaimLineIdentityAmbiguousError: class extends Error {},
+      ClaimImportRuleError: class extends Error {},
     },
   };
 });
@@ -128,6 +129,7 @@ describe("claims.* is Super Admin only", () => {
     expect(CLAIM_PROCEDURES).toEqual(expect.arrayContaining([
       "getByPatientAndPeriod", "create", "update", "delete", "upsert", "historyForClaim",
       "cms1500EnrichmentPreview", "cms1500EnrichmentCommit", "bulkImportFromEOB",
+      "importPreview", "importCommit",
       "markResolved", "getFollowUpClaims", "getStatusCounts",
     ]));
   });

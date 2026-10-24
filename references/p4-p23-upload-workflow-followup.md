@@ -1,5 +1,27 @@
 # CMS1500-first upload workflow: follow-up design (not implemented in P4-P23)
 
+> **Status: implemented in P4-P24.** See
+> `supabase/migrations/20261026000000_p4_p24_cms1500_first_claim_lines.sql`,
+> `shared/claimImport.ts` (field ownership and matching rules),
+> `server/claimImport.ts`, `server/cms1500Vision.ts` and
+> `client/src/components/claims/ClaimImportDialog.tsx`. Where P4-P24
+> deliberately differs from the proposal below:
+>
+> - CMS1500 does **not** persist the Box 24F charge (the established rule
+>   that CMS1500 never writes money stands). Charges are read only to check
+>   the lines against Box 28. Billed amount comes from the EOB.
+> - Visit numbers are never derived from a Box 24 row position or units.
+> - Line identity is (document SHA-256, source line key), with partial
+>   UNIQUE indexes, rather than reusing `source_line_index`. Cross-document
+>   correspondence is never positional; ambiguous matches need a choice.
+> - Patients have no DOB or member ID in this app, so groups are matched by
+>   name only. A near match or an unreadable name always needs explicit
+>   confirmation.
+> - Scanned pages are rendered and each page is read twice; values the two
+>   reads disagree on are left blank and flagged rather than picked.
+>
+> The rest of this note is kept as the original design record.
+
 P4-P23 restricted Claims to the Super Admin and replaced the session-table
 financial columns. It deliberately **did not** change how uploads persist.
 This note records the remaining scope and a proposed design so the next phase

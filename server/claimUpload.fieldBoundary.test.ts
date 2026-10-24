@@ -5,8 +5,7 @@
  * Reimbursement/EOB upload must keep line-item billing detail (chargeAmount,
  * diagnosisCodes, modifier, unitsBilled) that its own extractor found, while
  * still stripping genuinely CMS-1500-exclusive form fields (placeOfService,
- * claimSubmittedDate, visitNumber). A CMS-1500 upload must keep going through
- * unaffected: billing detail preserved, payment-side fields still stripped.
+ * claimSubmittedDate, visitNumber).
  *
  * No live LLM/Supabase: extraction is mocked via tryTemplateExtraction /
  * parseCMS1500 so this only exercises the boundary-gate logic itself.
@@ -133,58 +132,6 @@ describe('POST /api/claims/upload-extract — reimbursement field boundary', () 
     expect(claim.claimSubmittedDate).toBeNull();
     expect(claim.visitNumber).toBeNull();
   }, 20000);
-
-  it('keeps billing detail and strips payment-side fields for a CMS1500 upload (no regression)', async () => {
-    parseCMS1500Mock.mockReturnValue([
-      {
-        patientName: 'JANE TESTPATIENT',
-        claims: [
-          {
-            dateOfService: '2026-01-11',
-            cptCodes: '97162',
-            placeOfService: 'Office',
-            claimSubmittedDate: '2026-01-15',
-            visitNumber: 1,
-            chargeAmount: 275.0,
-            diagnosisCodes: 'M54.50',
-            modifier: 'GP',
-            unitsBilled: 1,
-            // Payment-side fields — must be stripped on a CMS1500 upload
-            insuranceReimbursement: 137.5,
-            patientAmountPaid: 0,
-            patientAmountDue: 0,
-            oaClaimNumber: 'SHOULD-NOT-SAVE',
-            checkDate: '2026-03-03',
-            checkNumberVirtualCard: 'SHOULD-NOT-SAVE',
-            claimStatus: 'submitted',
-            insuranceBilled: null,
-            expireBcbsClaimNumber: 'EXP-1',
-            cptLines: [],
-          } as any,
-        ],
-      },
-    ]);
-
-    const res = await fetch(`${baseUrl}/api/claims/upload-extract`, {
-      method: 'POST',
-      body: uploadForm('cms1500'),
-    });
-
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.claims).toHaveLength(1);
-    const claim = body.claims[0];
-
-    expect(claim.chargeAmount).toBe(275.0);
-    expect(claim.diagnosisCodes).toBe('M54.50');
-    expect(claim.modifier).toBe('GP');
-    expect(claim.unitsBilled).toBe(1);
-    expect(claim.placeOfService).toBe('Office');
-    expect(claim.visitNumber).toBe(1);
-
-    expect(claim.insuranceReimbursement).toBeNull();
-    expect(claim.oaClaimNumber).toBeNull();
-    expect(claim.checkDate).toBeNull();
-    expect(claim.checkNumberVirtualCard).toBeNull();
-  });
+  // The CMS1500 side of the boundary (P4-P24: no money, no visit number,
+  // pointer-only diagnoses) is covered in claimUpload.cms1500Import.test.ts.
 });
