@@ -10,8 +10,10 @@ import ChangePassword from "./pages/ChangePassword";
 import StaffManagement from "./pages/StaffManagement";
 import ActivityLog from "./pages/ActivityLog";
 import { trpc } from "@/lib/trpc";
-import { canManageStaff, isForcedPasswordChange } from "@/lib/authGate";
-import { useEffect } from "react";
+import { authIdentityKey, canAccessClaims, canManageStaff, isForcedPasswordChange } from "@/lib/authGate";
+import { identityTransition, purgeClaimsQueries, purgeIdentityScopedQueries } from "@/lib/claimsCache";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 
 function AuthLoadingScreen() {
   return (
@@ -154,6 +156,31 @@ export const DASHBOARD_ROUTE_PATTERN = new RegExp(
   `^(?:${DASHBOARD_ROUTE_PATHS.map((path) => path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})$`
 );
 
+/** P4-P23: scopes the React Query cache to the signed-in identity. When
+ * auth.me resolves to a different account (or to signed-out, or the same
+ * account with a changed role/Claims capability), every cached response
+ * except auth.me itself is dropped — so data fetched by one identity is
+ * never rendered for another. Independently, whenever the current identity
+ * lacks Claims access, any cached claims.* response is dropped as a
+ * backstop to the per-query `enabled` gates in Dashboard. Renders nothing. */
+function IdentityCacheGuard() {
+  const queryClient = useQueryClient();
+  const { data: user, isLoading } = trpc.auth.me.useQuery();
+  const identityKey = isLoading ? undefined : authIdentityKey(user);
+  const claimsAllowed = canAccessClaims(user);
+  const previousKeyRef = useRef<string | null | undefined>(undefined);
+
+  useEffect(() => {
+    if (identityTransition(previousKeyRef.current, identityKey) === "purge-all") {
+      purgeIdentityScopedQueries(queryClient);
+    }
+    if (identityKey !== undefined) previousKeyRef.current = identityKey;
+    if (!claimsAllowed) purgeClaimsQueries(queryClient);
+  }, [identityKey, claimsAllowed, queryClient]);
+
+  return null;
+}
+
 export function Router() {
   return (
     <Switch>
@@ -176,6 +203,7 @@ function App() {
       <ThemeProvider defaultTheme="light">
         <TooltipProvider>
           <Toaster />
+          <IdentityCacheGuard />
           <Router />
         </TooltipProvider>
       </ThemeProvider>

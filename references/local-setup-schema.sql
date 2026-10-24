@@ -104,6 +104,14 @@ CREATE TABLE IF NOT EXISTS public.visit_records (
   total_insurance_reimbursement numeric(10,2),
   total_patient_due numeric(10,2),
   total_patient_paid numeric(10,2),
+  -- P4-P23: per-session workflow fields. Nullable, NO default — NULL means
+  -- "not yet set" (never an implied 'no' / 'ready_to_file').
+  assignment_of_benefits text CONSTRAINT visit_records_assignment_of_benefits_check
+    CHECK (assignment_of_benefits IS NULL OR assignment_of_benefits IN ('yes', 'no')),
+  submission_status text CONSTRAINT visit_records_submission_status_check
+    CHECK (submission_status IS NULL OR submission_status IN ('ready_to_file', 'hold', 'do_not_file')),
+  remarks text CONSTRAINT visit_records_remarks_length_check
+    CHECK (remarks IS NULL OR char_length(remarks) <= 2000),
   -- P4-P17: attribution (see patients.created_by's comment above).
   created_by uuid,
   created_by_type text,
@@ -557,6 +565,8 @@ REVOKE ALL ON FUNCTION public.write_claim_record_with_audit(uuid, uuid, jsonb, u
 GRANT EXECUTE ON FUNCTION public.write_claim_record_with_audit(uuid, uuid, jsonb, uuid, text, text, text, uuid) TO service_role;
 
 -- ─── write_visit_record_with_audit (P4-P17R: atomic single-row visit create/update + audit) ─
+-- (P4-P23: carries assignment_of_benefits/submission_status/remarks and
+-- skips the UPDATE entirely on a no-op — see 20261025000000_p4_p23_session_workflow_fields.sql)
 -- Same shape as write_patient_with_audit, for visit_records.create/update
 -- (single row only — bulkCreateVisitRecords stays stamp-only, see that
 -- function's comment in server/db.ts for why a per-row audit entry there
@@ -590,12 +600,14 @@ BEGIN
       patient_id, sessions_authorized, sessions_remaining, session_number,
       auth_period, date_of_service, new_auth, date_ash_submitted, auth_status,
       insurance_company, total_insurance_reimbursement, total_patient_due, total_patient_paid,
+      assignment_of_benefits, submission_status, remarks,
       created_by, created_by_type, updated_by, updated_by_type
     ) VALUES (
       p_patient_id, v_after.sessions_authorized, v_after.sessions_remaining, v_after.session_number,
       COALESCE(v_after.auth_period, 1), v_after.date_of_service, v_after.new_auth, v_after.date_ash_submitted,
       COALESCE(v_after.auth_status, 'none'), v_after.insurance_company, v_after.total_insurance_reimbursement,
       v_after.total_patient_due, v_after.total_patient_paid,
+      v_after.assignment_of_benefits, v_after.submission_status, v_after.remarks,
       p_actor_id, p_actor_type, p_actor_id, p_actor_type
     )
     RETURNING id INTO v_id;
@@ -618,12 +630,27 @@ BEGIN
     IF NOT FOUND THEN
       RAISE EXCEPTION 'visit_record_not_found: %', p_id USING ERRCODE = 'P0030';
     END IF;
+    -- p_patient_id is optional on update (see P4-P17R); when supplied it is
+    -- checked as an ownership guard.
     IF p_patient_id IS NOT NULL AND v_before.patient_id <> p_patient_id THEN
       RAISE EXCEPTION 'visit_record_patient_mismatch: % does not belong to %', p_id, p_patient_id
         USING ERRCODE = 'P0031';
     END IF;
 
     v_after := jsonb_populate_record(v_before, p_data);
+
+    FOR v_key IN SELECT jsonb_object_keys(p_data) LOOP
+      IF (to_jsonb(v_before) -> v_key) IS DISTINCT FROM (to_jsonb(v_after) -> v_key) THEN
+        v_before_diff := v_before_diff || jsonb_build_object(v_key, to_jsonb(v_before) -> v_key);
+        v_after_diff := v_after_diff || jsonb_build_object(v_key, to_jsonb(v_after) -> v_key);
+      END IF;
+    END LOOP;
+
+    -- No-op save: nothing changed, so neither the row nor its attribution
+    -- is touched and no audit row is written.
+    IF v_before_diff = '{}'::jsonb THEN
+      RETURN p_id;
+    END IF;
 
     UPDATE public.visit_records SET
       sessions_authorized = v_after.sessions_authorized,
@@ -638,26 +665,20 @@ BEGIN
       total_insurance_reimbursement = v_after.total_insurance_reimbursement,
       total_patient_due = v_after.total_patient_due,
       total_patient_paid = v_after.total_patient_paid,
+      assignment_of_benefits = v_after.assignment_of_benefits,
+      submission_status = v_after.submission_status,
+      remarks = v_after.remarks,
       updated_by = p_actor_id,
       updated_by_type = p_actor_type
     WHERE id = p_id;
 
-    FOR v_key IN SELECT jsonb_object_keys(p_data) LOOP
-      IF (to_jsonb(v_before) -> v_key) IS DISTINCT FROM (to_jsonb(v_after) -> v_key) THEN
-        v_before_diff := v_before_diff || jsonb_build_object(v_key, to_jsonb(v_before) -> v_key);
-        v_after_diff := v_after_diff || jsonb_build_object(v_key, to_jsonb(v_after) -> v_key);
-      END IF;
-    END LOOP;
-
-    IF v_before_diff <> '{}'::jsonb THEN
-      INSERT INTO public.audit_logs (
-        entity_type, entity_id, patient_id, actor_id, actor_type, actor_display,
-        action, before_data, after_data
-      ) VALUES (
-        'visit_record', p_id, v_before.patient_id, p_actor_id, p_actor_type, p_actor_display,
-        p_action, v_before_diff, v_after_diff
-      );
-    END IF;
+    INSERT INTO public.audit_logs (
+      entity_type, entity_id, patient_id, actor_id, actor_type, actor_display,
+      action, before_data, after_data
+    ) VALUES (
+      'visit_record', p_id, v_before.patient_id, p_actor_id, p_actor_type, p_actor_display,
+      p_action, v_before_diff, v_after_diff
+    );
 
     RETURN p_id;
   END IF;

@@ -45,7 +45,8 @@ beforeEach(async () => {
   vi.clearAllMocks();
   authenticateRequest.mockResolvedValue({
     id: 1, openId: 'sample-user', email: 'sample@example.com', name: 'Sample User',
-    loginMethod: 'manus', role: 'user', createdAt: new Date(), updatedAt: new Date(),
+    // P4-P23: claim extraction is Super Admin only — the owner OAuth admin.
+    loginMethod: 'manus', role: 'admin', createdAt: new Date(), updatedAt: new Date(),
     lastSignedIn: new Date(),
   } as any);
   // Default: no gaps to backfill. Individual tests override this if they need

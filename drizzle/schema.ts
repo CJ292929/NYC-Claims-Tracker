@@ -63,6 +63,10 @@ export interface VisitRecord {
   totalInsuranceReimbursement: number | null;  // numeric(10,2)
   totalPatientDue: number | null;              // numeric(10,2)
   totalPatientPaid: number | null;             // numeric(10,2)
+  // P4-P23 per-session workflow fields — NULL means "not yet set".
+  assignmentOfBenefits: "yes" | "no" | null;
+  submissionStatus: "ready_to_file" | "hold" | "do_not_file" | null;
+  remarks: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

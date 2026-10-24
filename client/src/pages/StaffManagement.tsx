@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import { trpc } from "@/lib/trpc";
-import { canManageStaff } from "@/lib/authGate";
+import { canAccessClaims, canManageStaff } from "@/lib/authGate";
 import { navSectionToRoute } from "@/lib/navSection";
 import type { NavSection } from "@/components/dashboard/DashboardSidebar";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
@@ -325,6 +325,7 @@ export default function StaffManagement() {
       onSignOut={handleSignOut}
       signingOut={logoutMutation.isPending}
       canManageStaff={canManageStaff(authUser)}
+      canAccessClaims={canAccessClaims(authUser)}
       topbarTitle="Staff Management"
       topbarSubtitle="Manage staff accounts and access."
       topbarActions={

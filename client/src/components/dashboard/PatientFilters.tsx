@@ -70,6 +70,8 @@ export function PatientFilters({
         )}
       </div>
 
+      {/* Empty for non-Super-Admins (P4-P23): Claims status is claim data. */}
+      {claimStatusFilters.length > 0 && (<>
       <Separator />
 
       <div>
@@ -97,6 +99,7 @@ export function PatientFilters({
           })}
         </div>
       </div>
+      </>)}
     </div>
   );
 }

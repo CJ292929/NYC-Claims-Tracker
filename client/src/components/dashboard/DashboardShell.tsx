@@ -22,6 +22,7 @@ export function DashboardShell({
   onSignOut,
   signingOut,
   canManageStaff = false,
+  canAccessClaims = false,
   topbarTitle,
   topbarSubtitle,
   topbarActions,
@@ -32,6 +33,7 @@ export function DashboardShell({
   onSignOut: () => void;
   signingOut?: boolean;
   canManageStaff?: boolean;
+  canAccessClaims?: boolean;
   topbarTitle: string;
   topbarSubtitle?: string;
   topbarActions?: ReactNode;
@@ -71,6 +73,7 @@ export function DashboardShell({
             onSignOut={onSignOut}
             signingOut={signingOut}
             canManageStaff={canManageStaff}
+            canAccessClaims={canAccessClaims}
           />
         </div>
       </aside>
@@ -103,6 +106,7 @@ export function DashboardShell({
             onSignOut={onSignOut}
             signingOut={signingOut}
             canManageStaff={canManageStaff}
+            canAccessClaims={canAccessClaims}
           />
         </SheetContent>
       </Sheet>

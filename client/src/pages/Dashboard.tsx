@@ -21,7 +21,9 @@ import { insurerMatchValues } from '@shared/insuranceCatalog';
 import { parseCsvText, parseCsvRow, normalizePatientName, emptyCsvImportSummary, type CsvImportSummary } from '@/lib/csvImport';
 import { historicalInsurerNames, isStaleInsurerSelection, matchesPatientFilters } from '@/lib/patientFilters';
 import { routeToNavSection, navSectionToRoute } from '@/lib/navSection';
-import { canManageStaff as canManageStaffAuthGate } from '@/lib/authGate';
+import { canAccessClaims as canAccessClaimsAuthGate, canManageStaff as canManageStaffAuthGate } from '@/lib/authGate';
+import { purgeIdentityScopedQueries } from '@/lib/claimsCache';
+import { useQueryClient } from '@tanstack/react-query';
 import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { MetricCard } from '@/components/dashboard/MetricCard';
 import { FilterChips } from '@/components/dashboard/FilterChips';
@@ -30,6 +32,8 @@ import { AuthorizationOverview } from '@/components/dashboard/AuthorizationOverv
 import { AuthorizationRecordsWorkspace } from '@/components/dashboard/AuthorizationRecordsWorkspace';
 import { ClaimsFollowUpPanel } from '@/components/dashboard/ClaimsFollowUpPanel';
 import { RecordHistoryDialog } from '@/components/dashboard/RecordHistoryDialog';
+import { AssignmentOfBenefitsSelect, SubmissionStatusSelect, RemarksCell } from '@/components/dashboard/SessionWorkflowCells';
+import { ClaimsAccessDenied } from '@/components/dashboard/ClaimsAccessDenied';
 import { PatientOverview } from '@/components/dashboard/PatientOverview';
 import { PatientRecordsWorkspace } from '@/components/dashboard/PatientRecordsWorkspace';
 import { DischargedPatientsWorkspace } from '@/components/dashboard/DischargedPatientsWorkspace';
@@ -69,7 +73,8 @@ interface DbPatient {
   isActive: boolean;
   dischargeDate: number | null;
   dischargeReason: string | null;
-  claimsStatus: string;
+  /** Claim data — only present in responses for the Super Admin (P4-P23). */
+  claimsStatus?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -85,6 +90,9 @@ interface DbVisit {
   newAuth: string | null;
   dateAshSubmitted: Date | null;
   authStatus: 'none' | 'pending' | 'approved' | 'denied';
+  assignmentOfBenefits: 'yes' | 'no' | null;
+  submissionStatus: 'ready_to_file' | 'hold' | 'do_not_file' | null;
+  remarks: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -598,6 +606,16 @@ export default function Dashboard() {
   });
 
   // ── Queries ────────────────────────────────────────────────────────────────
+  // P4-P23: Claims are Super Admin only. Resolved before any claims query so
+  // every claims.* query below can be gated on it (`enabled`). ProtectedRoute
+  // only renders Dashboard once auth.me has resolved, and canAccessClaims
+  // treats an unresolved user as no access, so no claims request is made and
+  // no cached claims data is rendered while identity is still loading.
+  const queryClient = useQueryClient();
+  const { data: authUser } = trpc.auth.me.useQuery();
+  const canManageStaff = canManageStaffAuthGate(authUser);
+  const canAccessClaims = canAccessClaimsAuthGate(authUser);
+
   const { data: patients = [], isLoading: patientsLoading, refetch: refetchPatients } =
     trpc.patients.list.useQuery();
 
@@ -673,23 +691,23 @@ export default function Dashboard() {
   // Pre-fetch claims for up to 5 periods
   const claimsQuery1 = trpc.claims.getByPatientAndPeriod.useQuery(
     { patientId: activePatient?.id ?? '', authPeriod: periods[0] ?? 1 },
-    { enabled: !!activePatient && periods.length > 0 }
+    { enabled: canAccessClaims && !!activePatient && periods.length > 0 }
   );
   const claimsQuery2 = trpc.claims.getByPatientAndPeriod.useQuery(
     { patientId: activePatient?.id ?? '', authPeriod: periods[1] ?? 1 },
-    { enabled: !!activePatient && periods.length > 1 }
+    { enabled: canAccessClaims && !!activePatient && periods.length > 1 }
   );
   const claimsQuery3 = trpc.claims.getByPatientAndPeriod.useQuery(
     { patientId: activePatient?.id ?? '', authPeriod: periods[2] ?? 1 },
-    { enabled: !!activePatient && periods.length > 2 }
+    { enabled: canAccessClaims && !!activePatient && periods.length > 2 }
   );
   const claimsQuery4 = trpc.claims.getByPatientAndPeriod.useQuery(
     { patientId: activePatient?.id ?? '', authPeriod: periods[3] ?? 1 },
-    { enabled: !!activePatient && periods.length > 3 }
+    { enabled: canAccessClaims && !!activePatient && periods.length > 3 }
   );
   const claimsQuery5 = trpc.claims.getByPatientAndPeriod.useQuery(
     { patientId: activePatient?.id ?? '', authPeriod: periods[4] ?? 1 },
-    { enabled: !!activePatient && periods.length > 4 }
+    { enabled: canAccessClaims && !!activePatient && periods.length > 4 }
   );
 
   // Map period -> claims data
@@ -837,8 +855,10 @@ export default function Dashboard() {
       utils.patients.list.invalidate();
       // A patient's insurance (or claims_status) may have changed — both the
       // Claims Status counts and the Follow-Up panel are scoped by insurance.
-      utils.claims.getStatusCounts.invalidate();
-      utils.claims.getFollowUpClaims.invalidate();
+      if (canAccessClaims) {
+        utils.claims.getStatusCounts.invalidate();
+        utils.claims.getFollowUpClaims.invalidate();
+      }
       toast.success('Patient updated');
     },
     onError: (e) => toast.error(`Failed to update patient: ${e.message}`),
@@ -987,12 +1007,10 @@ export default function Dashboard() {
 
   const logoutMutation = trpc.auth.logout.useMutation();
 
-  // Gates the sidebar's Management/Staff Management group — mirrors the
-  // server's adminOrOwnerProcedure (owner OAuth admins + clinic admins).
-  const { data: authUser } = trpc.auth.me.useQuery();
-  const canManageStaff = canManageStaffAuthGate(authUser);
-
   const handleSignOut = () => {
+    // P4-P23: drop every cached response (Claims included) before leaving,
+    // so nothing fetched under this identity survives into the next one.
+    purgeIdentityScopedQueries(queryClient);
     logoutMutation.mutate(undefined, {
       onSuccess: () => { window.location.href = '/login'; },
       onError: () => { window.location.href = '/login'; },
@@ -1060,7 +1078,7 @@ export default function Dashboard() {
   // the three can ever disagree on screen.
   const { data: statusCountsData } = trpc.claims.getStatusCounts.useQuery({
     insurance: selectedInsurance || undefined,
-  });
+  }, { enabled: canAccessClaims });
   const claimStatusCounts = statusCountsData?.counts ?? {
     all: 0, submitted: 0, approved: 0, pending: 0, denied: 0,
     pended: 0, rejected: 0, resubmitted: 0, none: 0,
@@ -1208,7 +1226,7 @@ export default function Dashboard() {
   // clinic-wide count); react-query dedupes the authAlerts call against
   // AuthAlertPanel's own identical query below.
   const { data: dashboardAuthAlerts = [] } = trpc.visits.authAlerts.useQuery();
-  const { data: dashboardFollowUpClaims = [] } = trpc.claims.getFollowUpClaims.useQuery({});
+  const { data: dashboardFollowUpClaims = [] } = trpc.claims.getFollowUpClaims.useQuery({}, { enabled: canAccessClaims });
   const dashboardKpis = useMemo(() => deriveDashboardKpis({
     activePatientCount: activePatients.length,
     authAlerts: dashboardAuthAlerts,
@@ -1326,9 +1344,6 @@ export default function Dashboard() {
       sessionsAuthorized: number | null;
       sessionsRemaining: number | null;
       sessionNumber: number | null;
-      totalInsuranceReimbursement: number | null;
-      totalPatientDue: number | null;
-      totalPatientPaid: number | null;
     }>,
     successMessage: string
   ): Promise<boolean> => {
@@ -1349,32 +1364,6 @@ export default function Dashboard() {
     const n = Number(trimmed);
     if (!Number.isInteger(n) || n < 0) return undefined;
     return n;
-  };
-
-  /** Parse an EditableCell's raw number-input string into a nullable non-negative
-   *  dollar amount (2-decimal). Returns `undefined` (distinct from `null`) when
-   *  the input is invalid. */
-  const parseOptionalAmount = (raw: string): number | null | undefined => {
-    const trimmed = raw.trim();
-    if (trimmed === '') return null;
-    const n = Number(trimmed);
-    if (!Number.isFinite(n) || n < 0) return undefined;
-    return Math.round(n * 100) / 100;
-  };
-
-  const formatAmount = (n: number | null | undefined): string => `$${(n ?? 0).toFixed(2)}`;
-
-  /** Display for a money cell that hasn't had a manual value saved yet, but
-   *  has a live sum from the Claims Tracker to show in the meantime — styled
-   *  distinctly so staff can tell it's a computed placeholder, not a
-   *  confirmed figure, until they click to save an explicit override. */
-  const autoFillDisplay = (n: number | null | undefined): React.ReactNode => {
-    if (n == null) return null;
-    return (
-      <span className="text-gray-500 italic" title="Auto-filled from Claims Tracker — click to enter a manual value">
-        {formatAmount(n)}
-      </span>
-    );
   };
 
   // ── PDF/CSV Claim Upload ──────────────────────────────────────────────────
@@ -2272,6 +2261,8 @@ export default function Dashboard() {
                 className="mt-1 border-brand-cream-dark focus:border-brand-blue"
               />
             </div>
+            {/* Claims status is claim data — Super Admin only (P4-P23). */}
+            {canAccessClaims && (
             <div>
               <Label htmlFor="edit-patient-claims-status" className="text-brand-blue font-semibold">Claims Status</Label>
               <Select value={editPatientClaimsStatus} onValueChange={setEditPatientClaimsStatus}>
@@ -2285,6 +2276,7 @@ export default function Dashboard() {
                 </SelectContent>
               </Select>
             </div>
+            )}
           </div>
           <DialogFooter className="flex gap-3 pt-2 sm:justify-start">
             <Button
@@ -2308,7 +2300,9 @@ export default function Dashboard() {
                     authValidUntil: editPatientAuthValidUntil
                       ? new Date(editPatientAuthValidUntil + 'T00:00:00Z').getTime()
                       : null,
-                    claimsStatus: (editPatientClaimsStatus || 'none') as 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | 'none',
+                    ...(canAccessClaims
+                      ? { claimsStatus: (editPatientClaimsStatus || 'none') as 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | 'none' }
+                      : {}),
                   });
                   setIsEditPatientOpen(false);
                 } catch {
@@ -2410,6 +2404,25 @@ export default function Dashboard() {
   // ── Detail View ────────────────────────────────────────────────────────────
 
   if (showDetailView) {
+    // P4-P23: a direct /claims URL from a non-Super-Admin gets an access
+    // denied page — checked before anything patient- or claim-specific is
+    // rendered (the claims queries above are already disabled for them).
+    if (activeSection === 'claims' && !canAccessClaims) {
+      return (
+        <DashboardShell
+          activeSection={activeSection}
+          onNavigate={handleNavigate}
+          onSignOut={handleSignOut}
+          signingOut={logoutMutation.isPending}
+          canManageStaff={canManageStaff}
+          canAccessClaims={canAccessClaims}
+          topbarTitle="Claims"
+        >
+          <ClaimsAccessDenied onGoToPatientRecords={() => navigate('/patients/records')} />
+          {bulkUploadDialog}
+        </DashboardShell>
+      );
+    }
     // Explicit — no patients[0] fallback. A patient must actually have been
     // selected (Patients list, an alert card, "View Full Records", …) for
     // /visits or /claims to show anything.
@@ -2421,6 +2434,7 @@ export default function Dashboard() {
           onSignOut={handleSignOut}
           signingOut={logoutMutation.isPending}
           canManageStaff={canManageStaff}
+          canAccessClaims={canAccessClaims}
           topbarTitle={activeSection === 'visits' ? 'Visits' : 'Claims'}
           topbarSubtitle="No patient selected"
         >
@@ -2449,6 +2463,7 @@ export default function Dashboard() {
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
         canManageStaff={canManageStaff}
+        canAccessClaims={canAccessClaims}
         topbarTitle={activePatient.name}
         topbarSubtitle={`Insurance: ${activePatient.insurance}`}
         topbarActions={
@@ -2576,35 +2591,11 @@ export default function Dashboard() {
                   const periodAuth = periodVisits.find(v => v.sessionsAuthorized != null)?.sessionsAuthorized ?? 0;
                   const periodInsurance = periodVisits.find(v => v.insuranceCompany)?.insuranceCompany ?? null;
                   const isActive = period === activePeriod;
-                  // Auto-fill fallback for the money columns below: sum ALL
-                  // of this period's claims together (every date-of-service
-                  // group's bottom Totals added up) — a specific visit row's
-                  // own logged date doesn't reliably line up with the dates
-                  // printed on its claims, so matching by exact date silently
-                  // came up empty. This always reflects the Claims Tracker
-                  // period total until staff explicitly save an override on
-                  // a visit (which then wins for that row only).
-                  const periodClaims: any[] = claimsDataMap[period] ?? [];
-                  const getClaimsFallbackForVisit = (_visit: DbVisit) => {
-                    if (periodClaims.length === 0) return null;
-                    const sumField = (field: string) =>
-                      periodClaims.reduce((n: number, c: any) => n + (c[field] != null ? parseFloat(c[field]) : 0), 0);
-                    return {
-                      insuranceReimbursement: sumField('insurance_reimbursement'),
-                      patientDue: sumField('patient_amount_due'),
-                      patientPaid: sumField('patient_amount_paid'),
-                    };
-                  };
-                  // Bottom "Totals" footer for the whole period — sums each money
-                  // column individually across every visit row (not combined into
-                  // one number), matching the source EOB's per-column Totals line.
-                  const periodTotals = periodVisits.reduce((acc, v) => {
-                    const cf = getClaimsFallbackForVisit(v);
-                    acc.insuranceReimbursement += v.totalInsuranceReimbursement ?? cf?.insuranceReimbursement ?? 0;
-                    acc.patientDue += v.totalPatientDue ?? cf?.patientDue ?? 0;
-                    acc.patientPaid += v.totalPatientPaid ?? cf?.patientPaid ?? 0;
-                    return acc;
-                  }, { insuranceReimbursement: 0, patientDue: 0, patientPaid: 0 });
+                  // P4-P23: the session table no longer shows the three
+                  // financial totals (or their Claims-derived auto-fill and
+                  // period Totals footer) for any role — those values stay
+                  // stored and are Claims/Super Admin data. Its last three
+                  // columns are the per-session workflow fields instead.
                   return (
                     <div key={`period-${period}`}>
                     {activeSection !== 'claims' && (
@@ -2629,6 +2620,8 @@ export default function Dashboard() {
                           </CardDescription>
                         </div>
                         <div className="flex items-center gap-2">
+                          {/* Super Admin only (P4-P23) */}
+                          {canAccessClaims && (
                           <Button
                             className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold px-5 py-2.5 rounded-lg inline-flex items-center gap-2 transition-all shadow-sm hover:shadow-md"
                             onClick={() => navigate('/claims')}
@@ -2636,6 +2629,7 @@ export default function Dashboard() {
                             <FileText className="w-4 h-4" strokeWidth={2.5} />
                             View Claims
                           </Button>
+                          )}
                           {/* Log Session button only on active period (oldest with remaining sessions) */}
                           {isActive && (
                           <Dialog open={showLogSessionDialog} onOpenChange={setShowLogSessionDialog}>
@@ -2687,7 +2681,6 @@ export default function Dashboard() {
                         {/* Mobile Visit Cards — below md */}
                         <div className="md:hidden divide-y divide-gray-100 bg-white">
                           {periodVisits.map((visit) => {
-                            const claimsFallback = getClaimsFallbackForVisit(visit);
                             return (
                             <div key={visit.id} className="p-4 space-y-3">
                               <div className="flex items-center justify-between gap-2">
@@ -2725,7 +2718,7 @@ export default function Dashboard() {
                                   </p>
                                 </div>
                                 <div>
-                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Auth Date</p>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Authorize Session Date</p>
                                   <p className="text-brand-blue">{visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300">—</span>}</p>
                                 </div>
                                 <div>
@@ -2783,78 +2776,28 @@ export default function Dashboard() {
 
                               <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
                                 <div>
-                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Insurance Reimbursement</p>
-                                  <div className="font-medium text-brand-blue text-base">
-                                    <EditableCell
-                                      type="number"
-                                      min={0}
-                                      step={0.01}
-                                      value={visit.totalInsuranceReimbursement != null ? String(visit.totalInsuranceReimbursement) : (claimsFallback ? String(claimsFallback.insuranceReimbursement) : '')}
-                                      display={visit.totalInsuranceReimbursement != null ? formatAmount(visit.totalInsuranceReimbursement) : autoFillDisplay(claimsFallback?.insuranceReimbursement)}
-                                      isSaving={updateVisit.isPending}
-                                      onSave={async (raw) => {
-                                        const parsed = parseOptionalAmount(raw);
-                                        if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
-                                        return saveVisitField(visit.id, { totalInsuranceReimbursement: parsed }, 'Total Insurance Reimbursement saved');
-                                      }}
-                                    />
-                                  </div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Assignment of Benefits</p>
+                                  <AssignmentOfBenefitsSelect patientId={activePatient.id} visit={visit} />
                                 </div>
                                 <div>
-                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Patient Due</p>
-                                  <div className="font-medium text-brand-blue text-base">
-                                    <EditableCell
-                                      type="number"
-                                      min={0}
-                                      step={0.01}
-                                      value={visit.totalPatientDue != null ? String(visit.totalPatientDue) : (claimsFallback ? String(claimsFallback.patientDue) : '')}
-                                      display={visit.totalPatientDue != null ? formatAmount(visit.totalPatientDue) : autoFillDisplay(claimsFallback?.patientDue)}
-                                      isSaving={updateVisit.isPending}
-                                      onSave={async (raw) => {
-                                        const parsed = parseOptionalAmount(raw);
-                                        if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
-                                        return saveVisitField(visit.id, { totalPatientDue: parsed }, 'Total Patient Due saved');
-                                      }}
-                                    />
-                                  </div>
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Submission Status</p>
+                                  <SubmissionStatusSelect patientId={activePatient.id} visit={visit} />
                                 </div>
-                                <div>
-                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Total Patient Paid</p>
-                                  <div className="font-medium text-brand-blue text-base">
-                                    <EditableCell
-                                      type="number"
-                                      min={0}
-                                      step={0.01}
-                                      value={visit.totalPatientPaid != null ? String(visit.totalPatientPaid) : (claimsFallback ? String(claimsFallback.patientPaid) : '')}
-                                      display={visit.totalPatientPaid != null ? formatAmount(visit.totalPatientPaid) : autoFillDisplay(claimsFallback?.patientPaid)}
-                                      isSaving={updateVisit.isPending}
-                                      onSave={async (raw) => {
-                                        const parsed = parseOptionalAmount(raw);
-                                        if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
-                                        return saveVisitField(visit.id, { totalPatientPaid: parsed }, 'Total Patient Paid saved');
-                                      }}
-                                    />
-                                  </div>
+                                <div className="col-span-2">
+                                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Remarks</p>
+                                  <RemarksCell patientId={activePatient.id} visit={visit} />
                                 </div>
                               </div>
                             </div>
                             );
                           })}
-                          {periodVisits.length > 0 && (
-                            <div className="p-4 bg-gray-50/80 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-                              <p className="col-span-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Totals for this period</p>
-                              <p className="text-gray-700">Reimbursement: <span className="font-semibold">{formatAmount(periodTotals.insuranceReimbursement)}</span></p>
-                              <p className="text-gray-700">Patient Due: <span className="font-semibold">{formatAmount(periodTotals.patientDue)}</span></p>
-                              <p className="text-gray-700">Patient Paid: <span className="font-semibold">{formatAmount(periodTotals.patientPaid)}</span></p>
-                            </div>
-                          )}
                         </div>
                         {/* Desktop Visit Table — md and up */}
                         <div className="hidden md:block overflow-x-auto">
                           <table className="w-full text-sm min-w-full">
                             <thead className="bg-brand-blue/95">
                               <tr>
-                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Date</th>
+                                <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Authorize Session Date</th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
                                   # Authorized
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
@@ -2877,25 +2820,24 @@ export default function Dashboard() {
                                 </th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">Auth Status</th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                                  Total Insurance Reimbursement
+                                  Assignment of Benefits
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
                                 </th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                                  Total Patient Due
+                                  Submission Status
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
                                 </th>
                                 <th className="px-4 py-2.5 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                                  Total Patient Paid
+                                  Remarks
                                   <span className="text-brand-gold font-normal normal-case ml-1">(editable)</span>
                                 </th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-100">
                       {periodVisits.map((visit) => {
-                        const claimsFallback = getClaimsFallbackForVisit(visit);
                         return (
                         <tr key={visit.id} className="hover:bg-brand-cream/30 transition-colors">
-                          {/* Auth Date */}
+                          {/* Authorize Session Date (label only renamed, P4-P23 — same underlying date) */}
                           <td className="px-4 py-2.5 text-sm text-brand-blue whitespace-nowrap">
                             {visit.dateOfService ? formatDate(visit.dateOfService) : <span className="text-gray-300 text-lg">—</span>}
                           </td>
@@ -2978,68 +2920,22 @@ export default function Dashboard() {
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
                           </td>
-                          {/* Total Insurance Reimbursement — EDITABLE, auto-filled from Claims Tracker until overridden */}
+                          {/* Assignment of Benefits — EDITABLE (P4-P23) */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
-                            <EditableCell
-                              type="number"
-                              min={0}
-                              step={0.01}
-                              value={visit.totalInsuranceReimbursement != null ? String(visit.totalInsuranceReimbursement) : (claimsFallback ? String(claimsFallback.insuranceReimbursement) : '')}
-                              display={visit.totalInsuranceReimbursement != null ? formatAmount(visit.totalInsuranceReimbursement) : autoFillDisplay(claimsFallback?.insuranceReimbursement)}
-                              isSaving={updateVisit.isPending}
-                              onSave={async (raw) => {
-                                const parsed = parseOptionalAmount(raw);
-                                if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
-                                return saveVisitField(visit.id, { totalInsuranceReimbursement: parsed }, 'Total Insurance Reimbursement saved');
-                              }}
-                            />
+                            <AssignmentOfBenefitsSelect patientId={activePatient.id} visit={visit} />
                           </td>
-                          {/* Total Patient Due — EDITABLE, auto-filled from Claims Tracker until overridden */}
+                          {/* Submission Status — EDITABLE (P4-P23) */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
-                            <EditableCell
-                              type="number"
-                              min={0}
-                              step={0.01}
-                              value={visit.totalPatientDue != null ? String(visit.totalPatientDue) : (claimsFallback ? String(claimsFallback.patientDue) : '')}
-                              display={visit.totalPatientDue != null ? formatAmount(visit.totalPatientDue) : autoFillDisplay(claimsFallback?.patientDue)}
-                              isSaving={updateVisit.isPending}
-                              onSave={async (raw) => {
-                                const parsed = parseOptionalAmount(raw);
-                                if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
-                                return saveVisitField(visit.id, { totalPatientDue: parsed }, 'Total Patient Due saved');
-                              }}
-                            />
+                            <SubmissionStatusSelect patientId={activePatient.id} visit={visit} />
                           </td>
-                          {/* Total Patient Paid — EDITABLE, auto-filled from Claims Tracker until overridden */}
-                          <td className="px-4 py-2.5 text-sm whitespace-nowrap">
-                            <EditableCell
-                              type="number"
-                              min={0}
-                              step={0.01}
-                              value={visit.totalPatientPaid != null ? String(visit.totalPatientPaid) : (claimsFallback ? String(claimsFallback.patientPaid) : '')}
-                              display={visit.totalPatientPaid != null ? formatAmount(visit.totalPatientPaid) : autoFillDisplay(claimsFallback?.patientPaid)}
-                              isSaving={updateVisit.isPending}
-                              onSave={async (raw) => {
-                                const parsed = parseOptionalAmount(raw);
-                                if (parsed === undefined) { toast.error('Enter a valid amount'); return false; }
-                                return saveVisitField(visit.id, { totalPatientPaid: parsed }, 'Total Patient Paid saved');
-                              }}
-                            />
+                          {/* Remarks — EDITABLE multiline (P4-P23) */}
+                          <td className="px-4 py-2.5 text-sm align-top">
+                            <RemarksCell patientId={activePatient.id} visit={visit} />
                           </td>
                         </tr>
                         );
                       })}
                             </tbody>
-                            {periodVisits.length > 0 && (
-                              <tfoot>
-                                <tr className="bg-gray-50/80 border-t-2 border-gray-200">
-                                  <td className="px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide" colSpan={7}>Totals</td>
-                                  <td className="px-4 py-2 text-sm font-semibold text-brand-blue whitespace-nowrap">{formatAmount(periodTotals.insuranceReimbursement)}</td>
-                                  <td className="px-4 py-2 text-sm font-semibold text-brand-blue whitespace-nowrap">{formatAmount(periodTotals.patientDue)}</td>
-                                  <td className="px-4 py-2 text-sm font-semibold text-brand-blue whitespace-nowrap">{formatAmount(periodTotals.patientPaid)}</td>
-                                </tr>
-                              </tfoot>
-                            )}
                           </table>
                         </div>
                       </CardContent>
@@ -4897,6 +4793,7 @@ export default function Dashboard() {
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
         canManageStaff={canManageStaff}
+        canAccessClaims={canAccessClaims}
         topbarTitle="Patients"
         topbarSubtitle="Current state of the patient population"
       >
@@ -4927,6 +4824,7 @@ export default function Dashboard() {
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
         canManageStaff={canManageStaff}
+        canAccessClaims={canAccessClaims}
         topbarTitle="Patient Records"
         topbarSubtitle="Find and select a patient to view their information"
         topbarActions={<div className="flex flex-wrap items-center gap-2">{addPatientAction}{canManageStaff && addInsuranceAction}{canManageStaff && manageInsuranceAction}</div>}
@@ -4939,7 +4837,7 @@ export default function Dashboard() {
             insuranceCounts={insuranceCounts}
             selectedInsurance={selectedInsurance}
             onSelectInsurance={handleSelectInsurance}
-            claimStatusFilters={CLAIM_STATUS_FILTERS}
+            claimStatusFilters={canAccessClaims ? CLAIM_STATUS_FILTERS : []}
             claimStatusCounts={claimStatusCounts}
             selectedClaimsFilter={selectedClaimsFilter}
             onSelectClaimsFilter={handleSelectClaimsStatus}
@@ -4980,6 +4878,7 @@ export default function Dashboard() {
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
         canManageStaff={canManageStaff}
+        canAccessClaims={canAccessClaims}
         topbarTitle="Discharged Patients"
         topbarSubtitle="Review patients no longer in active care"
       >
@@ -4994,7 +4893,7 @@ export default function Dashboard() {
             insuranceCounts={insuranceCounts}
             selectedInsurance={selectedInsurance}
             onSelectInsurance={handleSelectInsurance}
-            claimStatusFilters={CLAIM_STATUS_FILTERS}
+            claimStatusFilters={canAccessClaims ? CLAIM_STATUS_FILTERS : []}
             claimStatusCounts={claimStatusCounts}
             selectedClaimsFilter={selectedClaimsFilter}
             onSelectClaimsFilter={handleSelectClaimsStatus}
@@ -5031,6 +4930,7 @@ export default function Dashboard() {
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
         canManageStaff={canManageStaff}
+        canAccessClaims={canAccessClaims}
         topbarTitle="Authorizations"
         topbarSubtitle="Monitor authorization status and patient authorization needs."
       >
@@ -5055,6 +4955,7 @@ export default function Dashboard() {
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
         canManageStaff={canManageStaff}
+        canAccessClaims={canAccessClaims}
         topbarTitle="Needs Attention"
         topbarSubtitle="Review patients requiring authorization action."
       >
@@ -5080,6 +4981,7 @@ export default function Dashboard() {
         onSignOut={handleSignOut}
         signingOut={logoutMutation.isPending}
         canManageStaff={canManageStaff}
+        canAccessClaims={canAccessClaims}
         topbarTitle="Authorization Records"
         topbarSubtitle="Review patient authorization status and records."
       >
@@ -5100,6 +5002,7 @@ export default function Dashboard() {
       onSignOut={handleSignOut}
       signingOut={logoutMutation.isPending}
       canManageStaff={canManageStaff}
+      canAccessClaims={canAccessClaims}
       topbarTitle="Dashboard"
       topbarSubtitle="Authorization & Claims Overview"
       topbarActions={
@@ -5116,11 +5019,12 @@ export default function Dashboard() {
       <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6 xl:space-y-8">
 
         {/* KPI Cards — clinic-wide only; see dashboardKpis above */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div className={`grid grid-cols-1 sm:grid-cols-2 ${canAccessClaims ? 'xl:grid-cols-4' : 'xl:grid-cols-3'} gap-4`}>
           {[
             { icon: <Users className="w-4 h-4 text-brand-blue" />, label: 'Active Patients', value: dashboardKpis.activePatients, sub: 'Currently active, all insurances', tone: 'navy' as const },
             { icon: <AlertTriangle className="w-4 h-4 text-destructive" />, label: 'Authorization Attention', value: dashboardKpis.authorizationAttention, sub: 'Needs authorization action', tone: 'destructive' as const },
-            { icon: <AlertCircle className="w-4 h-4 text-brand-gold-dark" />, label: 'Claims Follow-Up', value: dashboardKpis.claimsFollowUp, sub: 'Unresolved, all insurances', tone: 'gold' as const },
+            // Claims KPI is Super Admin only (P4-P23).
+            ...(canAccessClaims ? [{ icon: <AlertCircle className="w-4 h-4 text-brand-gold-dark" />, label: 'Claims Follow-Up', value: dashboardKpis.claimsFollowUp, sub: 'Unresolved, all insurances', tone: 'gold' as const }] : []),
             { icon: <CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />, label: 'Completed Patients', value: dashboardKpis.completedPatients, sub: 'Sessions exhausted', tone: 'gold' as const },
           ].map(({ icon, label, value, sub, tone }) => (
             <MetricCard key={label} icon={icon} label={label} value={value} sub={sub} tone={tone} />
@@ -5131,15 +5035,17 @@ export default function Dashboard() {
         <section>
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-3">Needs Attention</h2>
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 xl:gap-6">
-            <div className="lg:col-span-4">
+            <div className={canAccessClaims ? 'lg:col-span-4' : 'lg:col-span-12'}>
               <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
             </div>
+            {canAccessClaims && (
             <div className="lg:col-span-8">
               <ClaimsFollowUpPanel
                 insurance={selectedInsurance}
                 onSelectPatient={(id) => selectPatient(id, '/claims')}
               />
             </div>
+            )}
           </div>
         </section>
       </div>

@@ -195,6 +195,7 @@ __export(db_exports, {
   getMarkAsRequestedTargetVisitId: () => getMarkAsRequestedTargetVisitId,
   getPatientById: () => getPatientById,
   getUserByOpenId: () => getUserByOpenId,
+  getVisitRecordById: () => getVisitRecordById,
   getVisitsByPatientId: () => getVisitsByPatientId,
   listActivityLog: () => listActivityLog,
   listClinicUsers: () => listClinicUsers,
@@ -260,6 +261,9 @@ function toVisitRecord(row) {
     totalInsuranceReimbursement: row.total_insurance_reimbursement ?? null,
     totalPatientDue: row.total_patient_due ?? null,
     totalPatientPaid: row.total_patient_paid ?? null,
+    assignmentOfBenefits: row.assignment_of_benefits ?? null,
+    submissionStatus: row.submission_status ?? null,
+    remarks: row.remarks ?? null,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at)
   };
@@ -428,6 +432,9 @@ async function listHistoryForEntity(entityType, entityId) {
 }
 async function listActivityLog(filters) {
   let query = supabase.from("audit_logs").select("*", { count: "exact" });
+  if (filters.excludeClaims) {
+    query = query.or("entity_type.is.null,entity_type.neq.claim_record").not("action", "ilike", "CLAIM%");
+  }
   if (filters.actorId) query = query.eq("actor_id", filters.actorId);
   if (filters.entityType) query = query.eq("entity_type", filters.entityType);
   if (filters.action) query = query.eq("action", filters.action);
@@ -471,6 +478,14 @@ async function getVisitsByPatientId(patientId) {
     return [];
   }
   return (data ?? []).map(toVisitRecord);
+}
+async function getVisitRecordById(id) {
+  const { data, error } = await supabase.from("visit_records").select("*").eq("id", id).maybeSingle();
+  if (error) {
+    console.error("[Supabase] getVisitRecordById:", error);
+    throw error;
+  }
+  return data ? toVisitRecord(data) : void 0;
 }
 async function createVisitRecord(data, actor, action = "VISIT_RECORD_CREATE") {
   const payload = {
@@ -519,6 +534,9 @@ async function updateVisitRecord(id, data, actor, options) {
   if (data.totalInsuranceReimbursement !== void 0) payload.total_insurance_reimbursement = data.totalInsuranceReimbursement;
   if (data.totalPatientDue !== void 0) payload.total_patient_due = data.totalPatientDue;
   if (data.totalPatientPaid !== void 0) payload.total_patient_paid = data.totalPatientPaid;
+  if (data.assignmentOfBenefits !== void 0) payload.assignment_of_benefits = data.assignmentOfBenefits;
+  if (data.submissionStatus !== void 0) payload.submission_status = data.submissionStatus;
+  if (data.remarks !== void 0) payload.remarks = data.remarks;
   if (Object.keys(payload).length === 0) return;
   const { error } = await supabase.rpc("write_visit_record_with_audit", {
     p_id: id,
@@ -1480,6 +1498,7 @@ var UNAUTHED_ERR_MSG = "Please login (10001)";
 var NOT_ADMIN_ERR_MSG = "You do not have required permission (10002)";
 var PASSWORD_CHANGE_REQUIRED_ERR_MSG = "Password change required (10003)";
 var MIN_CLINIC_PASSWORD_LENGTH = 8;
+var CLAIMS_ACCESS_DENIED_ERR_MSG = "Claims access is restricted to the Super Admin (10004)";
 
 // server/_core/oauth.ts
 init_db();
@@ -1875,6 +1894,11 @@ function registerOAuthRoutes(app2) {
 // server/_core/storageProxy.ts
 init_env();
 
+// server/_core/superAdmin.ts
+function isSuperAdmin(user) {
+  return !!user && !user.clinicUser && user.role === "admin";
+}
+
 // server/_core/requireAuth.ts
 async function requireAuthenticatedUser(req, res, next) {
   try {
@@ -1883,6 +1907,20 @@ async function requireAuthenticatedUser(req, res, next) {
   } catch {
     res.status(401).json({ error: "Authentication required" });
   }
+}
+async function requireSuperAdmin(req, res, next) {
+  let user;
+  try {
+    user = await sdk.authenticateRequest(req);
+  } catch {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  if (!isSuperAdmin(user) || user.clinicUser?.mustChangePassword) {
+    res.status(403).json({ error: CLAIMS_ACCESS_DENIED_ERR_MSG });
+    return;
+  }
+  next();
 }
 
 // server/_core/storageProxy.ts
@@ -3812,7 +3850,7 @@ function registerClaimUploadRoute(app2) {
   const router2 = Router();
   router2.post(
     "/api/claims/upload-extract",
-    requireAuthenticatedUser,
+    requireSuperAdmin,
     (req, res, next) => {
       upload.single("file")(req, res, (err) => {
         if (err instanceof multer.MulterError) {
@@ -4079,7 +4117,7 @@ function registerClaimUploadRoute(app2) {
 }
 
 // server/routers.ts
-import { z as z2 } from "zod";
+import { z as z3 } from "zod";
 import bcrypt from "bcryptjs";
 import { TRPCError as TRPCError3 } from "@trpc/server";
 
@@ -4228,6 +4266,13 @@ var adminOrOwnerProcedure = normalProtectedProcedure.use(async (opts) => {
   }
   return next({ ctx });
 });
+var superAdminProcedure = normalProtectedProcedure.use(async (opts) => {
+  const { ctx, next } = opts;
+  if (!isSuperAdmin(ctx.user)) {
+    throw new TRPCError2({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
+  }
+  return next({ ctx });
+});
 
 // server/_core/systemRouter.ts
 var systemRouter = router({
@@ -4249,6 +4294,69 @@ var systemRouter = router({
       success: delivered
     };
   })
+});
+
+// server/claimsRedaction.ts
+var VISIT_FINANCIAL_FIELDS = ["totalInsuranceReimbursement", "totalPatientDue", "totalPatientPaid"];
+var RESTRICTED_AUDIT_KEYS = /* @__PURE__ */ new Set([
+  "claims_status",
+  "total_insurance_reimbursement",
+  "total_patient_due",
+  "total_patient_paid"
+]);
+function redactVisitRecord(visit, superAdmin) {
+  if (superAdmin) return visit;
+  const { totalInsuranceReimbursement: _r, totalPatientDue: _d, totalPatientPaid: _p, ...rest } = visit;
+  return rest;
+}
+function redactPatient(patient, superAdmin) {
+  if (superAdmin) return patient;
+  const { claimsStatus: _c, ...rest } = patient;
+  return rest;
+}
+function isClaimAuditRow(row) {
+  return row.entityType === "claim_record" || /^CLAIM/i.test(row.action);
+}
+function stripRestrictedKeys(data) {
+  if (!data) return data;
+  const out = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (RESTRICTED_AUDIT_KEYS.has(key)) continue;
+    if (key === "retained_references" && value && typeof value === "object") {
+      const { claims: _claims, ...counts } = value;
+      out[key] = counts;
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+function redactAuditRows(rows, superAdmin) {
+  if (superAdmin) return rows;
+  const out = [];
+  for (const row of rows) {
+    if (isClaimAuditRow(row)) continue;
+    const beforeData = stripRestrictedKeys(row.beforeData);
+    const afterData = stripRestrictedKeys(row.afterData);
+    const hadData = row.beforeData !== null || row.afterData !== null;
+    const isEmpty = (beforeData === null || Object.keys(beforeData).length === 0) && (afterData === null || Object.keys(afterData).length === 0);
+    if (hadData && isEmpty) continue;
+    out.push({ ...row, beforeData, afterData });
+  }
+  return out;
+}
+
+// shared/sessionWorkflowFields.ts
+import { z as z2 } from "zod";
+var ASSIGNMENT_OF_BENEFITS_VALUES = ["yes", "no"];
+var SUBMISSION_STATUS_VALUES = ["ready_to_file", "hold", "do_not_file"];
+var SESSION_REMARKS_MAX_LENGTH = 2e3;
+var sessionWorkflowFieldsInput = z2.object({
+  assignmentOfBenefits: z2.enum(ASSIGNMENT_OF_BENEFITS_VALUES).nullable().optional(),
+  submissionStatus: z2.enum(SUBMISSION_STATUS_VALUES).nullable().optional(),
+  // Whitespace-only remarks are stored as NULL (cleared) rather than as an
+  // invisible non-empty value.
+  remarks: z2.string().max(SESSION_REMARKS_MAX_LENGTH, `Remarks must be ${SESSION_REMARKS_MAX_LENGTH} characters or fewer`).transform((v) => v.trim() === "" ? null : v).nullable().optional()
 });
 
 // server/routers.ts
@@ -4331,21 +4439,21 @@ function clearFailedAttempts(normalizedUsername, ip) {
 }
 
 // server/routers.ts
-var visitRecordInput = z2.object({
-  sessionsAuthorized: z2.number().nullable().optional(),
-  sessionsRemaining: z2.number().nullable().optional(),
-  sessionNumber: z2.number().nullable().optional(),
-  authPeriod: z2.number().optional(),
+var visitRecordInput = z3.object({
+  sessionsAuthorized: z3.number().nullable().optional(),
+  sessionsRemaining: z3.number().nullable().optional(),
+  sessionNumber: z3.number().nullable().optional(),
+  authPeriod: z3.number().optional(),
   // Which authorization period this visit belongs to
-  dateOfService: z2.string().nullable().optional(),
+  dateOfService: z3.string().nullable().optional(),
   // ISO date string "YYYY-MM-DD"
-  newAuth: z2.string().nullable().optional(),
-  dateAshSubmitted: z2.string().nullable().optional(),
+  newAuth: z3.string().nullable().optional(),
+  dateAshSubmitted: z3.string().nullable().optional(),
   // ISO date string "YYYY-MM-DD"
-  authStatus: z2.enum(["none", "pending", "approved", "denied"]).optional(),
-  totalInsuranceReimbursement: z2.number().nullable().optional(),
-  totalPatientDue: z2.number().nullable().optional(),
-  totalPatientPaid: z2.number().nullable().optional()
+  authStatus: z3.enum(["none", "pending", "approved", "denied"]).optional(),
+  totalInsuranceReimbursement: z3.number().nullable().optional(),
+  totalPatientDue: z3.number().nullable().optional(),
+  totalPatientPaid: z3.number().nullable().optional()
 });
 function parseDate2(s) {
   if (!s) return null;
@@ -4373,6 +4481,12 @@ function toSafeStaff(user) {
   const { passwordHash: _passwordHash, tokenVersion: _tokenVersion, ...safe } = user;
   return safe;
 }
+function assertMayWriteVisitFinancials(user, input) {
+  if (isSuperAdmin(user)) return;
+  if (VISIT_FINANCIAL_FIELDS.some((field) => input[field] !== void 0)) {
+    throw new TRPCError3({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
+  }
+}
 var appRouter = router({
   system: systemRouter,
   auth: router({
@@ -4392,7 +4506,9 @@ var appRouter = router({
           email: staff.email,
           department: staff.department,
           role: staff.role,
-          mustChangePassword: staff.mustChangePassword
+          mustChangePassword: staff.mustChangePassword,
+          // Always false for a clinic session — see server/_core/superAdmin.ts.
+          isSuperAdmin: false
         };
       }
       return {
@@ -4400,7 +4516,11 @@ var appRouter = router({
         id: user.id,
         name: user.name,
         email: user.email,
-        role: user.role
+        role: user.role,
+        // P4-P23 client capability for Claims access. Computed by the same
+        // isSuperAdmin() every server-side Claims gate uses, so the UI can
+        // never show Claims to a session the server would refuse.
+        isSuperAdmin: isSuperAdmin(user)
       };
     }),
     logout: publicProcedure.mutation(({ ctx }) => {
@@ -4411,7 +4531,7 @@ var appRouter = router({
   }),
   // ── Clinic username/password login ────────────────────────────────────────────────────
   clinic: router({
-    login: publicProcedure.input(z2.object({ username: z2.string().min(1), password: z2.string().min(1) })).mutation(async ({ ctx, input }) => {
+    login: publicProcedure.input(z3.object({ username: z3.string().min(1), password: z3.string().min(1) })).mutation(async ({ ctx, input }) => {
       const ip = getClientIp(ctx.req);
       const rateLimitKey = normalizeUsername(input.username);
       if (isRateLimited(rateLimitKey, ip)) {
@@ -4469,9 +4589,9 @@ var appRouter = router({
     // Stays on protectedProcedure (not normalProtectedProcedure) — a clinic
     // user with mustChangePassword=true must still be able to change it.
     changePassword: protectedProcedure.input(
-      z2.object({
-        currentPassword: z2.string().min(1),
-        newPassword: z2.string().min(MIN_CLINIC_PASSWORD_LENGTH)
+      z3.object({
+        currentPassword: z3.string().min(1),
+        newPassword: z3.string().min(MIN_CLINIC_PASSWORD_LENGTH)
       })
     ).mutation(async ({ ctx, input }) => {
       const staff = ctx.user.clinicUser;
@@ -4535,21 +4655,21 @@ var appRouter = router({
       const rows = await listClinicUsers();
       return rows.map(toSafeStaff);
     }),
-    get: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
+    get: adminOrOwnerProcedure.input(z3.object({ id: z3.string().uuid() })).query(async ({ input }) => {
       const row = await getClinicUserById(input.id);
       if (!row) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
       return toSafeStaff(row);
     }),
     create: adminOrOwnerProcedure.input(
-      z2.object({
-        name: z2.string().min(1, "Name is required"),
-        email: z2.string().trim().optional(),
-        department: z2.string().trim().optional(),
-        username: z2.string().trim().min(1, "Username is required"),
-        role: z2.enum(["admin", "staff"]).default("staff"),
-        status: z2.enum(["active", "archived"]).default("active"),
-        password: z2.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
-        confirmPassword: z2.string().min(1)
+      z3.object({
+        name: z3.string().min(1, "Name is required"),
+        email: z3.string().trim().optional(),
+        department: z3.string().trim().optional(),
+        username: z3.string().trim().min(1, "Username is required"),
+        role: z3.enum(["admin", "staff"]).default("staff"),
+        status: z3.enum(["active", "archived"]).default("active"),
+        password: z3.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
+        confirmPassword: z3.string().min(1)
       })
     ).mutation(async ({ ctx, input }) => {
       if (input.password !== input.confirmPassword) {
@@ -4580,12 +4700,12 @@ var appRouter = router({
       }
     }),
     update: adminOrOwnerProcedure.input(
-      z2.object({
-        id: z2.string().uuid(),
-        name: z2.string().min(1, "Name is required").optional(),
-        email: z2.string().trim().optional(),
-        department: z2.string().trim().optional(),
-        role: z2.enum(["admin", "staff"]).optional()
+      z3.object({
+        id: z3.string().uuid(),
+        name: z3.string().min(1, "Name is required").optional(),
+        email: z3.string().trim().optional(),
+        department: z3.string().trim().optional(),
+        role: z3.enum(["admin", "staff"]).optional()
       })
     ).mutation(async ({ ctx, input }) => {
       const { id, role, ...profile } = input;
@@ -4624,10 +4744,10 @@ var appRouter = router({
       return toSafeStaff(final);
     }),
     resetPassword: adminOrOwnerProcedure.input(
-      z2.object({
-        id: z2.string().uuid(),
-        password: z2.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
-        confirmPassword: z2.string().min(1)
+      z3.object({
+        id: z3.string().uuid(),
+        password: z3.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
+        confirmPassword: z3.string().min(1)
       })
     ).mutation(async ({ ctx, input }) => {
       if (input.password !== input.confirmPassword) {
@@ -4650,7 +4770,7 @@ var appRouter = router({
         throw err;
       }
     }),
-    archive: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ ctx, input }) => {
+    archive: adminOrOwnerProcedure.input(z3.object({ id: z3.string().uuid() })).mutation(async ({ ctx, input }) => {
       const isSelf = ctx.user.clinicUser?.clinicUserId === input.id;
       if (isSelf) {
         throw new TRPCError3({ code: "FORBIDDEN", message: "You cannot archive your own account." });
@@ -4670,31 +4790,33 @@ var appRouter = router({
         throw err;
       }
     }),
-    reactivate: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ ctx, input }) => {
+    reactivate: adminOrOwnerProcedure.input(z3.object({ id: z3.string().uuid() })).mutation(async ({ ctx, input }) => {
       const updated = await reactivateClinicUser(input.id, getActorContext(ctx.user));
       if (!updated) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
       return toSafeStaff(updated);
     }),
-    history: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
+    history: adminOrOwnerProcedure.input(z3.object({ id: z3.string().uuid() })).query(async ({ input }) => {
       return listHistoryForEntity("clinic_user", input.id);
     })
   }),
   // ── Patients ────────────────────────────────────────────────────────────────
   patients: router({
-    list: normalProtectedProcedure.query(async () => {
-      return getAllPatients();
+    // claimsStatus is claim data — omitted for everyone but the Super Admin.
+    list: normalProtectedProcedure.query(async ({ ctx }) => {
+      const superAdmin = isSuperAdmin(ctx.user);
+      return (await getAllPatients()).map((p) => redactPatient(p, superAdmin));
     }),
-    get: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
+    get: normalProtectedProcedure.input(z3.object({ id: z3.string().uuid() })).query(async ({ ctx, input }) => {
       const patient = await getPatientById(input.id);
       if (!patient) throw new TRPCError3({ code: "NOT_FOUND", message: "Patient not found" });
-      return patient;
+      return redactPatient(patient, isSuperAdmin(ctx.user));
     }),
     create: normalProtectedProcedure.input(
-      z2.object({
-        name: z2.string().min(1),
-        insurance: z2.string().default(""),
-        authDate: z2.string().nullable().optional(),
-        authValidUntil: z2.number().nullable().optional()
+      z3.object({
+        name: z3.string().min(1),
+        insurance: z3.string().default(""),
+        authDate: z3.string().nullable().optional(),
+        authValidUntil: z3.number().nullable().optional()
         // Unix ms timestamp
       })
     ).mutation(async ({ input, ctx }) => {
@@ -4714,22 +4836,25 @@ var appRouter = router({
       }
     }),
     update: normalProtectedProcedure.input(
-      z2.object({
-        id: z2.string().uuid(),
-        name: z2.string().min(1).optional(),
-        insurance: z2.string().optional(),
-        authDate: z2.string().nullable().optional(),
-        authValidUntil: z2.number().nullable().optional(),
+      z3.object({
+        id: z3.string().uuid(),
+        name: z3.string().min(1).optional(),
+        insurance: z3.string().optional(),
+        authDate: z3.string().nullable().optional(),
+        authValidUntil: z3.number().nullable().optional(),
         // "none" is the API-level sentinel for "no claims status set" (see
         // getPatientById/listPatients in db.ts, which map a NULL claims_status
         // column to "none"). It is NOT a column value — accepting it here and
         // translating it to `null` below lets the edit form round-trip an
         // unset status without that NULL ever being asked to match the
         // 7-value DB enum, which is what previously threw invalid_value.
-        claimsStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "none"]).optional()
+        claimsStatus: z3.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "none"]).optional()
       })
     ).mutation(async ({ input, ctx }) => {
       const { id, authDate, authValidUntil, claimsStatus, ...rest } = input;
+      if (claimsStatus !== void 0 && !isSuperAdmin(ctx.user)) {
+        throw new TRPCError3({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
+      }
       const before = await getPatientById(id);
       if (!before) throw new TRPCError3({ code: "NOT_FOUND", message: "Patient not found" });
       try {
@@ -4749,21 +4874,21 @@ var appRouter = router({
       }
       return { success: true };
     }),
-    delete: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
+    delete: normalProtectedProcedure.input(z3.object({ id: z3.string().uuid() })).mutation(async ({ input }) => {
       await deletePatient(input.id);
       return { success: true };
     }),
-    setActive: normalProtectedProcedure.input(z2.object({
-      id: z2.string().uuid(),
-      isActive: z2.boolean(),
-      dischargeDate: z2.number().nullable().optional(),
-      dischargeReason: z2.string().nullable().optional()
+    setActive: normalProtectedProcedure.input(z3.object({
+      id: z3.string().uuid(),
+      isActive: z3.boolean(),
+      dischargeDate: z3.number().nullable().optional(),
+      dischargeReason: z3.string().nullable().optional()
     })).mutation(async ({ input }) => {
       await setPatientActive(input.id, input.isActive, input.dischargeDate, input.dischargeReason);
       return { success: true };
     }),
-    history: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
-      return listHistoryForEntity("patient", input.id);
+    history: normalProtectedProcedure.input(z3.object({ id: z3.string().uuid() })).query(async ({ ctx, input }) => {
+      return redactAuditRows(await listHistoryForEntity("patient", input.id), isSuperAdmin(ctx.user));
     })
   }),
   // ── Insurer Catalog (P4-P7) ─────────────────────────────────────────────────
@@ -4777,10 +4902,10 @@ var appRouter = router({
       return listInsurerCatalog();
     }),
     create: adminOrOwnerProcedure.input(
-      z2.object({
+      z3.object({
         // Blank-after-trim is rejected by the .refine below rather than
         // z.string().min(1) alone, which would accept e.g. "   ".
-        name: z2.string().transform((v) => v.trim()).refine((v) => v.length > 0, {
+        name: z3.string().transform((v) => v.trim()).refine((v) => v.length > 0, {
           message: "Insurance company name is required"
         })
       })
@@ -4806,7 +4931,7 @@ var appRouter = router({
     // new-selection dropdowns without touching any patient/visit/claim
     // record (those store the insurer name as free text, not an FK into
     // this table) and without deleting the catalog row itself.
-    delete: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
+    delete: adminOrOwnerProcedure.input(z3.object({ id: z3.string().uuid() })).mutation(async ({ input, ctx }) => {
       const existing = await getInsurerCatalogEntryById(input.id);
       if (!existing) {
         throw new TRPCError3({ code: "NOT_FOUND", message: "Insurance company not found" });
@@ -4817,7 +4942,7 @@ var appRouter = router({
     // dialog — distinct from insurance.create's own reactivate-on-conflict
     // path above, for an admin who wants to bring an entry back without
     // retyping its exact name.
-    reactivate: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
+    reactivate: adminOrOwnerProcedure.input(z3.object({ id: z3.string().uuid() })).mutation(async ({ input, ctx }) => {
       const existing = await getInsurerCatalogEntryById(input.id);
       if (!existing) {
         throw new TRPCError3({ code: "NOT_FOUND", message: "Insurance company not found" });
@@ -4830,7 +4955,7 @@ var appRouter = router({
     // record keeps its recorded insurer and nothing is reassigned or merged.
     // The delete, its tombstone, and its audit row run in one locked
     // Postgres transaction (delete_insurer_catalog_with_audit).
-    permanentDelete: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
+    permanentDelete: adminOrOwnerProcedure.input(z3.object({ id: z3.string().uuid() })).mutation(async ({ input, ctx }) => {
       try {
         await permanentlyDeleteInsurerCatalogEntry(input.id, getActorContext(ctx.user));
       } catch (err) {
@@ -4850,16 +4975,19 @@ var appRouter = router({
     // Same gate as create/delete/reactivate — insurer catalog management is
     // admin/owner only, so its history is too (unlike patient/visit/claim
     // history, which any authenticated staff member can read).
-    history: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
-      return listHistoryForEntity("insurer_catalog", input.id);
+    history: adminOrOwnerProcedure.input(z3.object({ id: z3.string().uuid() })).query(async ({ ctx, input }) => {
+      return redactAuditRows(await listHistoryForEntity("insurer_catalog", input.id), isSuperAdmin(ctx.user));
     })
   }),
   // ── Visit Records ────────────────────────────────────────────────────────────
   visits: router({
-    listByPatient: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).query(async ({ input }) => {
-      return getVisitsByPatientId(input.patientId);
+    // Per-session financial totals are Super Admin only (P4-P23).
+    listByPatient: normalProtectedProcedure.input(z3.object({ patientId: z3.string().uuid() })).query(async ({ ctx, input }) => {
+      const superAdmin = isSuperAdmin(ctx.user);
+      return (await getVisitsByPatientId(input.patientId)).map((v) => redactVisitRecord(v, superAdmin));
     }),
-    create: normalProtectedProcedure.input(visitRecordInput.extend({ patientId: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
+    create: normalProtectedProcedure.input(visitRecordInput.extend({ patientId: z3.string().uuid() })).mutation(async ({ input, ctx }) => {
+      assertMayWriteVisitFinancials(ctx.user, input);
       const { patientId, dateOfService, dateAshSubmitted, ...rest } = input;
       const id = await createVisitRecord({
         patientId,
@@ -4869,7 +4997,8 @@ var appRouter = router({
       }, getActorContext(ctx.user));
       return { id };
     }),
-    update: normalProtectedProcedure.input(visitRecordInput.extend({ id: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
+    update: normalProtectedProcedure.input(visitRecordInput.extend({ id: z3.string().uuid() })).mutation(async ({ input, ctx }) => {
+      assertMayWriteVisitFinancials(ctx.user, input);
       const { id, dateOfService, dateAshSubmitted, ...rest } = input;
       await updateVisitRecord(id, {
         ...rest,
@@ -4878,10 +5007,46 @@ var appRouter = router({
       }, getActorContext(ctx.user));
       return { success: true };
     }),
+    // P4-P23: per-session workflow fields (Assignment of Benefits, Submission
+    // Status, Remarks). Same gate as visits.update — every authenticated
+    // Admin/Staff who can edit authorization sessions can edit these.
+    // Partial: only keys present in the input are written (null clears);
+    // the audited RPC diffs before/after under a row lock, writes the
+    // audit row in the same transaction, and skips it entirely for a no-op.
+    // Returns the row's stored values so the client can reconcile.
+    updateSessionFields: normalProtectedProcedure.input(sessionWorkflowFieldsInput.extend({
+      id: z3.string().uuid(),
+      patientId: z3.string().uuid()
+    })).mutation(async ({ input, ctx }) => {
+      const { id, patientId, ...fields } = input;
+      if (Object.values(fields).every((v) => v === void 0)) {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: "No session fields to update" });
+      }
+      try {
+        await updateVisitRecord(id, fields, getActorContext(ctx.user), {
+          action: "SESSION_FIELDS_UPDATE",
+          patientId
+        });
+      } catch (err) {
+        const code = err?.code;
+        if (code === "P0030") throw new TRPCError3({ code: "NOT_FOUND", message: "Session not found" });
+        if (code === "P0031") throw new TRPCError3({ code: "BAD_REQUEST", message: "This session does not belong to the selected patient." });
+        if (code === "23514") throw new TRPCError3({ code: "BAD_REQUEST", message: "Invalid session field value" });
+        throw err;
+      }
+      const saved = await getVisitRecordById(id);
+      if (!saved) throw new TRPCError3({ code: "NOT_FOUND", message: "Session not found" });
+      return {
+        id: saved.id,
+        assignmentOfBenefits: saved.assignmentOfBenefits,
+        submissionStatus: saved.submissionStatus,
+        remarks: saved.remarks
+      };
+    }),
     bulkCreate: normalProtectedProcedure.input(
-      z2.object({
-        patientId: z2.string().uuid(),
-        records: z2.array(visitRecordInput)
+      z3.object({
+        patientId: z3.string().uuid(),
+        records: z3.array(visitRecordInput)
       })
     ).mutation(async ({ input, ctx }) => {
       const rows = input.records.map((r) => ({
@@ -4903,14 +5068,14 @@ var appRouter = router({
       return getAuthAlertSummaries();
     }),
     // Approves a pending authorization and creates a new batch of visit records
-    approveAuthorization: normalProtectedProcedure.input(z2.object({
-      patientId: z2.string().uuid(),
-      sessionsAuthorized: z2.number().min(1).max(200),
-      authDate: z2.string().nullable().optional(),
+    approveAuthorization: normalProtectedProcedure.input(z3.object({
+      patientId: z3.string().uuid(),
+      sessionsAuthorized: z3.number().min(1).max(200),
+      authDate: z3.string().nullable().optional(),
       // ISO date string "YYYY-MM-DD"
-      newInsurance: z2.string().optional(),
+      newInsurance: z3.string().optional(),
       // optional insurance change for new period
-      authValidUntil: z2.number().nullable().optional()
+      authValidUntil: z3.number().nullable().optional()
       // Unix ms timestamp for expiry
     })).mutation(async ({ input, ctx }) => {
       const authDate = input.authDate ? /* @__PURE__ */ new Date(input.authDate + "T00:00:00Z") : null;
@@ -4930,7 +5095,7 @@ var appRouter = router({
     }),
     // Sets the active-period visit row (same period getAuthAlertSummaries is
     // showing) to authStatus=pending + today's dateAshSubmitted
-    markAsRequested: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
+    markAsRequested: normalProtectedProcedure.input(z3.object({ patientId: z3.string().uuid() })).mutation(async ({ input, ctx }) => {
       const visitId = await getMarkAsRequestedTargetVisitId(input.patientId);
       if (!visitId) throw new TRPCError3({ code: "NOT_FOUND", message: "No visit records found for this patient" });
       const today = /* @__PURE__ */ new Date();
@@ -4942,40 +5107,43 @@ var appRouter = router({
       }, actor, { action: "AUTHORIZATION_MARKED_REQUESTED", patientId: input.patientId });
       return { success: true, visitId, date: todayMidnight.toISOString().split("T")[0] };
     }),
-    historyForPatient: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid() })).query(async ({ input }) => {
-      return listHistoryForEntity("visit_record", input.patientId);
+    historyForPatient: normalProtectedProcedure.input(z3.object({ patientId: z3.string().uuid() })).query(async ({ ctx, input }) => {
+      return redactAuditRows(await listHistoryForEntity("visit_record", input.patientId), isSuperAdmin(ctx.user));
     })
   }),
+  // P4-P23: the whole Claims surface — rows, financial totals, history,
+  // follow-up/status aggregates, CMS1500/EOB enrichment and bulk import —
+  // is Super Admin only (superAdminProcedure, server/_core/trpc.ts).
   claims: router({
-    getByPatientAndPeriod: normalProtectedProcedure.input(z2.object({ patientId: z2.string().uuid(), authPeriod: z2.number() })).query(async ({ input }) => {
+    getByPatientAndPeriod: superAdminProcedure.input(z3.object({ patientId: z3.string().uuid(), authPeriod: z3.number() })).query(async ({ input }) => {
       return await getClaimsByPatientAndPeriod(input.patientId, input.authPeriod);
     }),
-    create: normalProtectedProcedure.input(z2.object({
-      patientId: z2.string().uuid(),
-      authPeriod: z2.number(),
-      placeOfService: z2.string().nullable().optional(),
-      dateOfService: z2.string().nullable().optional(),
-      visitNumber: z2.number().nullable().optional(),
-      cptCodes: z2.string().nullable().optional(),
-      unitsBilled: z2.number().nullable().optional(),
-      diagnosisCodes: z2.string().nullable().optional(),
-      modifier: z2.string().nullable().optional(),
-      chargeAmount: z2.number().nullable().optional(),
-      insuranceReimbursement: z2.number().nullable().optional(),
-      patientAmountPaid: z2.number().nullable().optional(),
-      patientAmountDue: z2.number().nullable().optional(),
-      insuranceBilled: z2.string().nullable().optional(),
-      oaClaimNumber: z2.string().nullable().optional(),
-      claimSubmittedDate: z2.string().nullable().optional(),
-      expireBcbsClaimNumber: z2.string().nullable().optional(),
-      claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
-      paymentReceived: z2.number().nullable().optional(),
-      checkDate: z2.string().nullable().optional(),
-      checkNumberVirtualCard: z2.string().nullable().optional(),
-      dateReceived: z2.string().nullable().optional(),
-      dateOfAppeal: z2.string().nullable().optional(),
-      referenceNo: z2.string().nullable().optional(),
-      lmn: z2.string().nullable().optional()
+    create: superAdminProcedure.input(z3.object({
+      patientId: z3.string().uuid(),
+      authPeriod: z3.number(),
+      placeOfService: z3.string().nullable().optional(),
+      dateOfService: z3.string().nullable().optional(),
+      visitNumber: z3.number().nullable().optional(),
+      cptCodes: z3.string().nullable().optional(),
+      unitsBilled: z3.number().nullable().optional(),
+      diagnosisCodes: z3.string().nullable().optional(),
+      modifier: z3.string().nullable().optional(),
+      chargeAmount: z3.number().nullable().optional(),
+      insuranceReimbursement: z3.number().nullable().optional(),
+      patientAmountPaid: z3.number().nullable().optional(),
+      patientAmountDue: z3.number().nullable().optional(),
+      insuranceBilled: z3.string().nullable().optional(),
+      oaClaimNumber: z3.string().nullable().optional(),
+      claimSubmittedDate: z3.string().nullable().optional(),
+      expireBcbsClaimNumber: z3.string().nullable().optional(),
+      claimStatus: z3.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
+      paymentReceived: z3.number().nullable().optional(),
+      checkDate: z3.string().nullable().optional(),
+      checkNumberVirtualCard: z3.string().nullable().optional(),
+      dateReceived: z3.string().nullable().optional(),
+      dateOfAppeal: z3.string().nullable().optional(),
+      referenceNo: z3.string().nullable().optional(),
+      lmn: z3.string().nullable().optional()
     })).mutation(async ({ input, ctx }) => {
       const claimId = await createClaimRecord({
         patientId: input.patientId,
@@ -5006,30 +5174,30 @@ var appRouter = router({
       }, getActorContext(ctx.user));
       return { success: true, claimId };
     }),
-    update: normalProtectedProcedure.input(z2.object({
-      id: z2.string().uuid(),
-      placeOfService: z2.string().nullable().optional(),
-      dateOfService: z2.string().nullable().optional(),
-      visitNumber: z2.number().nullable().optional(),
-      cptCodes: z2.string().nullable().optional(),
-      unitsBilled: z2.number().nullable().optional(),
-      diagnosisCodes: z2.string().nullable().optional(),
-      modifier: z2.string().nullable().optional(),
-      chargeAmount: z2.number().nullable().optional(),
-      insuranceReimbursement: z2.number().nullable().optional(),
-      patientAmountPaid: z2.number().nullable().optional(),
-      patientAmountDue: z2.number().nullable().optional(),
-      insuranceBilled: z2.string().nullable().optional(),
-      oaClaimNumber: z2.string().nullable().optional(),
-      claimSubmittedDate: z2.string().nullable().optional(),
-      expireBcbsClaimNumber: z2.string().nullable().optional(),
-      claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
-      paymentReceived: z2.number().nullable().optional(),
-      checkDate: z2.string().nullable().optional(),
-      checkNumberVirtualCard: z2.string().nullable().optional(),
-      dateReceived: z2.string().nullable().optional(),
-      dateOfAppeal: z2.string().nullable().optional(),
-      referenceNo: z2.string().nullable().optional()
+    update: superAdminProcedure.input(z3.object({
+      id: z3.string().uuid(),
+      placeOfService: z3.string().nullable().optional(),
+      dateOfService: z3.string().nullable().optional(),
+      visitNumber: z3.number().nullable().optional(),
+      cptCodes: z3.string().nullable().optional(),
+      unitsBilled: z3.number().nullable().optional(),
+      diagnosisCodes: z3.string().nullable().optional(),
+      modifier: z3.string().nullable().optional(),
+      chargeAmount: z3.number().nullable().optional(),
+      insuranceReimbursement: z3.number().nullable().optional(),
+      patientAmountPaid: z3.number().nullable().optional(),
+      patientAmountDue: z3.number().nullable().optional(),
+      insuranceBilled: z3.string().nullable().optional(),
+      oaClaimNumber: z3.string().nullable().optional(),
+      claimSubmittedDate: z3.string().nullable().optional(),
+      expireBcbsClaimNumber: z3.string().nullable().optional(),
+      claimStatus: z3.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
+      paymentReceived: z3.number().nullable().optional(),
+      checkDate: z3.string().nullable().optional(),
+      checkNumberVirtualCard: z3.string().nullable().optional(),
+      dateReceived: z3.string().nullable().optional(),
+      dateOfAppeal: z3.string().nullable().optional(),
+      referenceNo: z3.string().nullable().optional()
     })).mutation(async ({ input, ctx }) => {
       const { id, ...data } = input;
       const alertStatuses = ["denied", "rejected", "pended", "resubmitted"];
@@ -5064,7 +5232,7 @@ var appRouter = router({
       }, getActorContext(ctx.user));
       return { success: true };
     }),
-    delete: adminOrOwnerProcedure.input(z2.object({ id: z2.string().uuid(), patientId: z2.string().uuid() })).mutation(async ({ input, ctx }) => {
+    delete: superAdminProcedure.input(z3.object({ id: z3.string().uuid(), patientId: z3.string().uuid() })).mutation(async ({ input, ctx }) => {
       const actor = getActorContext(ctx.user);
       try {
         await deleteClaimRecordWithAudit({
@@ -5085,38 +5253,38 @@ var appRouter = router({
       }
       return { success: true };
     }),
-    upsert: normalProtectedProcedure.input(z2.object({
-      patientId: z2.string().uuid(),
-      authPeriod: z2.number(),
-      placeOfService: z2.string().nullable().optional(),
-      dateOfService: z2.string().nullable().optional(),
-      visitNumber: z2.number().nullable().optional(),
-      cptCodes: z2.string().nullable().optional(),
-      unitsBilled: z2.number().nullable().optional(),
-      diagnosisCodes: z2.string().nullable().optional(),
-      modifier: z2.string().nullable().optional(),
-      chargeAmount: z2.number().nullable().optional(),
-      insuranceReimbursement: z2.number().nullable().optional(),
-      patientAmountPaid: z2.number().nullable().optional(),
-      patientAmountDue: z2.number().nullable().optional(),
-      insuranceBilled: z2.string().nullable().optional(),
-      oaClaimNumber: z2.string().nullable().optional(),
-      claimSubmittedDate: z2.string().nullable().optional(),
-      expireBcbsClaimNumber: z2.string().nullable().optional(),
-      claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
-      paymentReceived: z2.number().nullable().optional(),
-      checkDate: z2.string().nullable().optional(),
-      checkNumberVirtualCard: z2.string().nullable().optional(),
-      dateReceived: z2.string().nullable().optional(),
-      dateOfAppeal: z2.string().nullable().optional(),
-      referenceNo: z2.string().nullable().optional(),
-      lmn: z2.string().nullable().optional(),
+    upsert: superAdminProcedure.input(z3.object({
+      patientId: z3.string().uuid(),
+      authPeriod: z3.number(),
+      placeOfService: z3.string().nullable().optional(),
+      dateOfService: z3.string().nullable().optional(),
+      visitNumber: z3.number().nullable().optional(),
+      cptCodes: z3.string().nullable().optional(),
+      unitsBilled: z3.number().nullable().optional(),
+      diagnosisCodes: z3.string().nullable().optional(),
+      modifier: z3.string().nullable().optional(),
+      chargeAmount: z3.number().nullable().optional(),
+      insuranceReimbursement: z3.number().nullable().optional(),
+      patientAmountPaid: z3.number().nullable().optional(),
+      patientAmountDue: z3.number().nullable().optional(),
+      insuranceBilled: z3.string().nullable().optional(),
+      oaClaimNumber: z3.string().nullable().optional(),
+      claimSubmittedDate: z3.string().nullable().optional(),
+      expireBcbsClaimNumber: z3.string().nullable().optional(),
+      claimStatus: z3.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
+      paymentReceived: z3.number().nullable().optional(),
+      checkDate: z3.string().nullable().optional(),
+      checkNumberVirtualCard: z3.string().nullable().optional(),
+      dateReceived: z3.string().nullable().optional(),
+      dateOfAppeal: z3.string().nullable().optional(),
+      referenceNo: z3.string().nullable().optional(),
+      lmn: z3.string().nullable().optional(),
       // P4-P14: 0-based position of this line among source lines sharing
       // its CPT code within the same save batch — see
       // computeSourceLineIndices. Omitted entirely by any caller that
       // doesn't have a notion of "repeated lines" (preserves exact prior
       // matching behavior for those callers).
-      sourceLineIndex: z2.number().int().min(0).nullable().optional()
+      sourceLineIndex: z3.number().int().min(0).nullable().optional()
     })).mutation(async ({ input, ctx }) => {
       try {
         await upsertClaimRecord({
@@ -5155,7 +5323,7 @@ var appRouter = router({
       }
       return { success: true };
     }),
-    historyForClaim: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).query(async ({ input }) => {
+    historyForClaim: superAdminProcedure.input(z3.object({ id: z3.string().uuid() })).query(async ({ input }) => {
       return listHistoryForEntity("claim_record", input.id);
     }),
     /**
@@ -5178,12 +5346,12 @@ var appRouter = router({
      *     the commit, never auto-applied like a confirmed 'matched' line
      *   - 2+ candidates -> 'needs_selection' (staff must pick which row)
      */
-    cms1500EnrichmentPreview: normalProtectedProcedure.input(z2.object({
-      patientId: z2.string().uuid(),
-      lines: z2.array(z2.object({
-        lineKey: z2.string(),
-        dateOfService: z2.string().nullable(),
-        cptCodes: z2.string().nullable()
+    cms1500EnrichmentPreview: superAdminProcedure.input(z3.object({
+      patientId: z3.string().uuid(),
+      lines: z3.array(z3.object({
+        lineKey: z3.string(),
+        dateOfService: z3.string().nullable(),
+        cptCodes: z3.string().nullable()
       }))
     })).mutation(async ({ input }) => {
       const hasAnyClaims = await patientHasAnyClaimRecords(input.patientId);
@@ -5217,17 +5385,17 @@ var appRouter = router({
      * (no_match/no_claims/needs_selection without a pick) are simply absent
      * from `lines` and so are never sent here at all.
      */
-    cms1500EnrichmentCommit: normalProtectedProcedure.input(z2.object({
-      patientId: z2.string().uuid(),
-      lines: z2.array(z2.object({
-        lineKey: z2.string(),
-        claimRecordId: z2.string().uuid(),
-        dateOfService: z2.string().nullable(),
-        cptCodes: z2.string().nullable(),
-        visitNumber: z2.number().nullable().optional(),
-        diagnosisCodes: z2.string().nullable().optional(),
-        modifier: z2.string().nullable().optional(),
-        unitsBilled: z2.number().nullable().optional()
+    cms1500EnrichmentCommit: superAdminProcedure.input(z3.object({
+      patientId: z3.string().uuid(),
+      lines: z3.array(z3.object({
+        lineKey: z3.string(),
+        claimRecordId: z3.string().uuid(),
+        dateOfService: z3.string().nullable(),
+        cptCodes: z3.string().nullable(),
+        visitNumber: z3.number().nullable().optional(),
+        diagnosisCodes: z3.string().nullable().optional(),
+        modifier: z3.string().nullable().optional(),
+        unitsBilled: z3.number().nullable().optional()
       }))
     })).mutation(async ({ input, ctx }) => {
       const actor = getActorContext(ctx.user);
@@ -5261,47 +5429,47 @@ var appRouter = router({
      * Matches patient names (case-insensitive) against dashboard patients,
      * finds each patient's latest auth period, and saves all their claims.
      */
-    bulkImportFromEOB: normalProtectedProcedure.input(z2.object({
-      uploadType: z2.enum(["reimbursement", "cms1500"]).default("reimbursement"),
-      patientGroups: z2.array(z2.object({
-        patientName: z2.string(),
-        claims: z2.array(z2.object({
+    bulkImportFromEOB: superAdminProcedure.input(z3.object({
+      uploadType: z3.enum(["reimbursement", "cms1500"]).default("reimbursement"),
+      patientGroups: z3.array(z3.object({
+        patientName: z3.string(),
+        claims: z3.array(z3.object({
           // Date-level fields (shared across all CPT lines for this date)
-          placeOfService: z2.string().nullable().optional(),
-          dateOfService: z2.string().nullable().optional(),
-          visitNumber: z2.number().nullable().optional(),
-          insuranceBilled: z2.string().nullable().optional(),
-          oaClaimNumber: z2.string().nullable().optional(),
-          claimSubmittedDate: z2.string().nullable().optional(),
-          expireBcbsClaimNumber: z2.string().nullable().optional(),
-          claimStatus: z2.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
-          checkDate: z2.string().nullable().optional(),
-          checkNumberVirtualCard: z2.string().nullable().optional(),
-          dateReceived: z2.string().nullable().optional(),
-          dateOfAppeal: z2.string().nullable().optional(),
-          referenceNo: z2.string().nullable().optional(),
-          lmn: z2.string().nullable().optional(),
+          placeOfService: z3.string().nullable().optional(),
+          dateOfService: z3.string().nullable().optional(),
+          visitNumber: z3.number().nullable().optional(),
+          insuranceBilled: z3.string().nullable().optional(),
+          oaClaimNumber: z3.string().nullable().optional(),
+          claimSubmittedDate: z3.string().nullable().optional(),
+          expireBcbsClaimNumber: z3.string().nullable().optional(),
+          claimStatus: z3.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
+          checkDate: z3.string().nullable().optional(),
+          checkNumberVirtualCard: z3.string().nullable().optional(),
+          dateReceived: z3.string().nullable().optional(),
+          dateOfAppeal: z3.string().nullable().optional(),
+          referenceNo: z3.string().nullable().optional(),
+          lmn: z3.string().nullable().optional(),
           // CPT sub-rows (one claim record per line)
-          cptLines: z2.array(z2.object({
-            cptCodes: z2.string().nullable().optional(),
-            chargeAmount: z2.number().nullable().optional(),
-            insuranceReimbursement: z2.number().nullable().optional(),
-            patientAmountPaid: z2.number().nullable().optional(),
-            patientAmountDue: z2.number().nullable().optional(),
-            unitsBilled: z2.number().nullable().optional(),
-            modifier: z2.string().nullable().optional(),
-            diagnosisCodes: z2.string().nullable().optional()
+          cptLines: z3.array(z3.object({
+            cptCodes: z3.string().nullable().optional(),
+            chargeAmount: z3.number().nullable().optional(),
+            insuranceReimbursement: z3.number().nullable().optional(),
+            patientAmountPaid: z3.number().nullable().optional(),
+            patientAmountDue: z3.number().nullable().optional(),
+            unitsBilled: z3.number().nullable().optional(),
+            modifier: z3.string().nullable().optional(),
+            diagnosisCodes: z3.string().nullable().optional()
           })).optional(),
           // Fallback flat fields (when no cptLines)
-          cptCodes: z2.string().nullable().optional(),
-          unitsBilled: z2.number().nullable().optional(),
-          diagnosisCodes: z2.string().nullable().optional(),
-          modifier: z2.string().nullable().optional(),
-          chargeAmount: z2.number().nullable().optional(),
-          insuranceReimbursement: z2.number().nullable().optional(),
-          patientAmountPaid: z2.number().nullable().optional(),
-          patientAmountDue: z2.number().nullable().optional(),
-          paymentReceived: z2.number().nullable().optional()
+          cptCodes: z3.string().nullable().optional(),
+          unitsBilled: z3.number().nullable().optional(),
+          diagnosisCodes: z3.string().nullable().optional(),
+          modifier: z3.string().nullable().optional(),
+          chargeAmount: z3.number().nullable().optional(),
+          insuranceReimbursement: z3.number().nullable().optional(),
+          patientAmountPaid: z3.number().nullable().optional(),
+          patientAmountDue: z3.number().nullable().optional(),
+          paymentReceived: z3.number().nullable().optional()
         }))
       })),
       // Staff-confirmed matches for groups whose extracted name only
@@ -5310,9 +5478,9 @@ var appRouter = router({
       // middle name the fuzzy matcher correctly refuses to auto-match.
       // Index into patientGroups; never used to override a name that
       // *does* safely fuzzy-match (that path is untouched below).
-      confirmedMatches: z2.array(z2.object({
-        groupIndex: z2.number().int().nonnegative(),
-        patientId: z2.string().uuid()
+      confirmedMatches: z3.array(z3.object({
+        groupIndex: z3.number().int().nonnegative(),
+        patientId: z3.string().uuid()
       })).optional()
     })).mutation(async ({ input, ctx }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
@@ -5517,13 +5685,13 @@ var appRouter = router({
       }
       return { results };
     }),
-    markResolved: normalProtectedProcedure.input(z2.object({ id: z2.string().uuid() })).mutation(async ({ input }) => {
+    markResolved: superAdminProcedure.input(z3.object({ id: z3.string().uuid() })).mutation(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
       const { error } = await supabase2.from("claims_records").update({ is_resolved: true, claim_status: "pending" }).eq("id", input.id);
       if (error) throw new TRPCError3({ code: "INTERNAL_SERVER_ERROR", message: error.message });
       return { success: true };
     }),
-    getFollowUpClaims: normalProtectedProcedure.input(z2.object({ insurance: z2.string().optional() }).optional()).query(async ({ input }) => {
+    getFollowUpClaims: superAdminProcedure.input(z3.object({ insurance: z3.string().optional() }).optional()).query(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
       let query = supabase2.from("claims_records").select(`
             id,
@@ -5569,7 +5737,7 @@ var appRouter = router({
       });
       return sortByFollowUpUrgency(classified);
     }),
-    getStatusCounts: normalProtectedProcedure.input(z2.object({ insurance: z2.string().optional() }).optional()).query(async ({ input }) => {
+    getStatusCounts: superAdminProcedure.input(z3.object({ insurance: z3.string().optional() }).optional()).query(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
       let query = supabase2.from("claims_records").select("claim_status, patient_id, patients!inner(insurance)");
       if (input?.insurance) {
@@ -5591,25 +5759,31 @@ var appRouter = router({
   // there is no mutation here, and audit_logs itself has no browser-reachable
   // write path at all (service_role-only, see the P4-P17 migration's RLS).
   activityLog: router({
-    list: adminOrOwnerProcedure.input(z2.object({
-      actorId: z2.string().uuid().optional(),
-      entityType: z2.enum(["patient", "visit_record", "claim_record", "insurer_catalog", "clinic_user"]).optional(),
-      action: z2.string().optional(),
-      dateFrom: z2.string().nullable().optional(),
+    list: adminOrOwnerProcedure.input(z3.object({
+      actorId: z3.string().uuid().optional(),
+      entityType: z3.enum(["patient", "visit_record", "claim_record", "insurer_catalog", "clinic_user"]).optional(),
+      action: z3.string().optional(),
+      dateFrom: z3.string().nullable().optional(),
       // ISO date string "YYYY-MM-DD"
-      dateTo: z2.string().nullable().optional(),
-      page: z2.number().int().min(0).default(0),
-      pageSize: z2.number().int().min(1).max(200).default(50)
-    })).query(async ({ input }) => {
-      return listActivityLog({
+      dateTo: z3.string().nullable().optional(),
+      page: z3.number().int().min(0).default(0),
+      pageSize: z3.number().int().min(1).max(200).default(50)
+    })).query(async ({ ctx, input }) => {
+      const superAdmin = isSuperAdmin(ctx.user);
+      if (!superAdmin && input.entityType === "claim_record") {
+        throw new TRPCError3({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
+      }
+      const result = await listActivityLog({
         actorId: input.actorId ?? null,
         entityType: input.entityType ?? null,
         action: input.action ?? null,
         dateFrom: parseDate2(input.dateFrom),
         dateTo: parseDate2(input.dateTo),
         page: input.page,
-        pageSize: input.pageSize
+        pageSize: input.pageSize,
+        excludeClaims: !superAdmin
       });
+      return { ...result, rows: redactAuditRows(result.rows, superAdmin) };
     })
   })
 });
