@@ -34,6 +34,10 @@
 export type ClaimImportKind = "cms1500" | "eob";
 
 export const CLAIM_IMPORT_KEY_RE = /^[A-Za-z0-9:_.,-]{1,160}$/;
+
+/** claim_status values an import may write (claims_records CHECK + import RPCs). */
+export const CLAIM_IMPORT_STATUSES = ["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"] as const;
+export type ClaimImportStatus = (typeof CLAIM_IMPORT_STATUSES)[number];
 export const SHA256_RE = /^[0-9a-f]{64}$/;
 
 /** One CMS1500 Box 24 service line, as extracted. */
@@ -51,11 +55,15 @@ export interface Cms1500ImportLine {
   diagnosisCodes: string | null; // pointer-resolved, in pointer order
   claimSubmittedDate: string | null;
   insuranceBilled: string | null;
+  /** P4-P26: only from a CMS1500 CSV row that states it. Never derived; absent for PDFs. */
+  visitNumber?: number | null;
   /** Box 24F — used for the Box 28 total check only, never persisted. */
   lineChargeForValidation: number | null;
   /** Fields the extractor could not read. Their values are null, never guessed. */
   unreadable: string[];
   notes: string | null;
+  /** P4-P26: spreadsheet row in the uploaded CSV. Display only — never part of the line's identity. */
+  sourceRow?: number | null;
 }
 
 /** One EOB / remittance service line, as extracted. */
@@ -75,6 +83,8 @@ export interface EobImportLine {
   checkDate: string | null;
   checkNumberVirtualCard: string | null;
   notes: string | null;
+  /** P4-P26: spreadsheet row in the uploaded CSV. Display only. */
+  sourceRow?: number | null;
 }
 
 export type ImportLine = Cms1500ImportLine | EobImportLine;
@@ -83,7 +93,8 @@ export type ImportLine = Cms1500ImportLine | EobImportLine;
 export interface UnresolvedClaimTotal {
   dateOfService: string | null;
   cptCodes: string | null;
-  planPaid: number;
+  /** Null when only a patient-responsibility total was reported (CSV claim_total_* columns). */
+  planPaid: number | null;
   patientResponsibility: number | null;
   cptCount: number;
 }
@@ -114,8 +125,8 @@ export interface ImportDocument<L extends ImportLine = ImportLine> {
 // ─── Authorization period ────────────────────────────────────────────────────
 
 export type PeriodResolution =
-  | { status: "resolved"; authPeriod: number; basis: "visit_date" | "period_range" | "single_period" }
-  | { status: "uncertain"; options: number[] };
+  | { status: "resolved"; authPeriod: number; basis: "visit_date" | "period_range" | "single_period" | "file" }
+  | { status: "uncertain"; options: number[]; note?: string };
 
 /**
  * Which authorization period a date of service belongs to, from the
@@ -145,6 +156,43 @@ export function resolveAuthPeriod(
   const anyDated = visits.some(v => v.dateOfService);
   if (periods.length === 1 && !anyDated) return { status: "resolved", authPeriod: periods[0], basis: "single_period" };
   return { status: "uncertain", options };
+}
+
+/**
+ * P4-P26: the period for a CMS1500 CSV row that states one. The file's
+ * period is used when it is one of the patient's periods and the visit
+ * dates either agree or cannot decide; a file period that contradicts the
+ * visit dates, or is not one of the patient's periods, needs a choice.
+ */
+export function resolveAuthPeriodWithFilePeriod(
+  visits: Array<{ authPeriod: number; dateOfService: string | null }>,
+  dateOfService: string | null,
+  filePeriod: number
+): PeriodResolution {
+  const base = resolveAuthPeriod(visits, dateOfService);
+  const known = Array.from(new Set(visits.map(v => v.authPeriod))).sort((a, b) => a - b);
+  const allowed = known.length > 0 ? known : [1];
+  if (!allowed.includes(filePeriod)) {
+    return {
+      status: "uncertain",
+      options: base.status === "uncertain" ? base.options : allowed,
+      note: `The file says period ${filePeriod}, which is not one of this patient's authorization periods (${allowed.join(", ")}). Choose the period.`,
+    };
+  }
+  if (base.status === "resolved") {
+    if (base.authPeriod === filePeriod) return base;
+    return {
+      status: "uncertain",
+      options: [base.authPeriod, filePeriod].sort((a, b) => a - b),
+      note: `The file says period ${filePeriod}, but the visit dates place this date of service in period ${base.authPeriod}. Choose the period.`,
+    };
+  }
+  if (base.options.includes(filePeriod)) return { status: "resolved", authPeriod: filePeriod, basis: "file" };
+  return {
+    status: "uncertain",
+    options: Array.from(new Set([...base.options, filePeriod])).sort((a, b) => a - b),
+    note: `The file says period ${filePeriod}, but the visit dates point to period ${base.options.join(" or ")}. Choose the period.`,
+  };
 }
 
 // ─── Existing rows a source line could correspond to ─────────────────────────
@@ -238,7 +286,7 @@ export function classifyCms1500Line(params: {
     };
   }
   if (period.status === "uncertain") {
-    return { status: "period_required", candidates: [], associableIds: [], period, reason: "Choose the authorization period for this date of service." };
+    return { status: "period_required", candidates: [], associableIds: [], period, reason: period.note ?? "Choose the authorization period for this date of service." };
   }
   return { status: "ready_new", candidates: [], associableIds: [], period };
 }
@@ -327,6 +375,55 @@ export function classifyEobLine(params: {
     return { status: "needs_confirmation", targetClaimId: target.id, candidates: [target], reason: `This line already has different amounts (${conflicts.join(", ")}). Applying replaces them.` };
   }
   return { status: "matched", targetClaimId: target.id, candidates: [target] };
+}
+
+/**
+ * P4-P26: what an Insurance Reimbursement CSV row may be applied to.
+ * cms1500Ref (both CMS1500 CSV ids filled) pins the row to exactly that
+ * CMS1500 line; authPeriod limits candidates to one period. Without either
+ * this is classifyEobLine. The same function decides the preview and
+ * re-validates the reviewer's chosen target on commit.
+ */
+export interface EobCsvTarget {
+  cms1500Ref?: { documentId: string | null; lineKey: string; label: string } | null;
+  authPeriod?: number | null;
+}
+
+export function classifyEobLineForTarget(params: Parameters<typeof classifyEobLine>[0] & { target: EobCsvTarget }): EobLineClassification {
+  const { line, documentId, existing, target } = params;
+  const dos = line.dateOfService;
+  const cpt = (line.cptCodes ?? "").trim();
+  if (!dos || !cpt) return { status: "invalid", candidates: [], reason: "Date of service and CPT must both be readable." };
+  const saved = documentId ? existing.find(r => r.eobDocumentId === documentId && r.eobLineKey === line.sourceLineKey) : undefined;
+  if (saved) return { status: "already_saved", targetClaimId: saved.id, candidates: [] };
+
+  const period = target.authPeriod ?? null;
+  let pool = period != null ? existing.filter(r => r.authPeriod === period) : existing;
+  const ref = target.cms1500Ref;
+  if (ref) {
+    const row = ref.documentId ? existing.find(r => r.cms1500DocumentId === ref.documentId && r.cms1500LineKey === ref.lineKey) : undefined;
+    if (!row) {
+      return { status: "cms1500_required", candidates: [], reason: `${UPLOAD_CMS1500_FIRST} CMS1500 line ${ref.label} is not saved for this patient on this date of service.` };
+    }
+    if ((row.cptCodes ?? "").trim() !== cpt) {
+      return { status: "invalid", candidates: [], reason: `CMS1500 line ${ref.label} is CPT ${row.cptCodes ?? "—"}, not ${cpt}. Fix the CMS1500 reference in the file.` };
+    }
+    if (period != null && row.authPeriod !== period) {
+      return { status: "invalid", candidates: [], reason: `CMS1500 line ${ref.label} is in period ${row.authPeriod}, not period ${period}. Fix auth_period in the file.` };
+    }
+    pool = [row];
+  }
+  const result = classifyEobLine({ line, documentId, existing: pool });
+  if (result.status === "cms1500_required" && period != null && pool.length !== existing.length) {
+    return { ...result, reason: `${result.reason} (No CMS1500 line on this date and CPT in period ${period}.)` };
+  }
+  return result;
+}
+
+/** Claim rows a reviewer may apply this line to — the commit-side check for a CSV row. */
+export function allowedEobTargets(c: EobLineClassification): string[] {
+  if (c.status === "invalid" || c.status === "cms1500_required") return [];
+  return Array.from(new Set([...(c.targetClaimId ? [c.targetClaimId] : []), ...c.candidates.map(x => x.id)]));
 }
 
 // ─── Totals that must not turn "unknown" into $0.00 ─────────────────────────

@@ -8,6 +8,8 @@ import type { Cms1500ImportLine, EobImportLine, ImportDocument } from "@shared/c
 import {
   applyLineEdits,
   buildCommitInput,
+  buildCsvCommitInputs,
+  buildCsvPreviewInput,
   buildPreviewInput,
   decisionReady,
   initialDecision,
@@ -156,5 +158,56 @@ describe("helpers", () => {
     expect(peak).toBe(2);
     expect(out.map(r => r.status)).toEqual(["fulfilled", "fulfilled", "rejected", "fulfilled", "fulfilled"]);
     expect((out[4] as PromiseFulfilledResult<number>).value).toBe(50);
+  });
+});
+
+describe("P4-P26 CSV requests", () => {
+  const source = { kind: "cms1500" as const, fileName: "cms.csv", csvText: "cms1500_claim_id,cms1500_line_id\n" };
+  const withGroups = (n: number, linesPer: number): FileReviewState => {
+    const base = cmsState([]);
+    const groups = Array.from({ length: n }, (_, g) => ({
+      ...base.doc.groups[0], groupKey: `g${g}`,
+      lines: Array.from({ length: linesPer }, (_, i) => cmsLine(`g${g}:csv.${i}`)),
+    }));
+    const decisions: FileReviewState["decisions"] = {};
+    for (const g of groups) for (const l of g.lines) decisions[l.sourceLineKey] = { action: "create", authPeriod: 1, periodSource: "resolved" };
+    return { ...base, doc: { ...base.doc, groups }, decisions };
+  };
+
+  it("sends only decisions and patient input — never line values or keys the file did not produce", () => {
+    const state = withGroups(1, 2);
+    state.patientChoice = { g0: "11111111-1111-4111-8111-111111111111" };
+    state.patientConfirmed = { g0: true };
+    const [batch] = buildCsvCommitInputs({ source, state });
+    expect(batch).toEqual({
+      ...source,
+      groups: [{
+        groupKey: "g0", patientId: "11111111-1111-4111-8111-111111111111", patientConfirmed: true,
+        lines: [
+          { sourceLineKey: "g0:csv.0", decision: { action: "create", authPeriod: 1, periodSource: "resolved" } },
+          { sourceLineKey: "g0:csv.1", decision: { action: "create", authPeriod: 1, periodSource: "resolved" } },
+        ],
+      }],
+    });
+    expect(buildCsvPreviewInput({ source, state })).toEqual({ ...source, patientChoices: { g0: "11111111-1111-4111-8111-111111111111" } });
+  });
+
+  it("splits large files into bounded requests without splitting a claim, and never resends done lines", () => {
+    const state = withGroups(5, 40);
+    const batches = buildCsvCommitInputs({ source, state, maxLines: 100 });
+    expect(batches.map(b => b.groups.map(g => g.lines.length))).toEqual([[40, 40], [40, 40], [40]]);
+    state.results["g0:csv.0"] = { sourceLineKey: "g0:csv.0", status: "saved" };
+    state.results["g1:csv.3"] = { sourceLineKey: "g1:csv.3", status: "review_required", reason: "needs_selection" };
+    const retry = buildCsvCommitInputs({ source, state, maxLines: 1000 });
+    const keys = retry.flatMap(b => b.groups.flatMap(g => g.lines.map(l => l.sourceLineKey)));
+    expect(keys).not.toContain("g0:csv.0");
+    expect(keys).toContain("g1:csv.3");
+    expect(keys).toHaveLength(199);
+  });
+
+  it("nothing ready → no request", () => {
+    const state = withGroups(1, 1);
+    state.decisions = {};
+    expect(buildCsvCommitInputs({ source, state })).toEqual([]);
   });
 });

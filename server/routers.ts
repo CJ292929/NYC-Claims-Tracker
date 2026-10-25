@@ -63,6 +63,7 @@ import {
   ClaimImportRuleError,
 } from "./db";
 import { commitClaimImport, importCommitInput, importPreviewInput, previewClaimImport } from "./claimImport";
+import { commitClaimCsvImport, csvImportCommitInput, csvImportPreviewInput, CsvTemplateError, previewClaimCsvImport } from "./claimCsvImport";
 import type { ClinicUser } from "../drizzle/schema";
 import { sdk } from "./_core/sdk";
 import { getActorContext } from "./actorIdentity";
@@ -1123,6 +1124,40 @@ export const appRouter = router({
         try {
           return await commitClaimImport(input, getActorContext(ctx.user));
         } catch (err) {
+          if (err instanceof ClaimImportRuleError) throw new TRPCError({ code: "NOT_FOUND", message: err.message });
+          throw err;
+        }
+      }),
+
+    /**
+     * P4-P26: CMS1500 CSV / Insurance Reimbursement CSV bulk upload preview —
+     * no writes. The CSV text is parsed here (server/claimCsvImport.ts); a
+     * wrong or malformed template comes back as templateError, row-level
+     * problems as rowErrors.
+     */
+    csvImportPreview: claimsAccessProcedure
+      .input(csvImportPreviewInput)
+      .mutation(async ({ input }) => {
+        try {
+          return await previewClaimCsvImport(input);
+        } catch (err) {
+          if (err instanceof ClaimImportRuleError) throw new TRPCError({ code: "NOT_FOUND", message: err.message });
+          throw err;
+        }
+      }),
+
+    /**
+     * P4-P26: commit reviewed lines of a claims CSV. The file is re-parsed and
+     * every line's identity and values come from it, not from the request;
+     * persistence is the same audited CMS1500-first path as importCommit.
+     */
+    csvImportCommit: claimsAccessProcedure
+      .input(csvImportCommitInput)
+      .mutation(async ({ input, ctx }) => {
+        try {
+          return await commitClaimCsvImport(input, getActorContext(ctx.user));
+        } catch (err) {
+          if (err instanceof CsvTemplateError) throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
           if (err instanceof ClaimImportRuleError) throw new TRPCError({ code: "NOT_FOUND", message: err.message });
           throw err;
         }

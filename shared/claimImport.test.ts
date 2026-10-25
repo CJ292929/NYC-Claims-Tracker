@@ -5,8 +5,11 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  allowedEobTargets,
   classifyCms1500Line,
   classifyEobLine,
+  classifyEobLineForTarget,
+  resolveAuthPeriodWithFilePeriod,
   conflictingMoneyFields,
   normalizeModifierSet,
   resolveAuthPeriod,
@@ -195,5 +198,53 @@ describe("money helpers", () => {
   it("normalizes modifier sets regardless of order and separators", () => {
     expect(normalizeModifierSet("GP, 59")).toBe(normalizeModifierSet("59 gp"));
     expect(normalizeModifierSet(null)).toBe("");
+  });
+});
+
+describe("P4-P26 resolveAuthPeriodWithFilePeriod", () => {
+  const visits = [
+    { authPeriod: 1, dateOfService: "2026-01-05" },
+    { authPeriod: 1, dateOfService: "2026-02-20" },
+    { authPeriod: 2, dateOfService: "2026-03-02" },
+    { authPeriod: 2, dateOfService: "2026-04-10" },
+  ];
+  it("agrees with the visit dates → resolved; contradicts them → a choice is required", () => {
+    expect(resolveAuthPeriodWithFilePeriod(visits, "2026-03-02", 2)).toEqual({ status: "resolved", authPeriod: 2, basis: "visit_date" });
+    const conflict = resolveAuthPeriodWithFilePeriod(visits, "2026-03-02", 1);
+    expect(conflict).toMatchObject({ status: "uncertain", options: [1, 2] });
+    expect((conflict as any).note).toMatch(/file says period 1.*period 2/);
+  });
+  it("decides an otherwise-uncertain date only when it is one of the plausible periods", () => {
+    expect(resolveAuthPeriodWithFilePeriod(visits, "2026-02-25", 1)).toEqual({ status: "resolved", authPeriod: 1, basis: "file" });
+    expect(resolveAuthPeriodWithFilePeriod(visits, "2026-02-25", 7)).toMatchObject({ status: "uncertain", options: [1, 2] });
+  });
+});
+
+describe("P4-P26 classifyEobLineForTarget", () => {
+  const line = { sourceLineKey: "e:csv.1", dateOfService: "2026-03-02", cptCodes: "97110", modifier: "GP", unitsBilled: 1, chargeAmount: 150, insuranceReimbursement: 80, patientAmountDue: 20, patientAmountPaid: null };
+  const a = row({ id: "a", cms1500DocumentId: DOC, cms1500LineKey: "c:csv.1" });
+  const b = row({ id: "b", cms1500DocumentId: DOC, cms1500LineKey: "c:csv.2" });
+  const ref = (lineKey: string) => ({ documentId: DOC, lineKey, label: "C / line x" });
+
+  it("a reference pins the payment to exactly that line, even among identical repeated lines", () => {
+    expect(classifyEobLine({ line, documentId: null, existing: [a, b] }).status).toBe("needs_selection");
+    const pinned = classifyEobLineForTarget({ line, documentId: null, existing: [a, b], target: { cms1500Ref: ref("c:csv.2") } });
+    expect(pinned).toMatchObject({ status: "matched", targetClaimId: "b" });
+    expect(allowedEobTargets(pinned)).toEqual(["b"]);
+  });
+  it("a reference to a line that is not saved is CMS1500-required, with no target allowed", () => {
+    const missing = classifyEobLineForTarget({ line, documentId: null, existing: [a], target: { cms1500Ref: { documentId: null, lineKey: "c:csv.9", label: "C / line 9" } } });
+    expect(missing.status).toBe("cms1500_required");
+    expect(missing.reason).toMatch(/^Upload the matching CMS1500 first\. CMS1500 line C \/ line 9/);
+    expect(allowedEobTargets(missing)).toEqual([]);
+  });
+  it("a reference to a different CPT or period is invalid", () => {
+    expect(classifyEobLineForTarget({ line: { ...line, cptCodes: "97112" }, documentId: null, existing: [a, row({ id: "z", cptCodes: "97112", cms1500DocumentId: DOC, cms1500LineKey: "c:csv.7" })], target: { cms1500Ref: ref("c:csv.1") } }).status).toBe("invalid");
+    expect(classifyEobLineForTarget({ line, documentId: null, existing: [a], target: { cms1500Ref: ref("c:csv.1"), authPeriod: 2 } }).status).toBe("invalid");
+  });
+  it("a period narrows candidates without a reference; no candidate in that period is CMS1500-required", () => {
+    const p2 = row({ id: "p2", authPeriod: 2, cms1500DocumentId: DOC, cms1500LineKey: "c:csv.3" });
+    expect(classifyEobLineForTarget({ line, documentId: null, existing: [a, p2], target: { authPeriod: 2 } })).toMatchObject({ status: "matched", targetClaimId: "p2" });
+    expect(classifyEobLineForTarget({ line, documentId: null, existing: [a], target: { authPeriod: 2 } }).status).toBe("cms1500_required");
   });
 });

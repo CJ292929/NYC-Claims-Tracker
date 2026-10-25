@@ -8,6 +8,10 @@
  *     contextAuthPeriod set; only that patient can be written);
  *   - bulk: "Bulk CMS1500 Upload" / "Bulk Insurance Reimbursement Upload"
  *     (Claims-access roles only), many files, many patients per file.
+ *   - P4-P26 csv: Bulk Upload → CMS1500 / Insurance Reimbursement CSV
+ *     templates (source="csv"). Same review and save rules; the CSV text is
+ *     re-parsed by the server on every preview and save
+ *     (server/claimCsvImport.ts), one review group per claim in the file.
  *
  * Every file is extracted (at most 2 at a time), previewed, reviewed, and
  * saved on its own: one failed file never clears another's preview, and a
@@ -16,7 +20,7 @@
  * (server and client) and client/src/lib/claimImportReview.ts.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, FileUp, Loader2, RefreshCw, Trash2, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Download, FileUp, Loader2, RefreshCw, Trash2, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,12 +31,16 @@ import { createRequestGuard, createSingleFlightGuard, type RequestGuard, type Si
 import {
   applyLineEdits,
   buildCommitInput,
+  buildCsvCommitInputs,
+  buildCsvPreviewInput,
   buildPreviewInput,
   initialDecision,
   isLineDone,
   runWithConcurrency,
   summarizeResults,
   type Cms1500Decision,
+  type CommitResult,
+  type CsvRowError,
   type EobDecision,
   type FileReviewState,
   type LineDecision,
@@ -44,6 +52,8 @@ import {
 } from "@/lib/claimImportReview";
 import type { Cms1500ImportLine, EobImportLine, ExistingClaimLine, ImportDocument } from "@shared/claimImport";
 import { formatCalendarDate } from "@/lib/date";
+import { CLAIM_CSV_MAX_BYTES, CLAIM_CSV_TEMPLATES } from "@shared/claimCsvTemplates";
+import { downloadClaimCsvTemplate } from "./ClaimCsvTemplatePanel";
 
 type Kind = "cms1500" | "eob";
 
@@ -60,6 +70,9 @@ interface FileEntry {
   checking?: boolean;
   /** Set together with a state change that needs a fresh preview; consumed by an effect. */
   recheck?: boolean;
+  /** P4-P26 (source="csv"): the file text, re-sent on every preview/save, and its row errors. */
+  csvText?: string;
+  rowErrors?: CsvRowError[];
 }
 
 export interface ClaimImportDialogProps {
@@ -72,9 +85,13 @@ export interface ClaimImportDialogProps {
   /** Files to start with (the single-patient buttons pass the picked file). */
   initialFiles?: File[];
   onSaved?: () => void;
+  /** P4-P26: "csv" = the CMS1500 / Insurance Reimbursement CSV templates (always bulk). */
+  source?: "document" | "csv";
 }
 
 const MAX_PARALLEL_EXTRACTIONS = 2;
+/** Lines per CSV save request — keeps each request well inside the server time limit. */
+const CSV_LINES_PER_REQUEST = 150;
 
 const money = (n: number | null | undefined) => (n == null ? "—" : `$${Number(n).toFixed(2)}`);
 const dateText = (d: string | null | undefined) => (d ? formatCalendarDate(d) : "—");
@@ -123,7 +140,9 @@ const selectClass = "h-8 max-w-full rounded-md border border-input bg-background
 const inputClass = "h-7 w-24 rounded-md border border-amber-400 bg-amber-50 px-1.5 text-xs";
 
 export function ClaimImportDialog(props: ClaimImportDialogProps) {
-  const { open, onOpenChange, kind, mode, contextPatient = null, contextAuthPeriod = null, initialFiles, onSaved } = props;
+  const { open, onOpenChange, kind, contextPatient = null, contextAuthPeriod = null, initialFiles, onSaved, source = "document" } = props;
+  const csv = source === "csv";
+  const mode: ReviewMode = csv ? "bulk" : props.mode;
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const entriesRef = useRef<FileEntry[]>([]);
   entriesRef.current = entries;
@@ -136,14 +155,18 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
 
   const preview = trpc.claims.importPreview.useMutation();
   const commit = trpc.claims.importCommit.useMutation();
+  const csvPreview = trpc.claims.csvImportPreview.useMutation();
+  const csvCommit = trpc.claims.csvImportCommit.useMutation();
   const needsRoster = mode === "bulk";
   const { data: roster = [] } = trpc.patients.list.useQuery(undefined, { enabled: open && needsRoster });
 
   const contextPatientId = contextPatient?.id ?? null;
   const uploadType = kind === "eob" ? "reimbursement" : "cms1500";
-  const title = mode === "bulk"
-    ? kind === "cms1500" ? "Bulk CMS1500 Upload" : "Bulk Insurance Reimbursement Upload"
-    : kind === "cms1500" ? "CMS1500 Upload" : "Insurance Reimbursement Upload";
+  const title = csv
+    ? `${CLAIM_CSV_TEMPLATES[kind].title} CSV Upload`
+    : mode === "bulk"
+      ? kind === "cms1500" ? "Bulk CMS1500 Upload" : "Bulk Insurance Reimbursement Upload"
+      : kind === "cms1500" ? "CMS1500 Upload" : "Insurance Reimbursement Upload";
 
   const update = (id: string, fn: (e: FileEntry) => FileEntry) => {
     setEntries(prev => prev.map(e => (e.id === id ? fn(e) : e)));
@@ -181,7 +204,8 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
   async function processOne(id: string, session: number) {
     const entry = entriesRef.current.find(e => e.id === id);
     if (!entry || !isLive(id, session)) return;
-    update(id, e => ({ ...e, stage: "extracting", error: undefined }));
+    update(id, e => ({ ...e, stage: "extracting", error: undefined, rowErrors: undefined }));
+    if (csv) return processCsv(id, session, entry.file);
     try {
       const form = new FormData();
       form.append("file", entry.file);
@@ -207,6 +231,53 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
     }
   }
 
+  /** P4-P26: the first CSV preview is also the parse — the server reads the file. */
+  async function processCsv(id: string, session: number, file: File) {
+    try {
+      if (file.size > CLAIM_CSV_MAX_BYTES) throw new Error(`The file is larger than ${CLAIM_CSV_MAX_BYTES / 1_000_000} MB. Split it into smaller files.`);
+      const csvText = await file.text();
+      const result = await csvPreview.mutateAsync({ kind, fileName: file.name, csvText, patientChoices: {} });
+      if (!isLive(id, session)) return;
+      if (result.templateError) throw new Error(result.templateError);
+      if (!result.document || !result.preview || result.document.groups.length === 0) {
+        update(id, e => ({ ...e, csvText, rowErrors: result.rowErrors, stage: "failed", error: "No claim in this file can be imported until the problems below are fixed." }));
+        return;
+      }
+      const review: FileReviewState = { doc: result.document, patientChoice: {}, patientConfirmed: {}, decisions: {}, edits: {}, results: {} };
+      update(id, e => ({ ...e, csvText, rowErrors: result.rowErrors, stage: "checking", review }));
+      applyPreview(id, result.preview as PreviewResult);
+    } catch (err: any) {
+      if (isLive(id, session)) update(id, e => ({ ...e, stage: "failed", error: err?.message ?? "Failed to read this file." }));
+    }
+  }
+
+  async function requestPreview(id: string, review: FileReviewState): Promise<PreviewResult> {
+    if (!csv) return preview.mutateAsync(buildPreviewInput({ state: review, contextPatientId }));
+    const e = entry(id)!;
+    const result = await csvPreview.mutateAsync(buildCsvPreviewInput({ source: { kind, fileName: e.file.name, csvText: e.csvText! }, state: review }));
+    if (result.templateError || !result.preview) throw new Error(result.templateError ?? "The file could not be re-checked.");
+    return result.preview as PreviewResult;
+  }
+
+  /** Stores a preview, keeping reviewer decisions that are still valid. */
+  function applyPreview(id: string, result: PreviewResult) {
+    update(id, e => {
+      if (!e.review) return e;
+      const decisions = { ...e.review.decisions };
+      const patientChoice = { ...e.review.patientChoice };
+      for (const g of result.groups) {
+        if (g.patient.patientId && !patientChoice[g.groupKey]) patientChoice[g.groupKey] = g.patient.patientId;
+        for (const line of g.lines) {
+          const existing = decisions[line.sourceLineKey];
+          if (!existing || !decisionStillValid(kind, existing, line)) {
+            decisions[line.sourceLineKey] = initialDecision({ kind, line, mode, contextAuthPeriod });
+          }
+        }
+      }
+      return { ...e, stage: "review", checking: false, preview: result, review: { ...e.review, decisions, patientChoice } };
+    });
+  }
+
   /** (Re)classifies a file's lines. Keeps reviewer decisions that are still valid. */
   async function runPreview(id: string, session: number, review: FileReviewState, first = false) {
     const guard = previewGuards.current.get(id) ?? createRequestGuard();
@@ -214,23 +285,9 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
     const requestId = guard.start();
     update(id, e => ({ ...e, checking: true }));
     try {
-      const result = await preview.mutateAsync(buildPreviewInput({ state: review, contextPatientId }));
+      const result = await requestPreview(id, review);
       if (!isLive(id, session) || !guard.isCurrent(requestId)) return;
-      update(id, e => {
-        if (!e.review) return e;
-        const decisions = { ...e.review.decisions };
-        const patientChoice = { ...e.review.patientChoice };
-        for (const g of result.groups) {
-          if (g.patient.patientId && !patientChoice[g.groupKey]) patientChoice[g.groupKey] = g.patient.patientId;
-          for (const line of g.lines) {
-            const existing = decisions[line.sourceLineKey];
-            if (!existing || !decisionStillValid(kind, existing, line)) {
-              decisions[line.sourceLineKey] = initialDecision({ kind, line, mode, contextAuthPeriod });
-            }
-          }
-        }
-        return { ...e, stage: "review", checking: false, preview: result, review: { ...e.review, decisions, patientChoice } };
-      });
+      applyPreview(id, result);
     } catch (err: any) {
       if (!isLive(id, session) || !guard.isCurrent(requestId)) return;
       update(id, e => (first ? { ...e, stage: "failed", checking: false, error: `Could not check this file: ${err?.message ?? "error"}` } : { ...e, checking: false }));
@@ -265,13 +322,34 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
     try {
       const current = entry(id);
       if (!current?.review) return;
-      const input = buildCommitInput({ state: current.review, contextPatientId, contextAuthPeriod });
-      if (!input) {
+      const input = csv ? null : buildCommitInput({ state: current.review, contextPatientId, contextAuthPeriod });
+      const csvInputs = csv
+        ? buildCsvCommitInputs({ source: { kind, fileName: current.file.name, csvText: current.csvText! }, state: current.review, maxLines: CSV_LINES_PER_REQUEST })
+        : [];
+      if (!input && csvInputs.length === 0) {
         toast("Nothing in this file is ready to save yet.");
         return;
       }
       update(id, e => ({ ...e, saving: true }));
-      const result = await commit.mutateAsync(input);
+      let result: CommitResult;
+      if (input) {
+        result = await commit.mutateAsync(input);
+      } else {
+        // Sequential batches. A failed batch stops the rest; lines from
+        // batches that already returned keep their results.
+        result = { importBatchId: "", groups: [] };
+        for (const batch of csvInputs) {
+          let r: CommitResult;
+          try {
+            r = await csvCommit.mutateAsync(batch);
+          } catch (err: any) {
+            if (result.groups.length === 0) throw err;
+            toast.error(`Part of ${current.file.name} could not be saved: ${err?.message ?? "error"}. Saved lines are kept — retry the rest.`);
+            break;
+          }
+          result = { importBatchId: r.importBatchId, groups: [...result.groups, ...r.groups] };
+        }
+      }
       if (!isLive(id, session)) return;
       // Every other open file is re-checked too: lines this save created can
       // change how another file's lines match (e.g. an overlapping CMS1500).
@@ -328,6 +406,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
             <FileUp className="w-5 h-5 text-brand-gold" /> {title}
           </DialogTitle>
           <DialogDescription>
+            {csv && "One row per service line, from the CSV template. "}
             {kind === "cms1500"
               ? "CMS1500 forms create the claim's service lines (date, CPT, modifiers, units, diagnosis). Amounts stay blank until the EOB is uploaded."
               : "The EOB adds billed, paid and patient-responsibility amounts to lines that already came from a CMS1500. Upload the CMS1500 first."}
@@ -341,7 +420,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
             type="file"
             className="hidden"
             multiple={mode === "bulk"}
-            accept={kind === "cms1500" ? ".pdf" : ".pdf,.csv,.xlsx,.xls,.xlsm"}
+            accept={csv ? ".csv,text/csv" : kind === "cms1500" ? ".pdf" : ".pdf,.csv,.xlsx,.xls,.xlsm"}
             onChange={e => { addFiles(e.target.files); e.target.value = ""; }}
             data-testid="claim-import-file-input"
           />
@@ -351,11 +430,18 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
           {mode === "bulk" && entries.length > 0 && (
             <span className="text-xs text-muted-foreground">{entries.length} file{entries.length !== 1 ? "s" : ""} · up to {MAX_PARALLEL_EXTRACTIONS} read at a time</span>
           )}
+          {csv && (
+            <Button variant="ghost" size="sm" className="sm:ml-auto" onClick={() => downloadClaimCsvTemplate(kind)}>
+              <Download className="w-4 h-4 mr-1" /> Download CSV Template
+            </Button>
+          )}
         </div>
 
         {entries.length === 0 && (
           <p className="text-sm text-muted-foreground py-6 text-center">
-            {mode === "bulk" ? "Add one or more files. Each file can contain several pages and several patients." : "Choose a file to start."}
+            {csv
+              ? `Add one or more files made from ${CLAIM_CSV_TEMPLATES[kind].fileName}. Each claim in a file is reviewed on its own.`
+              : mode === "bulk" ? "Add one or more files. Each file can contain several pages and several patients." : "Choose a file to start."}
           </p>
         )}
 
@@ -453,6 +539,19 @@ function FileCard(props: {
 
       {entry.error && <p className="px-3 py-2 text-sm text-destructive">{entry.error}</p>}
 
+      {entry.rowErrors && entry.rowErrors.length > 0 && (
+        <div className="mx-3 mt-2 rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800" data-testid="claim-csv-row-errors">
+          <p className="font-semibold">
+            {entry.rowErrors.length} problem{entry.rowErrors.length !== 1 ? "s" : ""} in the file — the claims involved are not imported. Fix the file and upload it again; lines already saved are not duplicated.
+          </p>
+          <ul className="mt-1 max-h-40 list-disc space-y-0.5 overflow-y-auto pl-4">
+            {entry.rowErrors.map((r, i) => (
+              <li key={i}>{r.row != null ? `Row ${r.row}` : "Claim"}{r.claimId ? ` (${r.claimId})` : ""}: {r.message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {review && review.doc.warnings.length > 0 && (
         <ul className="mx-3 mt-2 space-y-1 rounded-md bg-amber-50 p-2 text-xs text-amber-900">
           {review.doc.warnings.map((w, i) => <li key={i} className="flex gap-1"><AlertTriangle className="w-3.5 h-3.5 shrink-0" />{w}</li>)}
@@ -493,9 +592,10 @@ function FileCard(props: {
 
 // ─── One patient group inside a file ──────────────────────────────────────
 
-function GroupSection(props: Parameters<typeof FileCard>[0] & { group: { groupKey: string; patientName: string | null; pages: number[] | null; lines: Array<Cms1500ImportLine | EobImportLine>; warnings: string[]; unresolvedClaimTotals: Array<{ dateOfService: string | null; cptCodes: string | null; planPaid: number; patientResponsibility: number | null; cptCount: number }> }; previewGroup: PreviewGroup }) {
+function GroupSection(props: Parameters<typeof FileCard>[0] & { group: { groupKey: string; patientName: string | null; pages: number[] | null; claimIdentifier: string | null; lines: Array<Cms1500ImportLine | EobImportLine>; warnings: string[]; unresolvedClaimTotals: Array<{ dateOfService: string | null; cptCodes: string | null; planPaid: number | null; patientResponsibility: number | null; cptCount: number }> }; previewGroup: PreviewGroup }) {
   const { kind, mode, entry, roster, contextPatient, group, previewGroup, onPatient, onConfirmPatient } = props;
   const review = entry.review!;
+  const csvGroup = entry.csvText != null;
   const p = previewGroup.patient;
   const chosen = review.patientChoice[group.groupKey] ?? p.patientId ?? undefined;
   const options = p.status === "unreadable" && mode === "bulk"
@@ -506,6 +606,7 @@ function GroupSection(props: Parameters<typeof FileCard>[0] & { group: { groupKe
     <div className="rounded-lg border border-border" data-testid="claim-import-group">
       <div className="flex flex-wrap items-center gap-2 bg-muted/40 px-3 py-2 text-sm">
         <span className="text-muted-foreground">In file:</span>
+        {csvGroup && group.claimIdentifier && <span className="font-mono text-xs">Claim {group.claimIdentifier}</span>}
         <span className="font-medium">{group.patientName ?? "Patient name unreadable"}</span>
         {group.pages && <span className="text-xs text-muted-foreground">page{group.pages.length > 1 ? "s" : ""} {group.pages.join(", ")}</span>}
         <span className="text-muted-foreground">→</span>
@@ -542,7 +643,11 @@ function GroupSection(props: Parameters<typeof FileCard>[0] & { group: { groupKe
       {group.unresolvedClaimTotals.length > 0 && (
         <ul className="space-y-1 bg-amber-50 px-3 py-2 text-xs text-amber-900">
           {group.unresolvedClaimTotals.map((t, i) => (
-            <li key={i}>Combined plan payment {money(t.planPaid)} for {t.cptCount} lines on {dateText(t.dateOfService)} ({t.cptCodes}) — not saved to any line. Allocate it manually if needed.</li>
+            <li key={i}>
+              {t.planPaid != null ? `Combined plan payment ${money(t.planPaid)}` : "Combined claim total"}
+              {t.patientResponsibility != null ? `${t.planPaid != null ? "," : ""} patient responsibility ${money(t.patientResponsibility)}` : ""}
+              {` for ${t.cptCount} lines on ${dateText(t.dateOfService)} (${t.cptCodes}) — not saved to any line. Allocate it manually if needed.`}
+            </li>
           ))}
         </ul>
       )}
@@ -592,6 +697,7 @@ function LineRow(props: Parameters<typeof FileCard>[0] & { line: Cms1500ImportLi
     <div className="grid grid-cols-1 gap-2 px-3 py-2 text-xs md:grid-cols-[minmax(0,1fr)_minmax(14rem,22rem)] md:items-start" data-testid="claim-import-line">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         {cms && cms.page != null && <span className="text-muted-foreground">p{cms.page}{cms.slot != null ? ` r${cms.slot}` : ""}</span>}
+        {line.sourceRow != null && <span className="text-muted-foreground">Row {line.sourceRow}</span>}
         <span>{cms ? cell("dateOfService", cms.dateOfService, "Date of service", "w-28") : dateText(eob!.dateOfService)}</span>
         <span className="font-medium">{cms ? cell("cptCodes", cms.cptCodes, "CPT", "w-16") : eob!.cptCodes}</span>
         <span>Mod {cms ? cell("modifier", cms.modifier, "Modifiers", "w-20") : eob!.modifier ?? "—"}</span>
@@ -607,6 +713,7 @@ function LineRow(props: Parameters<typeof FileCard>[0] & { line: Cms1500ImportLi
             <span>Billed {money(eob.chargeAmount)}</span>
             <span>Paid {money(eob.insuranceReimbursement)}</span>
             <span>Pt resp. {money(eob.patientAmountDue)}</span>
+            {eob.patientAmountPaid != null && <span>Pt paid {money(eob.patientAmountPaid)}</span>}
             {eob.claimStatus && <span className="capitalize">{eob.claimStatus}</span>}
           </>
         )}
@@ -643,7 +750,7 @@ function Cms1500Action({ line, decision, periodOptions, flagged, onDecision }: {
     >
       {resolvedPeriod == null && <option value="">Choose period…</option>}
       {Array.from(new Set([...(resolvedPeriod != null ? [resolvedPeriod] : []), ...periodChoices])).map(n => (
-        <option key={n} value={n}>Period {n}{n === resolvedPeriod ? " (matches visit dates)" : ""}</option>
+        <option key={n} value={n}>Period {n}{n === resolvedPeriod ? (period?.status === "resolved" && period.basis === "file" ? " (from file)" : " (matches visit dates)") : ""}</option>
       ))}
     </select>
   );

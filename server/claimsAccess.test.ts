@@ -144,7 +144,7 @@ describe("claims.* requires Claims access (Owner/Super Admin, Clinic Admin)", ()
     expect(CLAIM_PROCEDURES).toEqual(expect.arrayContaining([
       "getByPatientAndPeriod", "create", "update", "delete", "upsert", "historyForClaim",
       "cms1500EnrichmentPreview", "cms1500EnrichmentCommit", "bulkImportFromEOB",
-      "importPreview", "importCommit",
+      "importPreview", "importCommit", "csvImportPreview", "csvImportCommit",
       "markResolved", "getFollowUpClaims", "getStatusCounts",
     ]));
   });

@@ -1815,7 +1815,7 @@ function registerStorageProxy(app2) {
 // server/claimUpload.ts
 import { Router } from "express";
 import multer from "multer";
-import Papa from "papaparse";
+import Papa2 from "papaparse";
 import * as XLSX from "xlsx";
 import { execSync } from "child_process";
 import { writeFileSync, unlinkSync } from "fs";
@@ -3410,6 +3410,7 @@ import { createHash } from "node:crypto";
 
 // shared/claimImport.ts
 var CLAIM_IMPORT_KEY_RE = /^[A-Za-z0-9:_.,-]{1,160}$/;
+var CLAIM_IMPORT_STATUSES = ["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"];
 var SHA256_RE = /^[0-9a-f]{64}$/;
 function resolveAuthPeriod(visits, dateOfService) {
   const periods = Array.from(new Set(visits.map((v) => v.authPeriod))).sort((a, b) => a - b);
@@ -3427,6 +3428,32 @@ function resolveAuthPeriod(visits, dateOfService) {
   const anyDated = visits.some((v) => v.dateOfService);
   if (periods.length === 1 && !anyDated) return { status: "resolved", authPeriod: periods[0], basis: "single_period" };
   return { status: "uncertain", options };
+}
+function resolveAuthPeriodWithFilePeriod(visits, dateOfService, filePeriod) {
+  const base = resolveAuthPeriod(visits, dateOfService);
+  const known = Array.from(new Set(visits.map((v) => v.authPeriod))).sort((a, b) => a - b);
+  const allowed = known.length > 0 ? known : [1];
+  if (!allowed.includes(filePeriod)) {
+    return {
+      status: "uncertain",
+      options: base.status === "uncertain" ? base.options : allowed,
+      note: `The file says period ${filePeriod}, which is not one of this patient's authorization periods (${allowed.join(", ")}). Choose the period.`
+    };
+  }
+  if (base.status === "resolved") {
+    if (base.authPeriod === filePeriod) return base;
+    return {
+      status: "uncertain",
+      options: [base.authPeriod, filePeriod].sort((a, b) => a - b),
+      note: `The file says period ${filePeriod}, but the visit dates place this date of service in period ${base.authPeriod}. Choose the period.`
+    };
+  }
+  if (base.options.includes(filePeriod)) return { status: "resolved", authPeriod: filePeriod, basis: "file" };
+  return {
+    status: "uncertain",
+    options: Array.from(/* @__PURE__ */ new Set([...base.options, filePeriod])).sort((a, b) => a - b),
+    note: `The file says period ${filePeriod}, but the visit dates point to period ${base.options.join(" or ")}. Choose the period.`
+  };
 }
 function normalizeModifierSet(modifier) {
   if (!modifier) return "";
@@ -3466,7 +3493,7 @@ function classifyCms1500Line(params) {
     };
   }
   if (period.status === "uncertain") {
-    return { status: "period_required", candidates: [], associableIds: [], period, reason: "Choose the authorization period for this date of service." };
+    return { status: "period_required", candidates: [], associableIds: [], period, reason: period.note ?? "Choose the authorization period for this date of service." };
   }
   return { status: "ready_new", candidates: [], associableIds: [], period };
 }
@@ -3523,6 +3550,39 @@ function classifyEobLine(params) {
   }
   return { status: "matched", targetClaimId: target.id, candidates: [target] };
 }
+function classifyEobLineForTarget(params) {
+  const { line, documentId, existing, target } = params;
+  const dos = line.dateOfService;
+  const cpt = (line.cptCodes ?? "").trim();
+  if (!dos || !cpt) return { status: "invalid", candidates: [], reason: "Date of service and CPT must both be readable." };
+  const saved = documentId ? existing.find((r) => r.eobDocumentId === documentId && r.eobLineKey === line.sourceLineKey) : void 0;
+  if (saved) return { status: "already_saved", targetClaimId: saved.id, candidates: [] };
+  const period = target.authPeriod ?? null;
+  let pool = period != null ? existing.filter((r) => r.authPeriod === period) : existing;
+  const ref = target.cms1500Ref;
+  if (ref) {
+    const row = ref.documentId ? existing.find((r) => r.cms1500DocumentId === ref.documentId && r.cms1500LineKey === ref.lineKey) : void 0;
+    if (!row) {
+      return { status: "cms1500_required", candidates: [], reason: `${UPLOAD_CMS1500_FIRST} CMS1500 line ${ref.label} is not saved for this patient on this date of service.` };
+    }
+    if ((row.cptCodes ?? "").trim() !== cpt) {
+      return { status: "invalid", candidates: [], reason: `CMS1500 line ${ref.label} is CPT ${row.cptCodes ?? "\u2014"}, not ${cpt}. Fix the CMS1500 reference in the file.` };
+    }
+    if (period != null && row.authPeriod !== period) {
+      return { status: "invalid", candidates: [], reason: `CMS1500 line ${ref.label} is in period ${row.authPeriod}, not period ${period}. Fix auth_period in the file.` };
+    }
+    pool = [row];
+  }
+  const result = classifyEobLine({ line, documentId, existing: pool });
+  if (result.status === "cms1500_required" && period != null && pool.length !== existing.length) {
+    return { ...result, reason: `${result.reason} (No CMS1500 line on this date and CPT in period ${period}.)` };
+  }
+  return result;
+}
+function allowedEobTargets(c) {
+  if (c.status === "invalid" || c.status === "cms1500_required") return [];
+  return Array.from(/* @__PURE__ */ new Set([...c.targetClaimId ? [c.targetClaimId] : [], ...c.candidates.map((x) => x.id)]));
+}
 
 // server/claimImportKeys.ts
 function sha256Hex(buffer) {
@@ -3535,12 +3595,12 @@ function sanitizeKeyPart(value) {
 function groupKeyFor(identity) {
   return "g" + createHash("sha256").update(identity.trim().toUpperCase()).digest("hex").slice(0, 12);
 }
-function finalizeKey(groupKey, lineId) {
-  const key2 = `${groupKey}:${lineId}`.slice(0, 160);
+function finalizeKey(groupKey2, lineId) {
+  const key2 = `${groupKey2}:${lineId}`.slice(0, 160);
   if (!CLAIM_IMPORT_KEY_RE.test(key2)) throw new Error(`Generated source line key is invalid: ${key2}`);
   return key2;
 }
-function assignCms1500LineKeys(groupKey, lines) {
+function assignCms1500LineKeys(groupKey2, lines) {
   const positional = lines.every((l) => l.page != null && l.slot != null) && new Set(lines.map((l) => `${l.page}:${l.slot}`)).size === lines.length;
   const seen = /* @__PURE__ */ new Map();
   for (const line of lines) {
@@ -3553,11 +3613,11 @@ function assignCms1500LineKeys(groupKey, lines) {
       seen.set(content, n + 1);
       id = `${content}_${n}`;
     }
-    line.sourceLineKey = finalizeKey(groupKey, id);
+    line.sourceLineKey = finalizeKey(groupKey2, id);
   }
   return lines;
 }
-function assignEobLineKeys(groupKey, lines) {
+function assignEobLineKeys(groupKey2, lines) {
   const seen = /* @__PURE__ */ new Map();
   for (const line of lines) {
     const content = [
@@ -3570,7 +3630,7 @@ function assignEobLineKeys(groupKey, lines) {
     ].map(sanitizeKeyPart).join("_");
     const n = seen.get(content) ?? 0;
     seen.set(content, n + 1);
-    line.sourceLineKey = finalizeKey(groupKey, `${content}_${n}`);
+    line.sourceLineKey = finalizeKey(groupKey2, `${content}_${n}`);
   }
   return lines;
 }
@@ -3607,7 +3667,7 @@ function flattenLines(claim) {
 function cms1500GroupsFromClaims(groups) {
   const identities = groupIdentities("cms1500", groups);
   return groups.map((g, gi) => {
-    const groupKey = groupKeyFor(identities[gi]);
+    const groupKey2 = groupKeyFor(identities[gi]);
     const lines = g.claims.flatMap(flattenLines).map((l) => ({
       page: null,
       slot: null,
@@ -3625,11 +3685,11 @@ function cms1500GroupsFromClaims(groups) {
       notes: str(l.notes)
     }));
     return {
-      groupKey,
+      groupKey: groupKey2,
       patientName: str(g.patientName) && g.patientName !== "UNKNOWN" ? str(g.patientName) : null,
       pages: null,
       claimIdentifier: null,
-      lines: assignCms1500LineKeys(groupKey, lines),
+      lines: assignCms1500LineKeys(groupKey2, lines),
       warnings: [],
       unresolvedClaimTotals: []
     };
@@ -3638,7 +3698,7 @@ function cms1500GroupsFromClaims(groups) {
 function eobGroupsFromClaims(groups) {
   const identities = groupIdentities("eob", groups);
   return groups.map((g, gi) => {
-    const groupKey = groupKeyFor(identities[gi]);
+    const groupKey2 = groupKeyFor(identities[gi]);
     const unresolvedClaimTotals = [];
     for (const c of g.claims) {
       if (c.unresolvedClaimTotal) {
@@ -3668,11 +3728,11 @@ function eobGroupsFromClaims(groups) {
       notes: str(l.notes)
     }));
     return {
-      groupKey,
+      groupKey: groupKey2,
       patientName: str(g.patientName),
       pages: null,
       claimIdentifier: null,
-      lines: assignEobLineKeys(groupKey, lines),
+      lines: assignEobLineKeys(groupKey2, lines),
       warnings: unresolvedClaimTotals.length > 0 ? [`${unresolvedClaimTotals.length} claim block(s) report one combined plan payment for several lines. Those amounts are not saved to any line \u2014 review them manually.`] : [],
       unresolvedClaimTotals
     };
@@ -4234,20 +4294,263 @@ function assembleCms1500Pages(pages, pageCount, missingPages = []) {
     }
     const flaggedCount = lines.filter((l) => l.unreadable.length > 0).length;
     if (flaggedCount > 0) groupWarnings.push(`${flaggedCount} line(s) have unreadable values left blank \u2014 review the flagged cells.`);
-    const groupKey = groupKeyFor(
+    const groupKey2 = groupKeyFor(
       `cms1500-scan:${b.identity.name ?? "unidentified"}:${b.identity.insuredId ?? ""}:${b.identity.account ?? ""}:${b.identity.claim ?? ""}:${patientName ? "" : `p${pageNums[0]}`}:${gi}`
     );
     return {
-      groupKey,
+      groupKey: groupKey2,
       patientName,
       pages: pageNums,
       claimIdentifier: b.pages.map((p) => clean(p.patientAccountNumber) ?? clean(p.claimNumber)).find(Boolean) ?? null,
-      lines: assignCms1500LineKeys(groupKey, lines),
+      lines: assignCms1500LineKeys(groupKey2, lines),
       warnings: groupWarnings,
       unresolvedClaimTotals: []
     };
   });
   return { groups, warnings };
+}
+
+// shared/claimCsvTemplates.ts
+import Papa from "papaparse";
+var CLAIM_CSV_STATUS_VALUES = ["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"];
+var CSV_DATE_FORMATS = "YYYY-MM-DD or MM/DD/YYYY";
+var F = (header, required, type, help, maxLength) => ({ header, required, type, help, ...maxLength ? { maxLength } : {} });
+var PATIENT_FIELDS = [
+  F("patient_name", true, "patient_name", "Patient name as it appears on the dashboard, e.g. DOE, JANE."),
+  F("patient_id", false, "uuid", "Dashboard patient ID, only if you copied it from the dashboard. Never make one up \u2014 leave blank to match by name.")
+];
+var SERVICE_FIELDS = [
+  F("date_of_service", true, "date", `Date of service (${CSV_DATE_FORMATS}).`)
+];
+var CMS1500_CSV_FIELDS = [
+  F("cms1500_claim_id", true, "claim_id", "Your stable ID for this CMS1500 claim form (e.g. the patient account no. in Box 26). Same value on every line of the form and on every re-import. One patient per ID."),
+  F("cms1500_line_id", true, "line_id", "Stable ID of this service line within the claim, e.g. 1, 2, 3. Keep it the same on re-import. Two identical CPT lines need two different IDs."),
+  ...PATIENT_FIELDS,
+  F("auth_period", false, "period", "Authorization period number (1, 2, \u2026). Blank = decided from the patient's visit dates; a mismatch asks you to choose."),
+  ...SERVICE_FIELDS,
+  F("place_of_service", false, "pos", "Box 24B place-of-service code, 2 digits (e.g. 11, 02)."),
+  F("cpt_code", true, "cpt", "One CPT/HCPCS code (Box 24D), e.g. 97110."),
+  F("modifiers", false, "modifiers", 'Up to 4 modifiers in ONE quoted cell, comma-separated, e.g. "GP, 59".'),
+  F("units", false, "units", "Units (Box 24G), whole number 1\u2013999."),
+  F("diagnosis_codes", false, "diagnosis", 'ICD-10 codes for this line in pointer order, in ONE quoted cell, comma-separated, e.g. "M54.50, M25.561".'),
+  F("visit_number", false, "visit_number", "Visit number, only if known from your records. Never calculated."),
+  F("claim_submitted_date", false, "date", `Date the claim was submitted / Box 31 date (${CSV_DATE_FORMATS}).`),
+  F("insurance_billed", false, "text", "Value for the Insurance Billed column, e.g. the Box 11 insured group number.", 60)
+];
+var EOB_CSV_FIELDS = [
+  F("reimbursement_id", true, "claim_id", "Your stable ID for this adjudicated claim on the EOB / remittance (e.g. the payer claim number). Same value on every line of that claim and on every re-import. One patient per ID."),
+  F("reimbursement_line_id", true, "line_id", "Stable ID of this payment line within the claim, e.g. 1, 2, 3. Keep it the same on re-import."),
+  F("cms1500_claim_id", false, "claim_id", "Recommended: the cms1500_claim_id of the CMS1500 CSV row this payment belongs to. Fill both CMS1500 columns or neither."),
+  F("cms1500_line_id", false, "line_id", "Recommended: the cms1500_line_id of that CMS1500 row. With both, the payment is applied to exactly that line."),
+  ...PATIENT_FIELDS,
+  F("auth_period", false, "period", "Authorization period number. When filled, only CMS1500 lines in that period are considered."),
+  ...SERVICE_FIELDS,
+  F("cpt_code", true, "cpt", "CPT/HCPCS code of the adjudicated line, e.g. 97110."),
+  F("modifiers", false, "modifiers", 'Modifiers in ONE quoted cell, comma-separated, e.g. "GP, 59".'),
+  F("units", false, "units", "Units, whole number 1\u2013999."),
+  F("billed_charge", false, "money", "Billed charge for this line."),
+  F("insurance_paid", false, "money", "Amount the insurance plan paid for THIS line. Never put a claim total here."),
+  F("patient_responsibility", false, "money", "What the EOB says the patient owes for this line (deductible, copay, coinsurance). This is not a payment."),
+  F("patient_paid", false, "money", "What the patient has actually paid for this line. Leave blank if unknown \u2014 it is never calculated from other amounts."),
+  F("claim_status", false, "status", `Adjudication status: ${CLAIM_CSV_STATUS_VALUES.join(", ")}.`),
+  F("payment_date", false, "date", `Check / payment date (${CSV_DATE_FORMATS}).`),
+  F("payer_claim_number", false, "text", "Payer's claim number (OA claim #).", 80),
+  F("check_or_eft_number", false, "text", "Check, EFT or virtual card number. Leading zeros are kept.", 80),
+  F("claim_total_paid", false, "money", "Only when the EOB prints one plan payment for the whole claim: that total, same value on every row of the claim. It is NOT saved to any line \u2014 it is shown for manual review."),
+  F("claim_total_patient_responsibility", false, "money", "Only when the EOB prints one patient-responsibility total for the whole claim. Not saved to any line; shown for review.")
+];
+var EXAMPLE_ID_PREFIX = "EXAMPLE";
+var SAMPLE_PATIENT = "SAMPLE, PATIENT";
+var CLAIM_CSV_TEMPLATES = {
+  cms1500: {
+    kind: "cms1500",
+    fileName: "cms1500-import-template.csv",
+    title: "CMS1500",
+    claimIdHeader: "cms1500_claim_id",
+    lineIdHeader: "cms1500_line_id",
+    fields: CMS1500_CSV_FIELDS,
+    sampleRows: [
+      { cms1500_claim_id: "EXAMPLE-CMS-1001", cms1500_line_id: "1", patient_name: SAMPLE_PATIENT, auth_period: "1", date_of_service: "2026-01-05", place_of_service: "11", cpt_code: "97110", modifiers: "GP", units: "2", diagnosis_codes: "M54.50, M25.561", claim_submitted_date: "2026-01-10", insurance_billed: "SYN-GRP-0042" },
+      { cms1500_claim_id: "EXAMPLE-CMS-1001", cms1500_line_id: "2", patient_name: SAMPLE_PATIENT, auth_period: "1", date_of_service: "2026-01-05", place_of_service: "11", cpt_code: "97110", modifiers: "GP", units: "2", diagnosis_codes: "M54.50, M25.561", claim_submitted_date: "2026-01-10", insurance_billed: "SYN-GRP-0042" },
+      { cms1500_claim_id: "EXAMPLE-CMS-1001", cms1500_line_id: "3", patient_name: SAMPLE_PATIENT, date_of_service: "01/05/2026", place_of_service: "02", cpt_code: "97140", modifiers: "GP, 59", units: "1", diagnosis_codes: "M54.50", visit_number: "4", claim_submitted_date: "01/10/2026" }
+    ],
+    notes: [
+      "CMS1500 import template. One row per CMS1500 service line (Box 24). Import this BEFORE the Insurance Reimbursement CSV.",
+      "Amounts are not part of this template: billed and paid amounts come from the Insurance Reimbursement CSV.",
+      "Repeated identical CPT lines are kept as separate lines - give each its own cms1500_line_id.",
+      `Dates: ${CSV_DATE_FORMATS}. Put several modifiers or diagnosis codes in ONE quoted cell separated by commas.`,
+      "Delete the EXAMPLE rows before importing - they are refused. Lines starting with # above the header are ignored."
+    ]
+  },
+  eob: {
+    kind: "eob",
+    fileName: "insurance-reimbursement-import-template.csv",
+    title: "Insurance Reimbursement",
+    claimIdHeader: "reimbursement_id",
+    lineIdHeader: "reimbursement_line_id",
+    fields: EOB_CSV_FIELDS,
+    sampleRows: [
+      { reimbursement_id: "EXAMPLE-ERA-5001", reimbursement_line_id: "1", cms1500_claim_id: "EXAMPLE-CMS-1001", cms1500_line_id: "1", patient_name: SAMPLE_PATIENT, date_of_service: "2026-01-05", cpt_code: "97110", modifiers: "GP", units: "2", billed_charge: "150.00", insurance_paid: "80.00", patient_responsibility: "20.00", claim_status: "approved", payment_date: "2026-02-01", payer_claim_number: "SYN-PAYER-0001", check_or_eft_number: "000123" },
+      { reimbursement_id: "EXAMPLE-ERA-5001", reimbursement_line_id: "2", cms1500_claim_id: "EXAMPLE-CMS-1001", cms1500_line_id: "2", patient_name: SAMPLE_PATIENT, date_of_service: "2026-01-05", cpt_code: "97110", modifiers: "GP", units: "2", billed_charge: "150.00", insurance_paid: "80.00", patient_responsibility: "20.00", patient_paid: "0", claim_status: "approved", payment_date: "2026-02-01", payer_claim_number: "SYN-PAYER-0001", check_or_eft_number: "000123" },
+      { reimbursement_id: "EXAMPLE-ERA-5001", reimbursement_line_id: "3", cms1500_claim_id: "EXAMPLE-CMS-1001", cms1500_line_id: "3", patient_name: SAMPLE_PATIENT, date_of_service: "01/05/2026", cpt_code: "97140", modifiers: "GP, 59", units: "1", billed_charge: "95.00", insurance_paid: "0", claim_status: "denied", payment_date: "02/01/2026", payer_claim_number: "SYN-PAYER-0001", check_or_eft_number: "000123" }
+    ],
+    notes: [
+      "Insurance Reimbursement import template. One row per adjudicated service line. Import the matching CMS1500 CSV FIRST.",
+      "Each row is applied only to an existing CMS1500 line. Fill cms1500_claim_id + cms1500_line_id to point at the exact line.",
+      "patient_responsibility (what the patient owes) and patient_paid (what the patient actually paid) are different - neither is calculated.",
+      "Blank amount = unknown / leave unchanged. 0 = zero. Claim totals go only in claim_total_* columns and are never saved to a line.",
+      `Dates: ${CSV_DATE_FORMATS}. claim_status: ${CLAIM_CSV_STATUS_VALUES.join(" / ")}.`,
+      "Delete the EXAMPLE rows before importing - they are refused. Lines starting with # above the header are ignored."
+    ]
+  }
+};
+var CLAIM_CSV_MAX_ROWS = 1e3;
+var CLAIM_CSV_MAX_BYTES = 2e6;
+function stripLeadingCommentLines(text) {
+  const lines = text.replace(/^﻿/, "").split(/\r\n|\n|\r/);
+  let i = 0;
+  while (i < lines.length && (/^\s*"?#/.test(lines[i]) || lines[i].trim() === "" || /^[,\s]*$/.test(lines[i]))) i++;
+  return { body: lines.slice(i).join("\n"), skippedLines: i };
+}
+function normalizeHeader(h) {
+  return h.replace(/^﻿/, "").trim().toLowerCase();
+}
+function readCsvHeaders(text) {
+  const { body } = stripLeadingCommentLines(text);
+  const firstLine = Papa.parse(body, { preview: 1, skipEmptyLines: true });
+  return (firstLine.data[0] ?? []).map(normalizeHeader).filter(Boolean);
+}
+function detectCsvTemplate(headers) {
+  const h = new Set(headers.map(normalizeHeader));
+  if (h.has("reimbursement_id") || h.has("reimbursement_line_id")) return "eob";
+  if (h.has("cms1500_claim_id") || h.has("cms1500_line_id")) return "cms1500";
+  if (h.has("patient name") || h.has("authorized sessions")) return "patient";
+  return "unknown";
+}
+function detectCsvTemplateFromText(text) {
+  return detectCsvTemplate(readCsvHeaders(text));
+}
+var UPLOAD_LOCATION = {
+  cms1500: "Bulk Upload \u2192 CMS1500",
+  eob: "Bulk Upload \u2192 Insurance Reimbursement",
+  patient: "Bulk Upload \u2192 Patient Data",
+  unknown: ""
+};
+function wrongTemplateMessage(expected, detected) {
+  if (detected === expected) return null;
+  const expectedName = expected === "patient" ? "Patient Data" : CLAIM_CSV_TEMPLATES[expected]?.title ?? expected;
+  if (detected === "unknown") {
+    return expected === "patient" ? null : `This file is not the ${expectedName} CSV template. Download ${CLAIM_CSV_TEMPLATES[expected].fileName} and use its header row.`;
+  }
+  const detectedName = detected === "patient" ? "Patient Data" : CLAIM_CSV_TEMPLATES[detected].title;
+  return `This is the ${detectedName} CSV template, not ${expectedName}. Nothing was imported. Upload it under ${UPLOAD_LOCATION[detected]}.`;
+}
+var ok = (value) => ({ ok: true, value });
+var bad = (error) => ({ ok: false, error });
+function cleanCell(raw) {
+  if (raw == null) return "";
+  let v = String(raw).trim();
+  const literal = v.match(/^="(.*)"$/);
+  if (literal) v = literal[1].trim();
+  return v;
+}
+function parseCsvDate(v) {
+  if (!v) return ok(null);
+  let y, m, d;
+  let match = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (match) {
+    y = +match[1];
+    m = +match[2];
+    d = +match[3];
+  } else if (match = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)) {
+    m = +match[1];
+    d = +match[2];
+    y = +match[3];
+  } else return bad(`"${v}" is not a date in ${CSV_DATE_FORMATS} format.`);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d || y < 1900 || y > 2100) {
+    return bad(`"${v}" is not a real calendar date.`);
+  }
+  return ok(`${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+}
+function parseCsvMoney(v) {
+  if (!v) return ok(null);
+  const s = v.replace(/^\$/, "").trim();
+  if (/^-/.test(s) || /^\(.*\)$/.test(s)) return bad(`"${v}": negative amounts are not accepted. Leave blank if unknown.`);
+  if (!/^(\d{1,3}(,\d{3})+|\d+)(\.\d{1,2})?$/.test(s)) return bad(`"${v}" is not an amount (use e.g. 125.50).`);
+  const n = Number(s.replace(/,/g, ""));
+  if (!Number.isFinite(n) || n > 1e7) return bad(`"${v}" is out of range.`);
+  return ok(Math.round(n * 100) / 100);
+}
+function parseInteger(v, min, max, label) {
+  if (!v) return ok(null);
+  if (!/^\d+$/.test(v)) return bad(`${label} "${v}" must be a whole number.`);
+  const n = Number(v);
+  if (n < min || n > max) return bad(`${label} "${v}" must be between ${min} and ${max}.`);
+  return ok(n);
+}
+function splitCodes(v) {
+  return v.toUpperCase().split(/[\s,;]+/).filter(Boolean);
+}
+var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var ICD10_RE = /^[A-Z][0-9][0-9A-Z](\.?[0-9A-Z]{1,4})?$/;
+function parseCsvCell(field, raw) {
+  const v = cleanCell(raw);
+  if (!v) return field.required ? bad(`${field.header} is required.`) : ok(null);
+  switch (field.type) {
+    case "claim_id": {
+      const id = v.replace(/\s+/g, " ").toUpperCase();
+      if (id.length > 80) return bad(`${field.header} is longer than 80 characters.`);
+      if (/^[#=+@]/.test(id)) return bad(`${field.header} "${v}" cannot start with #, =, + or @.`);
+      return ok(id);
+    }
+    case "line_id": {
+      const id = v.toUpperCase();
+      if (!/^[A-Z0-9._-]{1,40}$/.test(id)) return bad(`${field.header} "${v}" may only contain letters, digits, ".", "_" and "-" (max 40).`);
+      return ok(id);
+    }
+    case "patient_name":
+      return v.length > 200 ? bad("patient_name is longer than 200 characters.") : ok(v.replace(/\s+/g, " "));
+    case "uuid":
+      return UUID_RE.test(v) ? ok(v.toLowerCase()) : bad(`${field.header} "${v}" is not a dashboard patient ID. Leave it blank to match by name.`);
+    case "period":
+      return parseInteger(v, 1, 1e3, field.header);
+    case "date":
+      return parseCsvDate(v);
+    case "pos":
+      if (/^\d$/.test(v)) return bad(`place_of_service "${v}" must be 2 digits (e.g. 0${v}) \u2014 the spreadsheet may have dropped a leading zero.`);
+      return /^\d{2}$/.test(v) ? ok(v) : bad(`place_of_service "${v}" must be a 2-digit code.`);
+    case "cpt": {
+      const c = v.toUpperCase();
+      return /^[A-Z0-9]{5}$/.test(c) ? ok(c) : bad(`cpt_code "${v}" must be one 5-character CPT/HCPCS code (one code per row).`);
+    }
+    case "modifiers": {
+      const mods = splitCodes(v);
+      if (mods.length > 4) return bad(`modifiers "${v}": at most 4 modifiers.`);
+      const badMod = mods.find((m) => !/^[A-Z0-9]{2}$/.test(m));
+      if (badMod) return bad(`modifiers "${v}": "${badMod}" is not a 2-character modifier.`);
+      return ok(Array.from(new Set(mods)).join(", "));
+    }
+    case "units":
+      return parseInteger(v, 1, 999, field.header);
+    case "visit_number":
+      return parseInteger(v, 1, 1e4, field.header);
+    case "diagnosis": {
+      const codes = splitCodes(v);
+      if (codes.length > 12) return bad("diagnosis_codes: at most 12 codes.");
+      const badCode = codes.find((c) => !ICD10_RE.test(c));
+      if (badCode) return bad(`diagnosis_codes "${v}": "${badCode}" is not an ICD-10 code.`);
+      return ok(codes.join(", "));
+    }
+    case "money":
+      return parseCsvMoney(v);
+    case "status": {
+      const s = v.toLowerCase().replace(/\s+/g, "_");
+      return CLAIM_CSV_STATUS_VALUES.includes(s) ? ok(s) : bad(`claim_status "${v}" must be one of: ${CLAIM_CSV_STATUS_VALUES.join(", ")}.`);
+    }
+    case "text":
+      return v.length > (field.maxLength ?? 200) ? bad(`${field.header} is longer than ${field.maxLength ?? 200} characters.`) : ok(v);
+  }
 }
 
 // server/claimUpload.ts
@@ -4508,7 +4811,7 @@ function extractXlsxText(buffer) {
 }
 function extractCsvText(buffer) {
   const csvString = buffer.toString("utf-8");
-  const result = Papa.parse(csvString, { header: true, skipEmptyLines: true });
+  const result = Papa2.parse(csvString, { header: true, skipEmptyLines: true });
   if (result.errors.length > 0 && result.data.length === 0) {
     throw new Error("Could not parse CSV file.");
   }
@@ -4599,6 +4902,11 @@ function registerClaimUploadRoute(app2) {
         if (isXlsx) {
           extractedText = extractXlsxText(buffer);
         } else if (isCsv) {
+          const template = detectCsvTemplateFromText(buffer.toString("utf-8"));
+          if (template === "cms1500" || template === "eob") {
+            res.status(422).json({ error: `This is the ${CLAIM_CSV_TEMPLATES[template].title} CSV template. Nothing was imported. Upload it under Bulk Upload \u2192 ${CLAIM_CSV_TEMPLATES[template].title}.` });
+            return;
+          }
           extractedText = extractCsvText(buffer);
         } else {
           try {
@@ -4874,7 +5182,7 @@ function registerClaimUploadRoute(app2) {
 }
 
 // server/routers.ts
-import { z as z4 } from "zod";
+import { z as z5 } from "zod";
 import bcrypt from "bcryptjs";
 import { TRPCError as TRPCError3 } from "@trpc/server";
 
@@ -5150,9 +5458,10 @@ var cms1500LineInput = z3.object({
   diagnosisCodes: shortText(200),
   claimSubmittedDate: isoDate.nullable(),
   insuranceBilled: shortText(60),
+  visitNumber: z3.number().int().min(1).max(1e4).nullable().optional(),
   unreadable: z3.array(z3.string().max(40)).max(20)
 });
-var CLAIM_STATUSES = ["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"];
+var CLAIM_STATUSES = CLAIM_IMPORT_STATUSES;
 var eobLineInput = z3.object({
   ...lineIdentity,
   chargeAmount: money,
@@ -5225,6 +5534,14 @@ var importCommitInput = z3.discriminatedUnion("kind", [
     })).min(1).max(MAX_GROUPS)
   })
 ]);
+function linePeriod(visits, key2, dateOfService, hints) {
+  const fp = hints.filePeriods?.[key2];
+  return fp != null ? resolveAuthPeriodWithFilePeriod(visits, dateOfService, fp) : resolveAuthPeriod(visits, dateOfService);
+}
+function classifyEob(line, documentId, existing, hints) {
+  const target = hints.eobTargets?.[line.sourceLineKey];
+  return target ? classifyEobLineForTarget({ line, documentId, existing, target }) : classifyEobLine({ line, documentId, existing });
+}
 function resolveGroupPatient(params) {
   const { patientName, requestedPatientId, contextPatient, allPatients } = params;
   const pick = (allowed) => requestedPatientId && allowed.includes(requestedPatientId) ? requestedPatientId : null;
@@ -5268,14 +5585,14 @@ function resolveGroupPatient(params) {
   }
   return { status: "unmatched", patientId: null, patientName: null, candidates: [], allowedIds: [], requiresConfirmation: false };
 }
-async function loadPatients(contextPatientId) {
-  const allPatients = (await getAllPatients()).map((p) => ({ id: p.id, name: p.name }));
+async function loadPatients(contextPatientId, roster) {
+  const allPatients = roster ?? (await getAllPatients()).map((p) => ({ id: p.id, name: p.name }));
   const contextPatient = contextPatientId ? allPatients.find((p) => p.id === contextPatientId) ?? null : null;
   if (contextPatientId && !contextPatient) throw new ClaimImportRuleError("not_found", "The selected patient no longer exists.");
   return { allPatients, contextPatient };
 }
-async function previewClaimImport(input) {
-  const { allPatients, contextPatient } = await loadPatients(input.contextPatientId);
+async function previewClaimImport(input, hints = {}) {
+  const { allPatients, contextPatient } = await loadPatients(input.contextPatientId, hints.roster);
   const documentId = await findClaimImportDocumentId(input.kind, input.document.sha256);
   const groups = [];
   for (const group of input.groups) {
@@ -5306,13 +5623,13 @@ async function previewClaimImport(input) {
       lines = g.lines.map((l) => ({
         sourceLineKey: l.sourceLineKey,
         kind: "cms1500",
-        ...classifyCms1500Line({ line: l, documentId, siblingLineKeys: siblings, existing, period: resolveAuthPeriod(visits, l.dateOfService) })
+        ...classifyCms1500Line({ line: l, documentId, siblingLineKeys: siblings, existing, period: linePeriod(visits, l.sourceLineKey, l.dateOfService, hints) })
       }));
     } else {
       lines = group.lines.map((l) => ({
         sourceLineKey: l.sourceLineKey,
         kind: "eob",
-        ...classifyEobLine({ line: l, documentId, existing })
+        ...classifyEob(l, documentId, existing, hints)
       }));
     }
     groups.push({ groupKey: group.groupKey, patient, lines, periodOptions });
@@ -5362,9 +5679,9 @@ function decideAuthPeriod(params) {
   }
   return { ok: false, reason: "period_required" };
 }
-async function commitClaimImport(input, actor) {
-  const { allPatients, contextPatient } = await loadPatients(input.contextPatientId);
-  const importBatchId = randomUUID();
+async function commitClaimImport(input, actor, hints = {}) {
+  const { allPatients, contextPatient } = await loadPatients(input.contextPatientId, hints.roster);
+  const importBatchId = hints.importBatchId ?? randomUUID();
   const source = { sha256: input.document.sha256, fileName: input.document.fileName, pageCount: input.document.pageCount };
   const results = [];
   for (const group of input.groups) {
@@ -5410,7 +5727,7 @@ async function commitClaimImport(input, actor) {
         let authPeriod = null;
         if (d.action !== "associate") {
           const requested = d.authPeriod ?? (d.periodSource === "context" ? input.contextAuthPeriod ?? null : null);
-          const resolution = resolveAuthPeriod(visits, line.dateOfService);
+          const resolution = linePeriod(visits, line.sourceLineKey, line.dateOfService, hints);
           if (requested == null) {
             authPeriod = resolution.status === "resolved" ? resolution.authPeriod : null;
           } else {
@@ -5438,14 +5755,19 @@ async function commitClaimImport(input, actor) {
             units_billed: line.unitsBilled,
             diagnosis_codes: line.diagnosisCodes,
             claim_submitted_date: line.claimSubmittedDate,
-            insurance_billed: line.insuranceBilled
+            insurance_billed: line.insuranceBilled,
+            visit_number: line.visitNumber ?? null
           },
           actor,
           importBatchId
         })));
       }
     } else {
-      for (const line of group.lines) {
+      const g = group;
+      const hinted = g.lines.some((l) => hints.eobTargets?.[l.sourceLineKey]);
+      const existing = hinted ? await listPatientClaimLinesOnDates(patientId, g.lines.map((l) => l.dateOfService ?? "")) : [];
+      const documentId = hinted ? await findClaimImportDocumentId("eob", input.document.sha256) : null;
+      for (const line of g.lines) {
         const d = line.decision;
         if (d.action === "skip") {
           lineResults.push({ sourceLineKey: line.sourceLineKey, status: "skipped" });
@@ -5458,6 +5780,13 @@ async function commitClaimImport(input, actor) {
         if (!d.claimRecordId) {
           lineResults.push(reviewResult(line.sourceLineKey, "cms1500_required"));
           continue;
+        }
+        if (hints.eobTargets?.[line.sourceLineKey]) {
+          const c = classifyEob(line, documentId, existing, hints);
+          if (!allowedEobTargets(c).includes(d.claimRecordId)) {
+            lineResults.push(c.status === "cms1500_required" || c.status === "invalid" ? reviewResult(line.sourceLineKey, c.status === "invalid" ? "invalid_input" : "cms1500_required", c.reason) : reviewResult(line.sourceLineKey, "target_not_allowed", "The chosen claim line is not one this file row can be applied to. Re-check the file and choose again."));
+            continue;
+          }
         }
         lineResults.push(await writeLine(line.sourceLineKey, () => applyEobLine({
           patientId,
@@ -5483,6 +5812,392 @@ async function commitClaimImport(input, actor) {
       }
     }
     results.push({ groupKey: group.groupKey, patientId, lines: lineResults });
+  }
+  return { importBatchId, groups: results };
+}
+
+// server/claimCsvImport.ts
+import Papa3 from "papaparse";
+import { z as z4 } from "zod";
+import { randomUUID as randomUUID2 } from "crypto";
+init_db();
+function csvDocumentSha256(kind, claimId) {
+  return sha256Hex(Buffer.from(`claims-csv:v1:${kind}:${claimId}`, "utf8"));
+}
+function csvGroupKey(kind, claimId) {
+  return groupKeyFor(`claims-csv:${kind}:${claimId}`);
+}
+function csvLineKey(kind, claimId, lineId) {
+  const key2 = `${csvGroupKey(kind, claimId)}:csv.${lineId}`;
+  if (!CLAIM_IMPORT_KEY_RE.test(key2)) throw new Error(`Generated CSV line key is invalid: ${key2}`);
+  return key2;
+}
+var refused = (kind, templateError) => ({ kind, templateError, rowErrors: [], claims: [], blockedClaimIds: [], dataRowCount: 0 });
+var normName = (s) => s.trim().toLowerCase().replace(/\s+/g, " ");
+function parseClaimCsv(kind, text) {
+  const template = CLAIM_CSV_TEMPLATES[kind];
+  if (Buffer.byteLength(text, "utf8") > CLAIM_CSV_MAX_BYTES) return refused(kind, `The file is larger than ${CLAIM_CSV_MAX_BYTES / 1e6} MB. Split it into smaller files.`);
+  const { body, skippedLines } = stripLeadingCommentLines(text);
+  const parsed = Papa3.parse(body, { skipEmptyLines: false });
+  const table = parsed.data;
+  if (table.length === 0 || table[0].every((c) => !c.trim())) return refused(kind, `The file is empty. Download ${template.fileName} and add one row per line.`);
+  const headers = table[0].map(normalizeHeader);
+  const wrong = wrongTemplateMessage(kind, detectCsvTemplate(headers));
+  if (wrong) return refused(kind, wrong);
+  const known = new Map(template.fields.map((f) => [f.header, f]));
+  const named = headers.filter(Boolean);
+  const dupes = named.filter((h, i) => named.indexOf(h) !== i);
+  if (dupes.length) return refused(kind, `Column ${Array.from(new Set(dupes)).join(", ")} appears more than once.`);
+  const unknown = named.filter((h) => !known.has(h));
+  if (unknown.length) return refused(kind, `Unknown column(s): ${unknown.join(", ")}. Use the header row from ${template.fileName}.`);
+  const missing = template.fields.filter((f) => f.required && !headers.includes(f.header)).map((f) => f.header);
+  if (missing.length) return refused(kind, `Missing required column(s): ${missing.join(", ")}.`);
+  const rowErrors = [];
+  const quoteErrorRows = new Set(parsed.errors.filter((e) => e.row != null).map((e) => e.row));
+  const rows = [];
+  for (let i = 1; i < table.length; i++) {
+    const cells = table[i];
+    if (cells.every((c) => !c.trim())) continue;
+    const row = skippedLines + i + 1;
+    const errs = [];
+    if (quoteErrorRows.has(i)) errs.push("Unbalanced quotes in this row.");
+    if (cells.length > headers.length || cells.some((c, j) => !headers[j] && c.trim())) {
+      errs.push("More cells than columns \u2014 a cell with several codes (modifiers, diagnosis codes) is probably missing its surrounding quotes.");
+    }
+    const values = {};
+    for (const field of template.fields) {
+      const j = headers.indexOf(field.header);
+      const r = parseCsvCell(field, j >= 0 ? cells[j] : "");
+      if (r.ok) values[field.header] = r.value;
+      else errs.push(r.error);
+    }
+    const claimId = values[template.claimIdHeader];
+    if (claimId && claimId.startsWith(EXAMPLE_ID_PREFIX)) errs.push("This is an example row from the template. Delete it before importing.");
+    if (kind === "eob" && values.cms1500_claim_id == null !== (values.cms1500_line_id == null)) {
+      errs.push("Fill both cms1500_claim_id and cms1500_line_id, or leave both blank.");
+    }
+    for (const message of errs) rowErrors.push({ row, claimId, message });
+    rows.push({ row, values: errs.length ? { ...values, __invalid: 1 } : values });
+  }
+  if (rows.length === 0) return refused(kind, "The file has a header row but no data rows.");
+  if (rows.length > CLAIM_CSV_MAX_ROWS) return refused(kind, `The file has ${rows.length} rows; the limit is ${CLAIM_CSV_MAX_ROWS}. Split it into smaller files.`);
+  const byClaim = /* @__PURE__ */ new Map();
+  for (const r of rows) {
+    const id = r.values[template.claimIdHeader];
+    if (!id) continue;
+    byClaim.set(id, [...byClaim.get(id) ?? [], r]);
+  }
+  const claims = [];
+  const blockedClaimIds = [];
+  for (const [claimId, claimRows] of Array.from(byClaim.entries())) {
+    const errs = [];
+    const first = claimRows[0].values;
+    const name = String(first.patient_name ?? "");
+    for (const r of claimRows) {
+      if (r.values.patient_name != null && normName(String(r.values.patient_name)) !== normName(name)) {
+        errs.push({ row: r.row, claimId, message: `patient_name differs from row ${claimRows[0].row} of the same claim. One claim belongs to one patient.` });
+      }
+      if ((r.values.patient_id ?? null) !== (first.patient_id ?? null)) {
+        errs.push({ row: r.row, claimId, message: `patient_id differs from row ${claimRows[0].row} of the same claim.` });
+      }
+    }
+    const lineIds = claimRows.map((r) => r.values[template.lineIdHeader]);
+    claimRows.forEach((r, i) => {
+      const id = lineIds[i];
+      if (id && lineIds.indexOf(id) !== i) {
+        errs.push({ row: r.row, claimId, message: `${template.lineIdHeader} "${id}" is used twice in this claim (also row ${claimRows[lineIds.indexOf(id)].row}). Give each line its own ID \u2014 identical CPT lines included.` });
+      }
+    });
+    const groupKey2 = csvGroupKey(kind, claimId);
+    const periods = {};
+    const refs = {};
+    const lines = claimRows.map(({ row, values: v }) => {
+      const lineId = v[template.lineIdHeader];
+      const sourceLineKey = lineId ? csvLineKey(kind, claimId, lineId) : `${groupKey2}:invalid.${row}`;
+      if (v.auth_period != null) periods[sourceLineKey] = v.auth_period;
+      if (kind === "cms1500") {
+        const line2 = {
+          sourceLineKey,
+          page: null,
+          slot: null,
+          dateOfService: v.date_of_service,
+          placeOfService: v.place_of_service,
+          cptCodes: v.cpt_code,
+          modifier: v.modifiers,
+          unitsBilled: v.units,
+          diagnosisPointer: null,
+          diagnosisCodes: v.diagnosis_codes,
+          claimSubmittedDate: v.claim_submitted_date,
+          insuranceBilled: v.insurance_billed,
+          visitNumber: v.visit_number,
+          lineChargeForValidation: null,
+          unreadable: [],
+          notes: null,
+          sourceRow: row
+        };
+        return line2;
+      }
+      if (v.cms1500_claim_id != null && v.cms1500_line_id != null) refs[sourceLineKey] = { claimId: v.cms1500_claim_id, lineId: v.cms1500_line_id };
+      const line = {
+        sourceLineKey,
+        page: null,
+        dateOfService: v.date_of_service,
+        cptCodes: v.cpt_code,
+        modifier: v.modifiers,
+        unitsBilled: v.units,
+        chargeAmount: v.billed_charge,
+        insuranceReimbursement: v.insurance_paid,
+        patientAmountDue: v.patient_responsibility,
+        patientAmountPaid: v.patient_paid,
+        claimStatus: v.claim_status,
+        oaClaimNumber: v.payer_claim_number,
+        checkDate: v.payment_date,
+        checkNumberVirtualCard: v.check_or_eft_number,
+        notes: null,
+        sourceRow: row
+      };
+      return line;
+    });
+    const warnings = [];
+    const unresolvedClaimTotals = [];
+    if (kind === "eob") {
+      const total = (col) => {
+        const vals = Array.from(new Set(claimRows.map((r) => r.values[col]).filter((x) => x != null)));
+        if (vals.length > 1) errs.push({ row: null, claimId, message: `${col} has different values on rows of the same claim (${vals.join(", ")}). Give the claim total once, the same on every row.` });
+        return vals.length === 1 ? vals[0] : null;
+      };
+      const paid = total("claim_total_paid");
+      const resp = total("claim_total_patient_responsibility");
+      if (paid != null || resp != null) {
+        const eobLines = lines;
+        const dates = Array.from(new Set(eobLines.map((l) => l.dateOfService)));
+        unresolvedClaimTotals.push({
+          dateOfService: dates.length === 1 ? dates[0] : null,
+          cptCodes: Array.from(new Set(eobLines.map((l) => l.cptCodes).filter(Boolean))).join(", "),
+          planPaid: paid,
+          patientResponsibility: resp,
+          cptCount: eobLines.length
+        });
+        const linePaid = eobLines.map((l) => l.insuranceReimbursement);
+        if (paid != null && paid > 0 && eobLines.length > 1 && linePaid.every((p) => p === paid)) {
+          errs.push({ row: null, claimId, message: `insurance_paid repeats the claim total (${paid.toFixed(2)}) on every line. Enter each line's own payment, or leave insurance_paid blank and keep the total only in claim_total_paid.` });
+        } else if (paid != null && linePaid.every((p) => p != null)) {
+          const sum = Math.round(linePaid.reduce((a, b) => a + b, 0) * 100) / 100;
+          if (Math.abs(sum - paid) > 4e-3) warnings.push(`Line payments add up to $${sum.toFixed(2)}, but claim_total_paid is $${paid.toFixed(2)}. Review the remittance.`);
+        }
+        warnings.push("The claim total is shown for review only. It is not saved to, divided between or copied onto any line.");
+      }
+    }
+    if (errs.length > 0 || claimRows.some((r) => r.values.__invalid)) {
+      rowErrors.push(...errs);
+      blockedClaimIds.push(claimId);
+      continue;
+    }
+    claims.push({
+      kind,
+      claimId,
+      sha256: csvDocumentSha256(kind, claimId),
+      groupKey: groupKey2,
+      patientName: name,
+      patientId: first.patient_id ?? null,
+      rows: claimRows.map((r) => r.row),
+      lines,
+      periods,
+      refs,
+      warnings,
+      unresolvedClaimTotals
+    });
+  }
+  rowErrors.sort((a, b) => (a.row ?? 0) - (b.row ?? 0));
+  return { kind, templateError: null, rowErrors, claims, blockedClaimIds, dataRowCount: rows.length };
+}
+function checkFilePatient(claim, roster) {
+  if (!claim.patientId) return null;
+  const p = roster.find((r) => r.id === claim.patientId);
+  if (!p) return `patient_id ${claim.patientId} is not a patient on the dashboard. Leave it blank to match by name.`;
+  if (!fuzzyNameMatch(claim.patientName, p.name)) return `patient_id ${claim.patientId} belongs to ${p.name}, not ${claim.patientName}.`;
+  const resolved = resolveGroupPatient({ patientName: claim.patientName, requestedPatientId: claim.patientId, contextPatient: null, allPatients: roster });
+  if (resolved.patientId && resolved.patientId !== claim.patientId) return `patient_name ${claim.patientName} matches a different patient than patient_id ${claim.patientId}.`;
+  return null;
+}
+async function loadAndCheck(kind, csvText) {
+  const parsed = parseClaimCsv(kind, csvText);
+  if (parsed.templateError) return { parsed, roster: [], claims: [] };
+  const roster = (await getAllPatients()).map((p) => ({ id: p.id, name: p.name }));
+  const claims = [];
+  for (const c of parsed.claims) {
+    const problem = checkFilePatient(c, roster);
+    if (problem) {
+      parsed.rowErrors.push({ row: c.rows[0], claimId: c.claimId, message: problem });
+      parsed.blockedClaimIds.push(c.claimId);
+    } else {
+      claims.push(c);
+    }
+  }
+  return { parsed, roster, claims };
+}
+async function hintsFor(claim, roster, cmsDocIds) {
+  if (claim.kind === "cms1500") return { filePeriods: claim.periods, roster };
+  const eobTargets = {};
+  for (const line of claim.lines) {
+    const ref = claim.refs[line.sourceLineKey];
+    let cms1500Ref = null;
+    if (ref) {
+      const sha = csvDocumentSha256("cms1500", ref.claimId);
+      if (!cmsDocIds.has(sha)) cmsDocIds.set(sha, await findClaimImportDocumentId("cms1500", sha));
+      cms1500Ref = { documentId: cmsDocIds.get(sha) ?? null, lineKey: csvLineKey("cms1500", ref.claimId, ref.lineId), label: `${ref.claimId} / line ${ref.lineId}` };
+    }
+    eobTargets[line.sourceLineKey] = { cms1500Ref, authPeriod: claim.periods[line.sourceLineKey] ?? null };
+  }
+  return { eobTargets, roster };
+}
+function lineInput(kind, l) {
+  if (kind === "cms1500") {
+    const c = l;
+    return {
+      sourceLineKey: c.sourceLineKey,
+      dateOfService: c.dateOfService,
+      cptCodes: c.cptCodes,
+      modifier: c.modifier,
+      unitsBilled: c.unitsBilled,
+      placeOfService: c.placeOfService,
+      diagnosisCodes: c.diagnosisCodes,
+      claimSubmittedDate: c.claimSubmittedDate,
+      insuranceBilled: c.insuranceBilled,
+      visitNumber: c.visitNumber ?? null,
+      unreadable: []
+    };
+  }
+  const e = l;
+  return {
+    sourceLineKey: e.sourceLineKey,
+    dateOfService: e.dateOfService,
+    cptCodes: e.cptCodes,
+    modifier: e.modifier,
+    unitsBilled: e.unitsBilled,
+    chargeAmount: e.chargeAmount,
+    insuranceReimbursement: e.insuranceReimbursement,
+    patientAmountDue: e.patientAmountDue,
+    patientAmountPaid: e.patientAmountPaid,
+    claimStatus: e.claimStatus,
+    oaClaimNumber: e.oaClaimNumber,
+    checkDate: e.checkDate,
+    checkNumberVirtualCard: e.checkNumberVirtualCard
+  };
+}
+function toImportDocument(kind, fileName, csvText, claims) {
+  return {
+    kind,
+    sha256: sha256Hex(Buffer.from(csvText, "utf8")),
+    fileName,
+    pageCount: null,
+    extractionMethod: `CSV template (${CLAIM_CSV_TEMPLATES[kind].fileName})`,
+    warnings: [],
+    groups: claims.map((c) => ({
+      groupKey: c.groupKey,
+      patientName: c.patientName,
+      pages: null,
+      claimIdentifier: c.claimId,
+      lines: c.lines,
+      warnings: c.warnings,
+      unresolvedClaimTotals: c.unresolvedClaimTotals
+    }))
+  };
+}
+var groupKey = z4.string().regex(CLAIM_IMPORT_KEY_RE);
+var csvFileInput = {
+  kind: z4.enum(["cms1500", "eob"]),
+  fileName: z4.string().trim().min(1).max(255),
+  csvText: z4.string().max(CLAIM_CSV_MAX_BYTES)
+};
+var csvImportPreviewInput = z4.object({
+  ...csvFileInput,
+  /** Reviewer's patient choice per claim (groupKey) — only used when the file has no patient_id. */
+  patientChoices: z4.record(groupKey, z4.string().uuid()).optional()
+});
+async function previewClaimCsvImport(input) {
+  const { parsed, roster, claims } = await loadAndCheck(input.kind, input.csvText);
+  const base = { templateError: parsed.templateError, rowErrors: parsed.rowErrors, blockedClaimIds: parsed.blockedClaimIds, dataRowCount: parsed.dataRowCount };
+  if (parsed.templateError) return { ...base, document: null, preview: null };
+  const cmsDocIds = /* @__PURE__ */ new Map();
+  const groups = [];
+  for (const c of claims) {
+    const request = importPreviewInput.parse({
+      kind: input.kind,
+      document: { sha256: c.sha256, fileName: input.fileName, pageCount: null },
+      contextPatientId: null,
+      groups: [{
+        groupKey: c.groupKey,
+        patientName: c.patientName,
+        patientId: c.patientId ?? input.patientChoices?.[c.groupKey] ?? null,
+        lines: c.lines.map((l) => lineInput(input.kind, l))
+      }]
+    });
+    const r = await previewClaimImport(request, await hintsFor(c, roster, cmsDocIds));
+    groups.push(...r.groups);
+  }
+  return { ...base, document: toImportDocument(input.kind, input.fileName, input.csvText, claims), preview: { documentId: null, groups } };
+}
+var commitGroup = (decision) => z4.object({
+  groupKey,
+  patientId: z4.string().uuid().nullable().optional(),
+  patientConfirmed: z4.boolean().optional(),
+  lines: z4.array(z4.object({ sourceLineKey: groupKey, decision })).min(1).max(500)
+});
+var csvImportCommitInput = z4.discriminatedUnion("kind", [
+  z4.object({ ...csvFileInput, kind: z4.literal("cms1500"), groups: z4.array(commitGroup(cms1500Decision)).min(1).max(100) }),
+  z4.object({ ...csvFileInput, kind: z4.literal("eob"), groups: z4.array(commitGroup(eobDecision)).min(1).max(100) })
+]);
+var CsvTemplateError = class extends Error {
+};
+async function commitClaimCsvImport(input, actor) {
+  const { parsed, roster, claims } = await loadAndCheck(input.kind, input.csvText);
+  if (parsed.templateError) throw new CsvTemplateError(parsed.templateError);
+  const byKey = new Map(claims.map((c) => [c.groupKey, c]));
+  const blocked = new Set(parsed.blockedClaimIds.map((id) => csvGroupKey(input.kind, id)));
+  const importBatchId = randomUUID2();
+  const cmsDocIds = /* @__PURE__ */ new Map();
+  const results = [];
+  for (const g of input.groups) {
+    const claim = byKey.get(g.groupKey);
+    const notInFile = (sourceLineKey, message) => ({ sourceLineKey, status: "review_required", reason: "not_in_file", message });
+    if (!claim) {
+      const message = blocked.has(g.groupKey) ? "This claim has errors in the file. Fix them and upload the file again." : "This claim is not in the file any more.";
+      results.push({ groupKey: g.groupKey, patientId: null, lines: g.lines.map((l) => notInFile(l.sourceLineKey, message)) });
+      continue;
+    }
+    const fileLines = new Map(claim.lines.map((l) => [l.sourceLineKey, l]));
+    const requested = /* @__PURE__ */ new Map();
+    for (const l of g.lines) if (!requested.has(l.sourceLineKey)) requested.set(l.sourceLineKey, l);
+    const missing = Array.from(requested.keys()).filter((k) => !fileLines.has(k));
+    const present = Array.from(requested.values()).filter((l) => fileLines.has(l.sourceLineKey));
+    let committed = [];
+    let patientId = null;
+    if (present.length > 0) {
+      const request = importCommitInput.parse({
+        kind: input.kind,
+        document: { sha256: claim.sha256, fileName: input.fileName, pageCount: null },
+        contextPatientId: null,
+        contextAuthPeriod: null,
+        groups: [{
+          groupKey: claim.groupKey,
+          patientName: claim.patientName,
+          // A patient_id in the file wins over a reviewer choice; confirmation rules still apply.
+          patientId: claim.patientId ?? g.patientId ?? null,
+          patientConfirmed: g.patientConfirmed,
+          allLineKeys: claim.lines.map((l) => l.sourceLineKey),
+          lines: present.map((l) => ({ ...lineInput(input.kind, fileLines.get(l.sourceLineKey)), decision: l.decision }))
+        }]
+      });
+      const r = await commitClaimImport(request, actor, { ...await hintsFor(claim, roster, cmsDocIds), importBatchId });
+      committed = r.groups[0].lines;
+      patientId = r.groups[0].patientId;
+    }
+    results.push({
+      groupKey: g.groupKey,
+      patientId,
+      lines: [...committed, ...missing.map((k) => notInFile(k, "This line is not in the file any more."))]
+    });
   }
   return { importBatchId, groups: results };
 }
@@ -5561,21 +6276,21 @@ function clearFailedAttempts(normalizedUsername, ip) {
 }
 
 // server/routers.ts
-var visitRecordInput = z4.object({
-  sessionsAuthorized: z4.number().nullable().optional(),
-  sessionsRemaining: z4.number().nullable().optional(),
-  sessionNumber: z4.number().nullable().optional(),
-  authPeriod: z4.number().optional(),
+var visitRecordInput = z5.object({
+  sessionsAuthorized: z5.number().nullable().optional(),
+  sessionsRemaining: z5.number().nullable().optional(),
+  sessionNumber: z5.number().nullable().optional(),
+  authPeriod: z5.number().optional(),
   // Which authorization period this visit belongs to
-  dateOfService: z4.string().nullable().optional(),
+  dateOfService: z5.string().nullable().optional(),
   // ISO date string "YYYY-MM-DD"
-  newAuth: z4.string().nullable().optional(),
-  dateAshSubmitted: z4.string().nullable().optional(),
+  newAuth: z5.string().nullable().optional(),
+  dateAshSubmitted: z5.string().nullable().optional(),
   // ISO date string "YYYY-MM-DD"
-  authStatus: z4.enum(["none", "pending", "approved", "denied"]).optional(),
-  totalInsuranceReimbursement: z4.number().nullable().optional(),
-  totalPatientDue: z4.number().nullable().optional(),
-  totalPatientPaid: z4.number().nullable().optional()
+  authStatus: z5.enum(["none", "pending", "approved", "denied"]).optional(),
+  totalInsuranceReimbursement: z5.number().nullable().optional(),
+  totalPatientDue: z5.number().nullable().optional(),
+  totalPatientPaid: z5.number().nullable().optional()
 });
 function parseDate2(s) {
   if (!s) return null;
@@ -5600,7 +6315,7 @@ function assertMayWriteVisitFinancials(user, input) {
     throw new TRPCError3({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
   }
 }
-var retiredClaimsImportProcedure = claimsAccessProcedure.input(z4.unknown()).mutation(() => {
+var retiredClaimsImportProcedure = claimsAccessProcedure.input(z5.unknown()).mutation(() => {
   throw new TRPCError3({
     code: "PRECONDITION_FAILED",
     message: "This upload flow was replaced by the CMS1500-first import. Reload the page and upload the CMS1500 first, then the EOB."
@@ -5654,7 +6369,7 @@ var appRouter = router({
   }),
   // ── Clinic username/password login ────────────────────────────────────────────────────
   clinic: router({
-    login: publicProcedure.input(z4.object({ username: z4.string().min(1), password: z4.string().min(1) })).mutation(async ({ ctx, input }) => {
+    login: publicProcedure.input(z5.object({ username: z5.string().min(1), password: z5.string().min(1) })).mutation(async ({ ctx, input }) => {
       const ip = getClientIp(ctx.req);
       const rateLimitKey = normalizeUsername(input.username);
       if (isRateLimited(rateLimitKey, ip)) {
@@ -5712,9 +6427,9 @@ var appRouter = router({
     // Stays on protectedProcedure (not normalProtectedProcedure) — a clinic
     // user with mustChangePassword=true must still be able to change it.
     changePassword: protectedProcedure.input(
-      z4.object({
-        currentPassword: z4.string().min(1),
-        newPassword: z4.string().min(MIN_CLINIC_PASSWORD_LENGTH)
+      z5.object({
+        currentPassword: z5.string().min(1),
+        newPassword: z5.string().min(MIN_CLINIC_PASSWORD_LENGTH)
       })
     ).mutation(async ({ ctx, input }) => {
       const staff = ctx.user.clinicUser;
@@ -5778,21 +6493,21 @@ var appRouter = router({
       const rows = await listClinicUsers();
       return rows.map(toSafeStaff);
     }),
-    get: adminOrOwnerProcedure.input(z4.object({ id: z4.string().uuid() })).query(async ({ input }) => {
+    get: adminOrOwnerProcedure.input(z5.object({ id: z5.string().uuid() })).query(async ({ input }) => {
       const row = await getClinicUserById(input.id);
       if (!row) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
       return toSafeStaff(row);
     }),
     create: adminOrOwnerProcedure.input(
-      z4.object({
-        name: z4.string().min(1, "Name is required"),
-        email: z4.string().trim().optional(),
-        department: z4.string().trim().optional(),
-        username: z4.string().trim().min(1, "Username is required"),
-        role: z4.enum(["admin", "staff"]).default("staff"),
-        status: z4.enum(["active", "archived"]).default("active"),
-        password: z4.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
-        confirmPassword: z4.string().min(1)
+      z5.object({
+        name: z5.string().min(1, "Name is required"),
+        email: z5.string().trim().optional(),
+        department: z5.string().trim().optional(),
+        username: z5.string().trim().min(1, "Username is required"),
+        role: z5.enum(["admin", "staff"]).default("staff"),
+        status: z5.enum(["active", "archived"]).default("active"),
+        password: z5.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
+        confirmPassword: z5.string().min(1)
       })
     ).mutation(async ({ ctx, input }) => {
       if (input.password !== input.confirmPassword) {
@@ -5823,12 +6538,12 @@ var appRouter = router({
       }
     }),
     update: adminOrOwnerProcedure.input(
-      z4.object({
-        id: z4.string().uuid(),
-        name: z4.string().min(1, "Name is required").optional(),
-        email: z4.string().trim().optional(),
-        department: z4.string().trim().optional(),
-        role: z4.enum(["admin", "staff"]).optional()
+      z5.object({
+        id: z5.string().uuid(),
+        name: z5.string().min(1, "Name is required").optional(),
+        email: z5.string().trim().optional(),
+        department: z5.string().trim().optional(),
+        role: z5.enum(["admin", "staff"]).optional()
       })
     ).mutation(async ({ ctx, input }) => {
       const { id, role, ...profile } = input;
@@ -5867,10 +6582,10 @@ var appRouter = router({
       return toSafeStaff(final);
     }),
     resetPassword: adminOrOwnerProcedure.input(
-      z4.object({
-        id: z4.string().uuid(),
-        password: z4.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
-        confirmPassword: z4.string().min(1)
+      z5.object({
+        id: z5.string().uuid(),
+        password: z5.string().min(MIN_CLINIC_PASSWORD_LENGTH, `Password must be at least ${MIN_CLINIC_PASSWORD_LENGTH} characters`),
+        confirmPassword: z5.string().min(1)
       })
     ).mutation(async ({ ctx, input }) => {
       if (input.password !== input.confirmPassword) {
@@ -5893,7 +6608,7 @@ var appRouter = router({
         throw err;
       }
     }),
-    archive: adminOrOwnerProcedure.input(z4.object({ id: z4.string().uuid() })).mutation(async ({ ctx, input }) => {
+    archive: adminOrOwnerProcedure.input(z5.object({ id: z5.string().uuid() })).mutation(async ({ ctx, input }) => {
       const isSelf = ctx.user.clinicUser?.clinicUserId === input.id;
       if (isSelf) {
         throw new TRPCError3({ code: "FORBIDDEN", message: "You cannot archive your own account." });
@@ -5913,12 +6628,12 @@ var appRouter = router({
         throw err;
       }
     }),
-    reactivate: adminOrOwnerProcedure.input(z4.object({ id: z4.string().uuid() })).mutation(async ({ ctx, input }) => {
+    reactivate: adminOrOwnerProcedure.input(z5.object({ id: z5.string().uuid() })).mutation(async ({ ctx, input }) => {
       const updated = await reactivateClinicUser(input.id, getActorContext(ctx.user));
       if (!updated) throw new TRPCError3({ code: "NOT_FOUND", message: "Staff account not found" });
       return toSafeStaff(updated);
     }),
-    history: adminOrOwnerProcedure.input(z4.object({ id: z4.string().uuid() })).query(async ({ input }) => {
+    history: adminOrOwnerProcedure.input(z5.object({ id: z5.string().uuid() })).query(async ({ input }) => {
       return listHistoryForEntity("clinic_user", input.id);
     })
   }),
@@ -5929,17 +6644,17 @@ var appRouter = router({
       const claimsAllowed = canAccessClaims(ctx.user);
       return (await getAllPatients()).map((p) => redactPatient(p, claimsAllowed));
     }),
-    get: normalProtectedProcedure.input(z4.object({ id: z4.string().uuid() })).query(async ({ ctx, input }) => {
+    get: normalProtectedProcedure.input(z5.object({ id: z5.string().uuid() })).query(async ({ ctx, input }) => {
       const patient = await getPatientById(input.id);
       if (!patient) throw new TRPCError3({ code: "NOT_FOUND", message: "Patient not found" });
       return redactPatient(patient, canAccessClaims(ctx.user));
     }),
     create: normalProtectedProcedure.input(
-      z4.object({
-        name: z4.string().min(1),
-        insurance: z4.string().default(""),
-        authDate: z4.string().nullable().optional(),
-        authValidUntil: z4.number().nullable().optional()
+      z5.object({
+        name: z5.string().min(1),
+        insurance: z5.string().default(""),
+        authDate: z5.string().nullable().optional(),
+        authValidUntil: z5.number().nullable().optional()
         // Unix ms timestamp
       })
     ).mutation(async ({ input, ctx }) => {
@@ -5959,19 +6674,19 @@ var appRouter = router({
       }
     }),
     update: normalProtectedProcedure.input(
-      z4.object({
-        id: z4.string().uuid(),
-        name: z4.string().min(1).optional(),
-        insurance: z4.string().optional(),
-        authDate: z4.string().nullable().optional(),
-        authValidUntil: z4.number().nullable().optional(),
+      z5.object({
+        id: z5.string().uuid(),
+        name: z5.string().min(1).optional(),
+        insurance: z5.string().optional(),
+        authDate: z5.string().nullable().optional(),
+        authValidUntil: z5.number().nullable().optional(),
         // "none" is the API-level sentinel for "no claims status set" (see
         // getPatientById/listPatients in db.ts, which map a NULL claims_status
         // column to "none"). It is NOT a column value — accepting it here and
         // translating it to `null` below lets the edit form round-trip an
         // unset status without that NULL ever being asked to match the
         // 7-value DB enum, which is what previously threw invalid_value.
-        claimsStatus: z4.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "none"]).optional()
+        claimsStatus: z5.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "none"]).optional()
       })
     ).mutation(async ({ input, ctx }) => {
       const { id, authDate, authValidUntil, claimsStatus, ...rest } = input;
@@ -5997,20 +6712,20 @@ var appRouter = router({
       }
       return { success: true };
     }),
-    delete: normalProtectedProcedure.input(z4.object({ id: z4.string().uuid() })).mutation(async ({ input }) => {
+    delete: normalProtectedProcedure.input(z5.object({ id: z5.string().uuid() })).mutation(async ({ input }) => {
       await deletePatient(input.id);
       return { success: true };
     }),
-    setActive: normalProtectedProcedure.input(z4.object({
-      id: z4.string().uuid(),
-      isActive: z4.boolean(),
-      dischargeDate: z4.number().nullable().optional(),
-      dischargeReason: z4.string().nullable().optional()
+    setActive: normalProtectedProcedure.input(z5.object({
+      id: z5.string().uuid(),
+      isActive: z5.boolean(),
+      dischargeDate: z5.number().nullable().optional(),
+      dischargeReason: z5.string().nullable().optional()
     })).mutation(async ({ input }) => {
       await setPatientActive(input.id, input.isActive, input.dischargeDate, input.dischargeReason);
       return { success: true };
     }),
-    history: normalProtectedProcedure.input(z4.object({ id: z4.string().uuid() })).query(async ({ ctx, input }) => {
+    history: normalProtectedProcedure.input(z5.object({ id: z5.string().uuid() })).query(async ({ ctx, input }) => {
       return redactAuditRows(await listHistoryForEntity("patient", input.id), canAccessClaims(ctx.user));
     })
   }),
@@ -6025,10 +6740,10 @@ var appRouter = router({
       return listInsurerCatalog();
     }),
     create: adminOrOwnerProcedure.input(
-      z4.object({
+      z5.object({
         // Blank-after-trim is rejected by the .refine below rather than
         // z.string().min(1) alone, which would accept e.g. "   ".
-        name: z4.string().transform((v) => v.trim()).refine((v) => v.length > 0, {
+        name: z5.string().transform((v) => v.trim()).refine((v) => v.length > 0, {
           message: "Insurance company name is required"
         })
       })
@@ -6054,7 +6769,7 @@ var appRouter = router({
     // new-selection dropdowns without touching any patient/visit/claim
     // record (those store the insurer name as free text, not an FK into
     // this table) and without deleting the catalog row itself.
-    delete: adminOrOwnerProcedure.input(z4.object({ id: z4.string().uuid() })).mutation(async ({ input, ctx }) => {
+    delete: adminOrOwnerProcedure.input(z5.object({ id: z5.string().uuid() })).mutation(async ({ input, ctx }) => {
       const existing = await getInsurerCatalogEntryById(input.id);
       if (!existing) {
         throw new TRPCError3({ code: "NOT_FOUND", message: "Insurance company not found" });
@@ -6065,7 +6780,7 @@ var appRouter = router({
     // dialog — distinct from insurance.create's own reactivate-on-conflict
     // path above, for an admin who wants to bring an entry back without
     // retyping its exact name.
-    reactivate: adminOrOwnerProcedure.input(z4.object({ id: z4.string().uuid() })).mutation(async ({ input, ctx }) => {
+    reactivate: adminOrOwnerProcedure.input(z5.object({ id: z5.string().uuid() })).mutation(async ({ input, ctx }) => {
       const existing = await getInsurerCatalogEntryById(input.id);
       if (!existing) {
         throw new TRPCError3({ code: "NOT_FOUND", message: "Insurance company not found" });
@@ -6078,7 +6793,7 @@ var appRouter = router({
     // record keeps its recorded insurer and nothing is reassigned or merged.
     // The delete, its tombstone, and its audit row run in one locked
     // Postgres transaction (delete_insurer_catalog_with_audit).
-    permanentDelete: adminOrOwnerProcedure.input(z4.object({ id: z4.string().uuid() })).mutation(async ({ input, ctx }) => {
+    permanentDelete: adminOrOwnerProcedure.input(z5.object({ id: z5.string().uuid() })).mutation(async ({ input, ctx }) => {
       try {
         await permanentlyDeleteInsurerCatalogEntry(input.id, getActorContext(ctx.user));
       } catch (err) {
@@ -6098,18 +6813,18 @@ var appRouter = router({
     // Same gate as create/delete/reactivate — insurer catalog management is
     // admin/owner only, so its history is too (unlike patient/visit/claim
     // history, which any authenticated staff member can read).
-    history: adminOrOwnerProcedure.input(z4.object({ id: z4.string().uuid() })).query(async ({ ctx, input }) => {
+    history: adminOrOwnerProcedure.input(z5.object({ id: z5.string().uuid() })).query(async ({ ctx, input }) => {
       return redactAuditRows(await listHistoryForEntity("insurer_catalog", input.id), canAccessClaims(ctx.user));
     })
   }),
   // ── Visit Records ────────────────────────────────────────────────────────────
   visits: router({
     // Per-session financial totals require Claims access (P4-P25).
-    listByPatient: normalProtectedProcedure.input(z4.object({ patientId: z4.string().uuid() })).query(async ({ ctx, input }) => {
+    listByPatient: normalProtectedProcedure.input(z5.object({ patientId: z5.string().uuid() })).query(async ({ ctx, input }) => {
       const claimsAllowed = canAccessClaims(ctx.user);
       return (await getVisitsByPatientId(input.patientId)).map((v) => redactVisitRecord(v, claimsAllowed));
     }),
-    create: normalProtectedProcedure.input(visitRecordInput.extend({ patientId: z4.string().uuid() })).mutation(async ({ input, ctx }) => {
+    create: normalProtectedProcedure.input(visitRecordInput.extend({ patientId: z5.string().uuid() })).mutation(async ({ input, ctx }) => {
       assertMayWriteVisitFinancials(ctx.user, input);
       const { patientId, dateOfService, dateAshSubmitted, ...rest } = input;
       const id = await createVisitRecord({
@@ -6120,7 +6835,7 @@ var appRouter = router({
       }, getActorContext(ctx.user));
       return { id };
     }),
-    update: normalProtectedProcedure.input(visitRecordInput.extend({ id: z4.string().uuid() })).mutation(async ({ input, ctx }) => {
+    update: normalProtectedProcedure.input(visitRecordInput.extend({ id: z5.string().uuid() })).mutation(async ({ input, ctx }) => {
       assertMayWriteVisitFinancials(ctx.user, input);
       const { id, dateOfService, dateAshSubmitted, ...rest } = input;
       await updateVisitRecord(id, {
@@ -6138,8 +6853,8 @@ var appRouter = router({
     // audit row in the same transaction, and skips it entirely for a no-op.
     // Returns the row's stored values so the client can reconcile.
     updateSessionFields: normalProtectedProcedure.input(sessionWorkflowFieldsInput.extend({
-      id: z4.string().uuid(),
-      patientId: z4.string().uuid()
+      id: z5.string().uuid(),
+      patientId: z5.string().uuid()
     })).mutation(async ({ input, ctx }) => {
       const { id, patientId, ...fields } = input;
       if (Object.values(fields).every((v) => v === void 0)) {
@@ -6167,9 +6882,9 @@ var appRouter = router({
       };
     }),
     bulkCreate: normalProtectedProcedure.input(
-      z4.object({
-        patientId: z4.string().uuid(),
-        records: z4.array(visitRecordInput)
+      z5.object({
+        patientId: z5.string().uuid(),
+        records: z5.array(visitRecordInput)
       })
     ).mutation(async ({ input, ctx }) => {
       const rows = input.records.map((r) => ({
@@ -6191,14 +6906,14 @@ var appRouter = router({
       return getAuthAlertSummaries();
     }),
     // Approves a pending authorization and creates a new batch of visit records
-    approveAuthorization: normalProtectedProcedure.input(z4.object({
-      patientId: z4.string().uuid(),
-      sessionsAuthorized: z4.number().min(1).max(200),
-      authDate: z4.string().nullable().optional(),
+    approveAuthorization: normalProtectedProcedure.input(z5.object({
+      patientId: z5.string().uuid(),
+      sessionsAuthorized: z5.number().min(1).max(200),
+      authDate: z5.string().nullable().optional(),
       // ISO date string "YYYY-MM-DD"
-      newInsurance: z4.string().optional(),
+      newInsurance: z5.string().optional(),
       // optional insurance change for new period
-      authValidUntil: z4.number().nullable().optional()
+      authValidUntil: z5.number().nullable().optional()
       // Unix ms timestamp for expiry
     })).mutation(async ({ input, ctx }) => {
       const authDate = input.authDate ? /* @__PURE__ */ new Date(input.authDate + "T00:00:00Z") : null;
@@ -6218,7 +6933,7 @@ var appRouter = router({
     }),
     // Sets the active-period visit row (same period getAuthAlertSummaries is
     // showing) to authStatus=pending + today's dateAshSubmitted
-    markAsRequested: normalProtectedProcedure.input(z4.object({ patientId: z4.string().uuid() })).mutation(async ({ input, ctx }) => {
+    markAsRequested: normalProtectedProcedure.input(z5.object({ patientId: z5.string().uuid() })).mutation(async ({ input, ctx }) => {
       const visitId = await getMarkAsRequestedTargetVisitId(input.patientId);
       if (!visitId) throw new TRPCError3({ code: "NOT_FOUND", message: "No visit records found for this patient" });
       const today = /* @__PURE__ */ new Date();
@@ -6230,7 +6945,7 @@ var appRouter = router({
       }, actor, { action: "AUTHORIZATION_MARKED_REQUESTED", patientId: input.patientId });
       return { success: true, visitId, date: todayMidnight.toISOString().split("T")[0] };
     }),
-    historyForPatient: normalProtectedProcedure.input(z4.object({ patientId: z4.string().uuid() })).query(async ({ ctx, input }) => {
+    historyForPatient: normalProtectedProcedure.input(z5.object({ patientId: z5.string().uuid() })).query(async ({ ctx, input }) => {
       return redactAuditRows(await listHistoryForEntity("visit_record", input.patientId), canAccessClaims(ctx.user));
     })
   }),
@@ -6238,35 +6953,35 @@ var appRouter = router({
   // follow-up/status aggregates, CMS1500/EOB enrichment and bulk import —
   // requires Claims access (claimsAccessProcedure, server/_core/trpc.ts).
   claims: router({
-    getByPatientAndPeriod: claimsAccessProcedure.input(z4.object({ patientId: z4.string().uuid(), authPeriod: z4.number() })).query(async ({ input }) => {
+    getByPatientAndPeriod: claimsAccessProcedure.input(z5.object({ patientId: z5.string().uuid(), authPeriod: z5.number() })).query(async ({ input }) => {
       return await getClaimsByPatientAndPeriod(input.patientId, input.authPeriod);
     }),
-    create: claimsAccessProcedure.input(z4.object({
-      patientId: z4.string().uuid(),
-      authPeriod: z4.number(),
-      placeOfService: z4.string().nullable().optional(),
-      dateOfService: z4.string().nullable().optional(),
-      visitNumber: z4.number().nullable().optional(),
-      cptCodes: z4.string().nullable().optional(),
-      unitsBilled: z4.number().nullable().optional(),
-      diagnosisCodes: z4.string().nullable().optional(),
-      modifier: z4.string().nullable().optional(),
-      chargeAmount: z4.number().nullable().optional(),
-      insuranceReimbursement: z4.number().nullable().optional(),
-      patientAmountPaid: z4.number().nullable().optional(),
-      patientAmountDue: z4.number().nullable().optional(),
-      insuranceBilled: z4.string().nullable().optional(),
-      oaClaimNumber: z4.string().nullable().optional(),
-      claimSubmittedDate: z4.string().nullable().optional(),
-      expireBcbsClaimNumber: z4.string().nullable().optional(),
-      claimStatus: z4.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
-      paymentReceived: z4.number().nullable().optional(),
-      checkDate: z4.string().nullable().optional(),
-      checkNumberVirtualCard: z4.string().nullable().optional(),
-      dateReceived: z4.string().nullable().optional(),
-      dateOfAppeal: z4.string().nullable().optional(),
-      referenceNo: z4.string().nullable().optional(),
-      lmn: z4.string().nullable().optional()
+    create: claimsAccessProcedure.input(z5.object({
+      patientId: z5.string().uuid(),
+      authPeriod: z5.number(),
+      placeOfService: z5.string().nullable().optional(),
+      dateOfService: z5.string().nullable().optional(),
+      visitNumber: z5.number().nullable().optional(),
+      cptCodes: z5.string().nullable().optional(),
+      unitsBilled: z5.number().nullable().optional(),
+      diagnosisCodes: z5.string().nullable().optional(),
+      modifier: z5.string().nullable().optional(),
+      chargeAmount: z5.number().nullable().optional(),
+      insuranceReimbursement: z5.number().nullable().optional(),
+      patientAmountPaid: z5.number().nullable().optional(),
+      patientAmountDue: z5.number().nullable().optional(),
+      insuranceBilled: z5.string().nullable().optional(),
+      oaClaimNumber: z5.string().nullable().optional(),
+      claimSubmittedDate: z5.string().nullable().optional(),
+      expireBcbsClaimNumber: z5.string().nullable().optional(),
+      claimStatus: z5.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
+      paymentReceived: z5.number().nullable().optional(),
+      checkDate: z5.string().nullable().optional(),
+      checkNumberVirtualCard: z5.string().nullable().optional(),
+      dateReceived: z5.string().nullable().optional(),
+      dateOfAppeal: z5.string().nullable().optional(),
+      referenceNo: z5.string().nullable().optional(),
+      lmn: z5.string().nullable().optional()
     })).mutation(async ({ input, ctx }) => {
       const claimId = await createClaimRecord({
         patientId: input.patientId,
@@ -6297,30 +7012,30 @@ var appRouter = router({
       }, getActorContext(ctx.user));
       return { success: true, claimId };
     }),
-    update: claimsAccessProcedure.input(z4.object({
-      id: z4.string().uuid(),
-      placeOfService: z4.string().nullable().optional(),
-      dateOfService: z4.string().nullable().optional(),
-      visitNumber: z4.number().nullable().optional(),
-      cptCodes: z4.string().nullable().optional(),
-      unitsBilled: z4.number().nullable().optional(),
-      diagnosisCodes: z4.string().nullable().optional(),
-      modifier: z4.string().nullable().optional(),
-      chargeAmount: z4.number().nullable().optional(),
-      insuranceReimbursement: z4.number().nullable().optional(),
-      patientAmountPaid: z4.number().nullable().optional(),
-      patientAmountDue: z4.number().nullable().optional(),
-      insuranceBilled: z4.string().nullable().optional(),
-      oaClaimNumber: z4.string().nullable().optional(),
-      claimSubmittedDate: z4.string().nullable().optional(),
-      expireBcbsClaimNumber: z4.string().nullable().optional(),
-      claimStatus: z4.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
-      paymentReceived: z4.number().nullable().optional(),
-      checkDate: z4.string().nullable().optional(),
-      checkNumberVirtualCard: z4.string().nullable().optional(),
-      dateReceived: z4.string().nullable().optional(),
-      dateOfAppeal: z4.string().nullable().optional(),
-      referenceNo: z4.string().nullable().optional()
+    update: claimsAccessProcedure.input(z5.object({
+      id: z5.string().uuid(),
+      placeOfService: z5.string().nullable().optional(),
+      dateOfService: z5.string().nullable().optional(),
+      visitNumber: z5.number().nullable().optional(),
+      cptCodes: z5.string().nullable().optional(),
+      unitsBilled: z5.number().nullable().optional(),
+      diagnosisCodes: z5.string().nullable().optional(),
+      modifier: z5.string().nullable().optional(),
+      chargeAmount: z5.number().nullable().optional(),
+      insuranceReimbursement: z5.number().nullable().optional(),
+      patientAmountPaid: z5.number().nullable().optional(),
+      patientAmountDue: z5.number().nullable().optional(),
+      insuranceBilled: z5.string().nullable().optional(),
+      oaClaimNumber: z5.string().nullable().optional(),
+      claimSubmittedDate: z5.string().nullable().optional(),
+      expireBcbsClaimNumber: z5.string().nullable().optional(),
+      claimStatus: z5.enum(["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"]).optional(),
+      paymentReceived: z5.number().nullable().optional(),
+      checkDate: z5.string().nullable().optional(),
+      checkNumberVirtualCard: z5.string().nullable().optional(),
+      dateReceived: z5.string().nullable().optional(),
+      dateOfAppeal: z5.string().nullable().optional(),
+      referenceNo: z5.string().nullable().optional()
     })).mutation(async ({ input, ctx }) => {
       const { id, ...data } = input;
       const alertStatuses = ["denied", "rejected", "pended", "resubmitted"];
@@ -6355,7 +7070,7 @@ var appRouter = router({
       }, getActorContext(ctx.user));
       return { success: true };
     }),
-    delete: claimsAccessProcedure.input(z4.object({ id: z4.string().uuid(), patientId: z4.string().uuid() })).mutation(async ({ input, ctx }) => {
+    delete: claimsAccessProcedure.input(z5.object({ id: z5.string().uuid(), patientId: z5.string().uuid() })).mutation(async ({ input, ctx }) => {
       const actor = getActorContext(ctx.user);
       try {
         await deleteClaimRecordWithAudit({
@@ -6381,7 +7096,7 @@ var appRouter = router({
     // browser still running the previous bundle during a deploy gets a clear
     // message instead of creating EOB-first rows or enriching untracked rows.
     upsert: retiredClaimsImportProcedure,
-    historyForClaim: claimsAccessProcedure.input(z4.object({ id: z4.string().uuid() })).query(async ({ input }) => {
+    historyForClaim: claimsAccessProcedure.input(z5.object({ id: z5.string().uuid() })).query(async ({ input }) => {
       return listHistoryForEntity("claim_record", input.id);
     }),
     /**
@@ -6411,16 +7126,44 @@ var appRouter = router({
         throw err;
       }
     }),
+    /**
+     * P4-P26: CMS1500 CSV / Insurance Reimbursement CSV bulk upload preview —
+     * no writes. The CSV text is parsed here (server/claimCsvImport.ts); a
+     * wrong or malformed template comes back as templateError, row-level
+     * problems as rowErrors.
+     */
+    csvImportPreview: claimsAccessProcedure.input(csvImportPreviewInput).mutation(async ({ input }) => {
+      try {
+        return await previewClaimCsvImport(input);
+      } catch (err) {
+        if (err instanceof ClaimImportRuleError) throw new TRPCError3({ code: "NOT_FOUND", message: err.message });
+        throw err;
+      }
+    }),
+    /**
+     * P4-P26: commit reviewed lines of a claims CSV. The file is re-parsed and
+     * every line's identity and values come from it, not from the request;
+     * persistence is the same audited CMS1500-first path as importCommit.
+     */
+    csvImportCommit: claimsAccessProcedure.input(csvImportCommitInput).mutation(async ({ input, ctx }) => {
+      try {
+        return await commitClaimCsvImport(input, getActorContext(ctx.user));
+      } catch (err) {
+        if (err instanceof CsvTemplateError) throw new TRPCError3({ code: "BAD_REQUEST", message: err.message });
+        if (err instanceof ClaimImportRuleError) throw new TRPCError3({ code: "NOT_FOUND", message: err.message });
+        throw err;
+      }
+    }),
     cms1500EnrichmentPreview: retiredClaimsImportProcedure,
     cms1500EnrichmentCommit: retiredClaimsImportProcedure,
     bulkImportFromEOB: retiredClaimsImportProcedure,
-    markResolved: claimsAccessProcedure.input(z4.object({ id: z4.string().uuid() })).mutation(async ({ input }) => {
+    markResolved: claimsAccessProcedure.input(z5.object({ id: z5.string().uuid() })).mutation(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
       const { error } = await supabase2.from("claims_records").update({ is_resolved: true, claim_status: "pending" }).eq("id", input.id);
       if (error) throw new TRPCError3({ code: "INTERNAL_SERVER_ERROR", message: error.message });
       return { success: true };
     }),
-    getFollowUpClaims: claimsAccessProcedure.input(z4.object({ insurance: z4.string().optional() }).optional()).query(async ({ input }) => {
+    getFollowUpClaims: claimsAccessProcedure.input(z5.object({ insurance: z5.string().optional() }).optional()).query(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
       let query = supabase2.from("claims_records").select(`
             id,
@@ -6466,7 +7209,7 @@ var appRouter = router({
       });
       return sortByFollowUpUrgency(classified);
     }),
-    getStatusCounts: claimsAccessProcedure.input(z4.object({ insurance: z4.string().optional() }).optional()).query(async ({ input }) => {
+    getStatusCounts: claimsAccessProcedure.input(z5.object({ insurance: z5.string().optional() }).optional()).query(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
       let query = supabase2.from("claims_records").select("claim_status, patient_id, patients!inner(insurance)");
       if (input?.insurance) {
@@ -6488,15 +7231,15 @@ var appRouter = router({
   // there is no mutation here, and audit_logs itself has no browser-reachable
   // write path at all (service_role-only, see the P4-P17 migration's RLS).
   activityLog: router({
-    list: adminOrOwnerProcedure.input(z4.object({
-      actorId: z4.string().uuid().optional(),
-      entityType: z4.enum(["patient", "visit_record", "claim_record", "insurer_catalog", "clinic_user"]).optional(),
-      action: z4.string().optional(),
-      dateFrom: z4.string().nullable().optional(),
+    list: adminOrOwnerProcedure.input(z5.object({
+      actorId: z5.string().uuid().optional(),
+      entityType: z5.enum(["patient", "visit_record", "claim_record", "insurer_catalog", "clinic_user"]).optional(),
+      action: z5.string().optional(),
+      dateFrom: z5.string().nullable().optional(),
       // ISO date string "YYYY-MM-DD"
-      dateTo: z4.string().nullable().optional(),
-      page: z4.number().int().min(0).default(0),
-      pageSize: z4.number().int().min(1).max(200).default(50)
+      dateTo: z5.string().nullable().optional(),
+      page: z5.number().int().min(0).default(0),
+      pageSize: z5.number().int().min(1).max(200).default(50)
     })).query(async ({ ctx, input }) => {
       const claimsAllowed = canAccessClaims(ctx.user);
       if (!claimsAllowed && input.entityType === "claim_record") {
