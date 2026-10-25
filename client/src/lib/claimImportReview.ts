@@ -16,7 +16,7 @@
  */
 import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
 import type { AppRouter } from "../../../server/routers";
-import type { Cms1500ImportLine, EobImportLine, ImportDocument } from "@shared/claimImport";
+import { CLAIM_IMPORT_STATUSES, type Cms1500ImportLine, type ClaimImportStatus, type EobImportLine, type ImportDocument } from "@shared/claimImport";
 
 type Outputs = inferRouterOutputs<AppRouter>;
 type Inputs = inferRouterInputs<AppRouter>;
@@ -26,6 +26,9 @@ export type PreviewLine = PreviewGroup["lines"][number];
 export type CommitResult = Outputs["claims"]["importCommit"];
 export type CommitLineResult = CommitResult["groups"][number]["lines"][number];
 export type CommitInput = Inputs["claims"]["importCommit"];
+export type CsvPreviewResult = Outputs["claims"]["csvImportPreview"];
+export type CsvRowError = CsvPreviewResult["rowErrors"][number];
+export type CsvCommitInput = Inputs["claims"]["csvImportCommit"];
 
 export type Cms1500Decision = {
   action: "create" | "create_distinct" | "associate" | "skip";
@@ -160,10 +163,9 @@ export function buildCommitInput(params: {
   } as CommitInput;
 }
 
-const STATUSES = ["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"] as const;
-export function normalizeClaimStatus(s: string | null | undefined): (typeof STATUSES)[number] | null {
+export function normalizeClaimStatus(s: string | null | undefined): ClaimImportStatus | null {
   const v = (s ?? "").trim().toLowerCase();
-  return (STATUSES as readonly string[]).includes(v) ? (v as (typeof STATUSES)[number]) : null;
+  return (CLAIM_IMPORT_STATUSES as readonly string[]).includes(v) ? (v as ClaimImportStatus) : null;
 }
 
 /** The preview request for one file (current edits and patient choices applied). */
@@ -200,6 +202,53 @@ export function buildPreviewInput(params: {
       }),
     })),
   } as Inputs["claims"]["importPreview"];
+}
+
+// ─── P4-P26: claims CSV uploads ──────────────────────────────────────────────
+// The CSV text itself goes with every request and the server re-parses it, so
+// these send only the reviewer's input: patient choices / confirmations and
+// one decision per line key. Line values and keys are never sent.
+
+export interface CsvFileSource {
+  kind: "cms1500" | "eob";
+  fileName: string;
+  csvText: string;
+}
+
+export function buildCsvPreviewInput(params: { source: CsvFileSource; state: Pick<FileReviewState, "patientChoice"> }) {
+  const patientChoices: Record<string, string> = {};
+  for (const [k, v] of Object.entries(params.state.patientChoice)) if (v) patientChoices[k] = v;
+  return { ...params.source, patientChoices };
+}
+
+/**
+ * The CSV commit requests for one file, split so no request carries more than
+ * `maxLines` lines (a claim is never split across requests). Built from the
+ * same pending-line rule as buildCommitInput, so done lines are never resent.
+ */
+export function buildCsvCommitInputs(params: { source: CsvFileSource; state: FileReviewState; maxLines?: number }): CsvCommitInput[] {
+  const { source, state, maxLines = 150 } = params;
+  const full = buildCommitInput({ state, contextPatientId: null, contextAuthPeriod: null });
+  if (!full) return [];
+  const batches: CsvCommitInput[] = [];
+  let current: any[] = [];
+  let count = 0;
+  for (const g of full.groups as any[]) {
+    if (current.length > 0 && (count + g.lines.length > maxLines || current.length >= 100)) {
+      batches.push({ ...source, groups: current } as CsvCommitInput);
+      current = [];
+      count = 0;
+    }
+    current.push({
+      groupKey: g.groupKey,
+      patientId: g.patientId,
+      patientConfirmed: g.patientConfirmed,
+      lines: g.lines.map((l: any) => ({ sourceLineKey: l.sourceLineKey, decision: l.decision })),
+    });
+    count += g.lines.length;
+  }
+  if (current.length > 0) batches.push({ ...source, groups: current } as CsvCommitInput);
+  return batches;
 }
 
 /** Summary counts for one file after (re)commits. */

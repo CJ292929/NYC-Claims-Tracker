@@ -23,6 +23,7 @@ import { extractClaimsWithAI, detectInsuranceType, KNOWN_INSURER_NAMES, reconcil
 import { cms1500GroupsFromClaims, eobGroupsFromClaims, sha256Hex } from './claimImportKeys';
 import { assembleCms1500Pages, extractCms1500PagesWithVision, MAX_SCANNED_PAGES } from './cms1500Vision';
 import type { Cms1500ImportLine, EobImportLine, ImportDocument, ImportGroup } from '@shared/claimImport';
+import { CLAIM_CSV_TEMPLATES, detectCsvTemplateFromText } from '@shared/claimCsvTemplates';
 
 // requireClaimsAccess (server/_core/requireAuth.ts) runs before multer so an
 // unauthenticated request, or one without Claims access (P4-P25: Staff), never
@@ -539,6 +540,13 @@ export function registerClaimUploadRoute(app: Express) {
         if (isXlsx) {
           extractedText = extractXlsxText(buffer);
         } else if (isCsv) {
+          // P4-P26: the CMS1500 / Insurance Reimbursement CSV templates have
+          // their own deterministic import — never guess their columns here.
+          const template = detectCsvTemplateFromText(buffer.toString('utf-8'));
+          if (template === 'cms1500' || template === 'eob') {
+            res.status(422).json({ error: `This is the ${CLAIM_CSV_TEMPLATES[template].title} CSV template. Nothing was imported. Upload it under Bulk Upload → ${CLAIM_CSV_TEMPLATES[template].title}.` });
+            return;
+          }
           extractedText = extractCsvText(buffer);
         } else {
           // pdfjs-dist's text extraction can throw in serverless Node.js

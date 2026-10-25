@@ -19,13 +19,19 @@ import { randomUUID } from "crypto";
 import { classifyPatientMatch, fuzzyNameMatch } from "@shared/nameMatch";
 import {
   CLAIM_IMPORT_KEY_RE,
+  CLAIM_IMPORT_STATUSES,
   SHA256_RE,
   UPLOAD_CMS1500_FIRST,
+  allowedEobTargets,
   classifyCms1500Line,
   classifyEobLine,
+  classifyEobLineForTarget,
   resolveAuthPeriod,
+  resolveAuthPeriodWithFilePeriod,
   type Cms1500LineClassification,
+  type EobCsvTarget,
   type EobLineClassification,
+  type ExistingClaimLine,
   type PeriodResolution,
 } from "@shared/claimImport";
 import {
@@ -66,10 +72,11 @@ const cms1500LineInput = z.object({
   diagnosisCodes: shortText(200),
   claimSubmittedDate: isoDate.nullable(),
   insuranceBilled: shortText(60),
+  visitNumber: z.number().int().min(1).max(10000).nullable().optional(),
   unreadable: z.array(z.string().max(40)).max(20),
 });
 
-const CLAIM_STATUSES = ["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"] as const;
+const CLAIM_STATUSES = CLAIM_IMPORT_STATUSES;
 
 const eobLineInput = z.object({
   ...lineIdentity,
@@ -108,7 +115,7 @@ export const importPreviewInput = z.discriminatedUnion("kind", [
   }),
 ]);
 
-const cms1500Decision = z.object({
+export const cms1500Decision = z.object({
   action: z.enum(["create", "create_distinct", "associate", "skip"]),
   claimRecordId: z.string().uuid().nullable().optional(),
   authPeriod: z.number().int().min(1).max(1000).nullable().optional(),
@@ -116,7 +123,7 @@ const cms1500Decision = z.object({
   acknowledgeFlags: z.boolean().optional(),
 });
 
-const eobDecision = z.object({
+export const eobDecision = z.object({
   action: z.enum(["apply", "skip"]),
   claimRecordId: z.string().uuid().nullable().optional(),
   confirmReplace: z.boolean().optional(),
@@ -156,6 +163,33 @@ type Cms1500PreviewGroup = Extract<ImportPreviewInput, { kind: "cms1500" }>["gro
 type EobPreviewGroup = Extract<ImportPreviewInput, { kind: "eob" }>["groups"][number];
 type Cms1500CommitGroup = Extract<ImportCommitInput, { kind: "cms1500" }>["groups"][number];
 type EobCommitGroup = Extract<ImportCommitInput, { kind: "eob" }>["groups"][number];
+
+/**
+ * P4-P26: per-line facts a CSV row states, keyed by sourceLineKey. Built only
+ * by the server from the parsed file (server/claimCsvImport.ts) — never part
+ * of a client request. filePeriods: the CMS1500 row's auth_period.
+ * eobTargets: the reimbursement row's CMS1500 reference / period; when a line
+ * has one, commit re-classifies it and only accepts a target the
+ * classification allows.
+ */
+export interface ClaimImportHints {
+  filePeriods?: Record<string, number>;
+  eobTargets?: Record<string, EobCsvTarget>;
+  /** Preloaded patient roster (one load for a CSV with many claims). */
+  roster?: Array<{ id: string; name: string }>;
+  /** One id for a whole CSV save click across its claims. */
+  importBatchId?: string;
+}
+
+function linePeriod(visits: Array<{ authPeriod: number; dateOfService: string | null }>, key: string, dateOfService: string | null, hints: ClaimImportHints): PeriodResolution {
+  const fp = hints.filePeriods?.[key];
+  return fp != null ? resolveAuthPeriodWithFilePeriod(visits, dateOfService, fp) : resolveAuthPeriod(visits, dateOfService);
+}
+
+function classifyEob(line: Parameters<typeof classifyEobLine>[0]["line"], documentId: string | null, existing: ExistingClaimLine[], hints: ClaimImportHints): EobLineClassification {
+  const target = hints.eobTargets?.[line.sourceLineKey];
+  return target ? classifyEobLineForTarget({ line, documentId, existing, target }) : classifyEobLine({ line, documentId, existing });
+}
 
 // ─── Patient decision ───────────────────────────────────────────────────────
 
@@ -245,15 +279,15 @@ export interface PreviewGroup {
   periodOptions: number[];
 }
 
-async function loadPatients(contextPatientId: string | null | undefined) {
-  const allPatients = (await getAllPatients()).map(p => ({ id: p.id, name: p.name }));
+async function loadPatients(contextPatientId: string | null | undefined, roster?: Array<{ id: string; name: string }>) {
+  const allPatients = roster ?? (await getAllPatients()).map(p => ({ id: p.id, name: p.name }));
   const contextPatient = contextPatientId ? allPatients.find(p => p.id === contextPatientId) ?? null : null;
   if (contextPatientId && !contextPatient) throw new ClaimImportRuleError("not_found", "The selected patient no longer exists.");
   return { allPatients, contextPatient };
 }
 
-export async function previewClaimImport(input: ImportPreviewInput): Promise<{ documentId: string | null; groups: PreviewGroup[] }> {
-  const { allPatients, contextPatient } = await loadPatients(input.contextPatientId);
+export async function previewClaimImport(input: ImportPreviewInput, hints: ClaimImportHints = {}): Promise<{ documentId: string | null; groups: PreviewGroup[] }> {
+  const { allPatients, contextPatient } = await loadPatients(input.contextPatientId, hints.roster);
   const documentId = await findClaimImportDocumentId(input.kind, input.document.sha256);
 
   const groups: PreviewGroup[] = [];
@@ -287,13 +321,13 @@ export async function previewClaimImport(input: ImportPreviewInput): Promise<{ d
       lines = g.lines.map(l => ({
         sourceLineKey: l.sourceLineKey,
         kind: "cms1500" as const,
-        ...classifyCms1500Line({ line: l, documentId, siblingLineKeys: siblings, existing, period: resolveAuthPeriod(visits, l.dateOfService) }),
+        ...classifyCms1500Line({ line: l, documentId, siblingLineKeys: siblings, existing, period: linePeriod(visits, l.sourceLineKey, l.dateOfService, hints) }),
       }));
     } else {
       lines = (group as EobPreviewGroup).lines.map(l => ({
         sourceLineKey: l.sourceLineKey,
         kind: "eob" as const,
-        ...classifyEobLine({ line: l, documentId, existing }),
+        ...classifyEob(l, documentId, existing, hints),
       }));
     }
     groups.push({ groupKey: group.groupKey, patient, lines, periodOptions });
@@ -375,11 +409,11 @@ export function decideAuthPeriod(params: {
   return { ok: false, reason: "period_required" };
 }
 
-export async function commitClaimImport(input: ImportCommitInput, actor: ActorContext): Promise<{ importBatchId: string; groups: CommitGroupResult[] }> {
-  const { allPatients, contextPatient } = await loadPatients(input.contextPatientId);
+export async function commitClaimImport(input: ImportCommitInput, actor: ActorContext, hints: ClaimImportHints = {}): Promise<{ importBatchId: string; groups: CommitGroupResult[] }> {
+  const { allPatients, contextPatient } = await loadPatients(input.contextPatientId, hints.roster);
   // One id for this save click: every audit row it writes is linked by it,
   // and every row carries the source document id in its provenance columns.
-  const importBatchId = randomUUID();
+  const importBatchId = hints.importBatchId ?? randomUUID();
   const source = { sha256: input.document.sha256, fileName: input.document.fileName, pageCount: input.document.pageCount };
   const results: CommitGroupResult[] = [];
 
@@ -419,7 +453,7 @@ export async function commitClaimImport(input: ImportCommitInput, actor: ActorCo
         let authPeriod: number | null = null;
         if (d.action !== "associate") {
           const requested = d.authPeriod ?? (d.periodSource === "context" ? input.contextAuthPeriod ?? null : null);
-          const resolution = resolveAuthPeriod(visits, line.dateOfService);
+          const resolution = linePeriod(visits, line.sourceLineKey, line.dateOfService, hints);
           if (requested == null) {
             authPeriod = resolution.status === "resolved" ? resolution.authPeriod : null;
           } else {
@@ -451,17 +485,33 @@ export async function commitClaimImport(input: ImportCommitInput, actor: ActorCo
             diagnosis_codes: line.diagnosisCodes,
             claim_submitted_date: line.claimSubmittedDate,
             insurance_billed: line.insuranceBilled,
+            visit_number: line.visitNumber ?? null,
           },
           actor,
           importBatchId,
         })));
       }
     } else {
-      for (const line of (group as EobCommitGroup).lines) {
+      const g = group as EobCommitGroup;
+      // CSV rows (hinted) are re-classified here, so a client-chosen target
+      // is only accepted when the server's own classification allows it.
+      const hinted = g.lines.some(l => hints.eobTargets?.[l.sourceLineKey]);
+      const existing = hinted ? await listPatientClaimLinesOnDates(patientId, g.lines.map(l => l.dateOfService ?? "")) : [];
+      const documentId = hinted ? await findClaimImportDocumentId("eob", input.document.sha256) : null;
+      for (const line of g.lines) {
         const d = line.decision;
         if (d.action === "skip") { lineResults.push({ sourceLineKey: line.sourceLineKey, status: "skipped" }); continue; }
         if (!line.dateOfService || !line.cptCodes) { lineResults.push(reviewResult(line.sourceLineKey, "invalid_input")); continue; }
         if (!d.claimRecordId) { lineResults.push(reviewResult(line.sourceLineKey, "cms1500_required")); continue; }
+        if (hints.eobTargets?.[line.sourceLineKey]) {
+          const c = classifyEob(line, documentId, existing, hints);
+          if (!allowedEobTargets(c).includes(d.claimRecordId)) {
+            lineResults.push(c.status === "cms1500_required" || c.status === "invalid"
+              ? reviewResult(line.sourceLineKey, c.status === "invalid" ? "invalid_input" : "cms1500_required", c.reason)
+              : reviewResult(line.sourceLineKey, "target_not_allowed", "The chosen claim line is not one this file row can be applied to. Re-check the file and choose again."));
+            continue;
+          }
+        }
         lineResults.push(await writeLine(line.sourceLineKey, () => applyEobLine({
           patientId,
           source,

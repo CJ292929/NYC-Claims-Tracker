@@ -44,6 +44,9 @@ import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
 import { ClaimImportDialog } from '@/components/claims/ClaimImportDialog';
+import { ClaimCsvTemplatePanel } from '@/components/claims/ClaimCsvTemplatePanel';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { detectCsvTemplateFromText, wrongTemplateMessage } from '@shared/claimCsvTemplates';
 import { sumKnownMoney } from '@shared/claimImport';
 import { formatCalendarDate } from '@/lib/date';
 import type { AuthUrgency } from '@shared/authUrgency';
@@ -453,6 +456,8 @@ export default function Dashboard() {
     patient: { id: string; name: string } | null;
     authPeriod: number | null;
     files: File[];
+    /** P4-P26: 'csv' = Bulk Upload → CMS1500 / Insurance Reimbursement CSV templates. */
+    source?: 'document' | 'csv';
   } | null>(null);
   const [claimFormData, setClaimFormData] = useState({
     placeOfService: '',
@@ -1246,6 +1251,7 @@ export default function Dashboard() {
       contextPatient={claimImport.patient}
       contextAuthPeriod={claimImport.authPeriod}
       initialFiles={claimImport.files}
+      source={claimImport.source ?? 'document'}
       onSaved={invalidateClaims}
     />
   ) : null;
@@ -1282,6 +1288,14 @@ export default function Dashboard() {
       text = await file.text();
     } catch {
       toast.error('Error reading file. Please check the format.');
+      return;
+    }
+
+    // P4-P26: a claims CSV template is never read as patient data.
+    const wrongTemplate = wrongTemplateMessage('patient', detectCsvTemplateFromText(text));
+    if (wrongTemplate) {
+      toast.error(canAccessClaims ? wrongTemplate : 'This file is a claims template, not the Patient Data template. Nothing was imported.');
+      event.target.value = '';
       return;
     }
 
@@ -1392,19 +1406,8 @@ export default function Dashboard() {
   // a control on a different route branch, like the Active/Discharged
   // switch — always has somewhere to actually appear.
 
-  const bulkUploadDialog = (
-    <Dialog
-      open={showUploadDialog}
-      onOpenChange={(open) => {
-        setShowUploadDialog(open);
-        if (!open) setCsvImportResult(null);
-      }}
-    >
-      <DialogContent className="bg-white sm:max-w-md max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="text-brand-blue">Bulk Upload Patient Data</DialogTitle>
-          <DialogDescription>Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions</DialogDescription>
-        </DialogHeader>
+  // Patient Data CSV upload — unchanged; shown alone for Staff, as the first tab otherwise.
+  const patientCsvUploadBody = (
         <div className="space-y-4">
           <div className="border-2 border-dashed border-brand-cream-dark rounded-lg p-6 text-center hover:border-brand-gold transition-colors">
             <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" id="file-upload" />
@@ -1447,9 +1450,51 @@ export default function Dashboard() {
             <p className="font-mono">Patient Name, Insurance, Authorized Sessions, …</p>
           </div>
         </div>
+  );
+
+  const bulkUploadDialog = (
+    <Dialog
+      open={showUploadDialog}
+      onOpenChange={(open) => {
+        setShowUploadDialog(open);
+        if (!open) setCsvImportResult(null);
+      }}
+    >
+      <DialogContent className={`bg-white max-h-[90vh] overflow-y-auto ${canAccessClaims ? 'w-[calc(100vw-1rem)] sm:max-w-xl' : 'sm:max-w-md'}`}>
+        <DialogHeader>
+          <DialogTitle className="text-brand-blue">{canAccessClaims ? 'Bulk Upload' : 'Bulk Upload Patient Data'}</DialogTitle>
+          <DialogDescription>
+            {canAccessClaims
+              ? 'Choose what the CSV file contains. Each option has its own template.'
+              : 'Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions'}
+          </DialogDescription>
+        </DialogHeader>
+        {canAccessClaims ? (
+          // P4-P26: Clinic Admin / Owner only — Staff never see the claims options.
+          <Tabs defaultValue="patients" className="w-full">
+            <TabsList className="grid h-auto w-full grid-cols-3">
+              <TabsTrigger value="patients" className="whitespace-normal text-xs sm:text-sm">Patient Data</TabsTrigger>
+              <TabsTrigger value="cms1500" className="whitespace-normal text-xs sm:text-sm" data-testid="bulk-upload-tab-cms1500">CMS1500</TabsTrigger>
+              <TabsTrigger value="eob" className="whitespace-normal text-xs sm:text-sm" data-testid="bulk-upload-tab-eob">Insurance Reimbursement</TabsTrigger>
+            </TabsList>
+            <TabsContent value="patients" className="mt-4">{patientCsvUploadBody}</TabsContent>
+            {(['cms1500', 'eob'] as const).map(kind => (
+              <TabsContent key={kind} value={kind} className="mt-4">
+                <ClaimCsvTemplatePanel
+                  kind={kind}
+                  onFile={file => {
+                    setShowUploadDialog(false);
+                    setClaimImport({ kind, mode: 'bulk', source: 'csv', patient: null, authPeriod: null, files: [file] });
+                  }}
+                />
+              </TabsContent>
+            ))}
+          </Tabs>
+        ) : patientCsvUploadBody}
       </DialogContent>
     </Dialog>
   );
+
 
   const patientActionDialogs = (
     <>
