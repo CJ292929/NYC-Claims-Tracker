@@ -97,16 +97,6 @@ function parseMoney(raw: string): number | null {
   return isNaN(n) ? null : n;
 }
 
-/**
- * CMS-1500 Box 24 has exactly 6 service-line slots (numbered 1-6 down the
- * form). visitNumber is the printed row position, not a labeled field —
- * any value outside that range means the row counter mis-tracked (e.g. a
- * false-positive CPT match) and the value must not be trusted.
- */
-function clampVisitNumber(n: number): number | null {
-  return n >= 1 && n <= 6 ? n : null;
-}
-
 // ─── Meritain Health EOB Template ───────────────────────────────────────────
 
 /**
@@ -791,9 +781,7 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
   // Some PDFs render: "06 10 26 06 10 26 11 97530 GP ABCD 350.00 2"
   const compactPattern = /(\d{2})\s+(\d{2})\s+(\d{2})\s+(\d{2})\s+(\d{2})\s+(\d{2})\s+(\d{1,2})\s+((?:9|G|H|T)\d{4})\s+([A-Z0-9 ]+?)\s+([A-Z]{2,6})\s+([\d,]+\.\d{2})\s+(\d+)/g;
   let cm2: RegExpExecArray | null;
-  let compactRowCounter = 0; // fallback visit number = this row's position, matching Box 24's own printed row numbers (1-6)
   while ((cm2 = compactPattern.exec(serviceArea)) !== null) {
-    compactRowCounter++;
     const fromDate = parseCMS1500Date(cm2[1], cm2[2], cm2[3]);
     const placeOfService = cm2[7];
     const cptCode = cm2[8];
@@ -812,10 +800,9 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
     const lineDiagnosisCodes = resolveLineDiagnosisCodes(indexedDiagnoses, pointerToken, allDiagCodes || null);
     const chargeAmount = parseMoney(cm2[11]);
     const units = parseInt(cm2[12], 10);
-    // visitNumber is the service line's printed position in Box 24 (1-6) —
-    // a positional value, not a text label. compactRowCounter already
-    // increments once per matched service line in document order.
-    const visitNumber = clampVisitNumber(compactRowCounter);
+    // P4-P24: a CMS-1500 has no visit-number box, and a Box 24 row position
+    // is not a visit number — never derived from the row counter.
+    const visitNumber = null;
     const dateKey = fromDate || 'no-date';
     if (!dateMap.has(dateKey)) {
       dateMap.set(dateKey, {
@@ -844,11 +831,9 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
     // In layout mode dates appear as: "06 I   I" "10 II 26" or "I 10 I 26 I 06 I 10 I 26 I 11 I"
     const dateFragRe = /(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{2})\s*(?:I\s*)?(\d{1,2})\s*(?:I\s*)?/;
 
-    let layoutRowCounter = 0; // fallback visit number = this row's position, matching Box 24's own printed row numbers (1-6)
     for (let i = 0; i < lines.length; i++) {
       const cptMatch = lines[i].match(cptLineRe);
       if (!cptMatch) continue;
-      layoutRowCounter++;
       const cptCode = cptMatch[1];
 
       // Look in a window of ±15 lines for date, modifier, charge, units
@@ -964,10 +949,8 @@ export function parseCMS1500(text: string): Array<{ patientName: string; claims:
         }
       }
 
-      // visitNumber is the service line's printed position in Box 24 (1-6) —
-      // a positional value, not a text label. layoutRowCounter already
-      // increments once per matched service line in document order.
-      const visitNumber = clampVisitNumber(layoutRowCounter);
+      // P4-P24: never derived from the row counter (see the compact pass above).
+      const visitNumber = null;
 
       const dateKey = fromDate || 'no-date';
       if (!dateMap.has(dateKey)) {

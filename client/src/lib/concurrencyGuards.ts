@@ -1,21 +1,20 @@
 /**
  * client/src/lib/concurrencyGuards.ts
  *
- * P4-P16R: two concurrency hazards in the claim upload/save flow
- * (client/src/pages/Dashboard.tsx) that a React `disabled` prop alone
- * cannot close, because state updates only take effect after the next
- * render commits, not synchronously inside the event handler that
- * triggered them:
+ * P4-P16R: two concurrency hazards in the claim upload/save flow (since
+ * P4-P24, client/src/components/claims/ClaimImportDialog.tsx) that a React
+ * `disabled` prop alone cannot close, because state updates only take
+ * effect after the next render commits, not synchronously inside the event
+ * handler that triggered them:
  *
- * 1. Double-clicking "Save N Claims" (or any other re-entry into
- *    handleSaveExtractedClaims while a save is already running) could
- *    start a second pass over the same rows before the first pass's
- *    setIsSavingExtractedClaims(true) re-render disables the button,
- *    issuing duplicate claims.upsert writes for the same lines.
- * 2. A slow upload-extraction request superseded by a newer one (a second
- *    file picked, or the same upload retried) could resolve AFTER the
- *    newer request and overwrite its result, or apply a stale result to
- *    a dialog the newer request has already moved past.
+ * 1. Double-clicking a Save button (or any other re-entry while a save is
+ *    already running) could send the same lines twice before the re-render
+ *    disables the button. (The server is also idempotent per source line —
+ *    this guard just avoids the wasted second request.)
+ * 2. A slow extraction or preview request superseded by a newer one (a
+ *    second file picked, an edit re-checked) could resolve AFTER the newer
+ *    request and overwrite its result, or apply a stale result to a dialog
+ *    the newer request has already moved past.
  *
  * Both are synchronous, in-memory guards (backed by a ref in the
  * component, not React state) checked in the same tick as the call that

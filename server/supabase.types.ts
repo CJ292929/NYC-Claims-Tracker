@@ -125,6 +125,12 @@ export interface ClaimRecordRow {
   lmn: string | null;                   // letter of medical necessity note/reference
   is_resolved: boolean;                 // staff has cleared this claim from the follow-up queue
   source_line_index: number | null;
+  // P4-P24: source provenance (NULL on pre-P4-P24 rows). See
+  // 20261026000000_p4_p24_cms1500_first_claim_lines.sql.
+  cms1500_document_id: string | null;   // uuid → claim_import_documents.id
+  cms1500_line_key: string | null;
+  eob_document_id: string | null;       // uuid → claim_import_documents.id
+  eob_line_key: string | null;
   created_by: string | null;
   created_by_type: ActorType | null;
   updated_by: string | null;
@@ -242,11 +248,28 @@ export type InsertClaimRecord = {
   lmn?: string | null;
   is_resolved?: boolean;
   source_line_index?: number | null;
+  cms1500_document_id?: string | null;
+  cms1500_line_key?: string | null;
+  eob_document_id?: string | null;
+  eob_line_key?: string | null;
   created_by?: string | null;
   created_by_type?: ActorType | null;
   updated_by?: string | null;
   updated_by_type?: ActorType | null;
 };
+
+/** P4-P24: one uploaded CMS1500 / EOB file, identified by kind + SHA-256
+ *  of its bytes (re-uploading the same file resolves to the same row). */
+export interface ClaimImportDocumentRow {
+  id: string;
+  document_kind: "cms1500" | "eob";
+  content_sha256: string;
+  file_name: string | null;
+  page_count: number | null;
+  created_by: string | null;
+  created_by_type: ActorType | null;
+  created_at: string;
+}
 
 export type InsertAuditLog = {
   patient_id?: string | null;
@@ -296,6 +319,11 @@ export interface Database {
         Row: ClaimRecordRow;
         Insert: InsertClaimRecord;
         Update: UpdateClaimRecord;
+      };
+      claim_import_documents: {
+        Row: ClaimImportDocumentRow;
+        Insert: Omit<ClaimImportDocumentRow, "id" | "created_at">;
+        Update: never;
       };
       audit_logs: {
         Row: AuditLogRow;

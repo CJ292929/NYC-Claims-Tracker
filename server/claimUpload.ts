@@ -20,6 +20,9 @@ import { ENV } from './_core/env';
 import { requireSuperAdmin } from './_core/requireAuth';
 import { tryTemplateExtraction, parseCMS1500, PatientBoundaryError, type ExtractedClaim, type PatientClaimGroup } from './insuranceTemplates';
 import { extractClaimsWithAI, detectInsuranceType, KNOWN_INSURER_NAMES, reconcileClaimStatusWithPaymentEvidence, type ExtractionSource } from './aiClaimExtractor';
+import { cms1500GroupsFromClaims, eobGroupsFromClaims, sha256Hex } from './claimImportKeys';
+import { assembleCms1500Pages, extractCms1500PagesWithVision, MAX_SCANNED_PAGES } from './cms1500Vision';
+import type { Cms1500ImportLine, EobImportLine, ImportDocument, ImportGroup } from '@shared/claimImport';
 
 // requireSuperAdmin (server/_core/requireAuth.ts) runs before multer so an
 // unauthenticated or non-Super-Admin request (P4-P23: Claims extraction is
@@ -53,21 +56,21 @@ import { extractClaimsWithAI, detectInsuranceType, KNOWN_INSURER_NAMES, reconcil
 // bulkImportFromEOB (server/routers.ts) reads line.* — not claim.* — for
 // those fields when saving. Checking/backfilling only the claim-level object
 // silently misses them entirely.
+// P4-P24: diagnosisCodes and visitNumber are deliberately NOT backfilled for
+// CMS1500. The AI pass returns the whole Box 21 list rather than a line's
+// own Box 24E pointer codes, and a CMS-1500 has no visit-number box (a row
+// position is not a visit number). A line the template left without codes
+// stays null and is flagged for review instead.
 const CMS1500_CLAIM_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
   'placeOfService',
-  'diagnosisCodes',
   'claimSubmittedDate',
-  // visitNumber lives on the DateClaimGroup itself (bulkImportFromEOB reads
-  // claim.visitNumber, not line.visitNumber — see server/routers.ts), so it
-  // belongs in the claim-level list, not the line-level one below.
-  'visitNumber',
 ];
 const CMS1500_LINE_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
   'cptCodes',
+  // Read for the Box 28 cross-check only; CMS1500 never persists a charge.
   'chargeAmount',
   'unitsBilled',
   'modifier',
-  'diagnosisCodes',
 ];
 
 const REIMBURSEMENT_CLAIM_FIELDS_TO_BACKFILL: (keyof ExtractedClaim)[] = [
@@ -357,6 +360,54 @@ async function extractPdfTextLayoutJS(buffer: Buffer): Promise<string> {
   return pageTexts.join('\n\n');
 }
 
+/** Page count from pdfjs (works without a canvas backend); null if unreadable. */
+async function getPdfPageCount(buffer: Buffer): Promise<number | null> {
+  try {
+    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+    return pdf.numPages;
+  } catch {
+    return null;
+  }
+}
+
+/** True when a PDF has a usable text layer (a scan has none). */
+function hasTextLayer(text: string): boolean {
+  return text.replace(/\s+/g, '').length >= 40;
+}
+
+/** Groups flat AI claims by their own per-claim patient name (never merged across names). */
+function groupFlatClaimsByPatient(claims: Array<ExtractedClaim & { patientName?: string | null }>): Array<{ patientName: string | null; claims: ExtractedClaim[] }> {
+  const byName = new Map<string, { patientName: string | null; claims: ExtractedClaim[] }>();
+  for (const c of claims) {
+    const patientName = c.patientName?.trim() || null;
+    const k = patientName ? patientName.toUpperCase() : '';
+    if (!byName.has(k)) byName.set(k, { patientName, claims: [] });
+    byName.get(k)!.claims.push(c);
+  }
+  return Array.from(byName.values());
+}
+
+function buildImportDocument<L extends Cms1500ImportLine | EobImportLine>(params: {
+  kind: 'cms1500' | 'eob';
+  sha256: string;
+  fileName: string;
+  pageCount: number | null;
+  extractionMethod: string;
+  groups: ImportGroup<L>[];
+  warnings?: string[];
+}): ImportDocument<L> {
+  return {
+    kind: params.kind,
+    sha256: params.sha256,
+    fileName: params.fileName.slice(0, 255),
+    pageCount: params.pageCount,
+    extractionMethod: params.extractionMethod,
+    groups: params.groups,
+    warnings: params.warnings ?? [],
+  };
+}
+
 // Parse Excel (XLSX/XLS) buffer to JSON string (compact, one row per line)
 function extractXlsxText(buffer: Buffer): string {
   const workbook = XLSX.read(buffer, { type: 'buffer' });
@@ -471,6 +522,9 @@ export function registerClaimUploadRoute(app: Express) {
         const { buffer, mimetype, originalname } = req.file;
         const name = originalname.toLowerCase();
         let extractedText = '';
+        // P4-P24: the file's identity for idempotent import (same bytes ->
+        // same claim_import_documents row -> retries/reimports are no-ops).
+        const sha256 = sha256Hex(buffer);
 
         console.log(`[ClaimUpload] Stage 1/7 — PDF uploaded: "${originalname}" (${(buffer.length / 1024).toFixed(1)} KB, ${mimetype})`);
 
@@ -548,9 +602,11 @@ export function registerClaimUploadRoute(app: Express) {
         }
 
         if (uploadType === 'cms1500') {
+          const isPdf = !isXlsx && !isCsv;
+          const pageCount = isPdf ? await getPdfPageCount(buffer) : null;
           // For CMS1500, re-extract using pdftotext -layout for better form field capture
           let cms1500Text = extractedText;
-          if (!isXlsx && !isCsv) {
+          if (isPdf) {
             try {
               cms1500Text = extractPdfTextLayout(buffer);
             } catch (pdftotextError) {
@@ -567,83 +623,93 @@ export function registerClaimUploadRoute(app: Express) {
               }
             }
           }
-          // CMS1500 parser: extract Date of Service, Place of Service, CPT, Modifier, Units, Diagnosis
-          console.log('[ClaimUpload] Stage 4/7 — Regex template parsing (CMS1500)...');
-          const patientGroups = parseCMS1500(cms1500Text);
-          const flatClaims = patientGroups.flatMap(g => g.claims);
 
-          if (flatClaims.length > 0) {
-            if (hasMissingFields(flatClaims, CMS1500_CLAIM_FIELDS_TO_BACKFILL, CMS1500_LINE_FIELDS_TO_BACKFILL)) {
-              try {
-                const cms1500Source: ExtractionSource = (cms1500Text || extractedText).trim()
-                  ? { kind: 'text', text: cms1500Text || extractedText }
-                  : { kind: 'pdf', buffer, filename: originalname };
-                console.log('[ClaimUpload] Stage 4b/7 — CMS1500 regex parser left fields blank, running AI to backfill place of service / units / diagnosis / modifier...');
-                const backfillResult = await extractClaimsWithAI(cms1500Source, 'cms1500');
-                if (backfillResult.claims.length > 0) {
-                  backfillMissingFields(flatClaims, backfillResult.claims, CMS1500_CLAIM_FIELDS_TO_BACKFILL, CMS1500_LINE_FIELDS_TO_BACKFILL);
+          // Text-layer CMS1500s keep the existing regex template path.
+          if (hasTextLayer(cms1500Text || extractedText)) {
+            console.log('[ClaimUpload] Stage 4/7 — Regex template parsing (CMS1500)...');
+            const patientGroups = parseCMS1500(cms1500Text);
+            const flatClaims = patientGroups.flatMap(g => g.claims);
+            if (flatClaims.some(c => c.cptLines.length > 0)) {
+              if (hasMissingFields(flatClaims, CMS1500_CLAIM_FIELDS_TO_BACKFILL, CMS1500_LINE_FIELDS_TO_BACKFILL)) {
+                try {
+                  console.log('[ClaimUpload] Stage 4b/7 — CMS1500 regex parser left fields blank, running AI to backfill place of service / units / modifier...');
+                  const backfillResult = await extractClaimsWithAI({ kind: 'text', text: cms1500Text || extractedText }, 'cms1500');
+                  if (backfillResult.claims.length > 0) {
+                    backfillMissingFields(flatClaims, backfillResult.claims, CMS1500_CLAIM_FIELDS_TO_BACKFILL, CMS1500_LINE_FIELDS_TO_BACKFILL);
+                  }
+                } catch (backfillError) {
+                  console.error('[ClaimUpload] CMS1500 AI backfill failed (continuing with regex-only result):', backfillError);
                 }
-              } catch (backfillError) {
-                console.error('[ClaimUpload] CMS1500 AI backfill failed (continuing with regex-only result):', backfillError);
               }
-            }
-            enforceFieldBoundary(flatClaims, 'cms1500');
-            console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${flatClaims.length} claim(s) via CMS1500 template parser`);
-            res.json({
-              claims: flatClaims,
-              patientGroups: patientGroups.length > 0 ? patientGroups : null,
-              extractedLength: extractedText.length,
-              templateUsed: 'CMS1500',
-              uploadType: 'cms1500',
-            });
-            return;
-          }
-
-          // Fall back to AI extraction when the regex-based parser (which relies
-          // on pdftotext -layout output) finds nothing — e.g. pdftotext isn't
-          // installed in this environment (serverless platforms like Vercel
-          // don't ship it). Use whatever text we do have; if none at all
-          // (pdftotext AND pdfjs both failed), send the PDF directly instead.
-          // Never let an AI-provider failure crash the request — log and fall
-          // through to the CMS1500 template result (empty) below instead.
-          try {
-            const cms1500Source: ExtractionSource = (cms1500Text || extractedText).trim()
-              ? { kind: 'text', text: cms1500Text || extractedText }
-              : { kind: 'pdf', buffer, filename: originalname };
-            console.log(`[ClaimUpload] Stage 5/7 — AI text parsing (CMS1500 regex parser found no claims, trying AI via ${cms1500Source.kind}${cms1500Source.kind === 'pdf' ? ' — Stage 5b/7 vision fallback' : ''})...`);
-            const aiResult = await extractClaimsWithAI(cms1500Source, 'cms1500');
-            if (aiResult.claims.length > 0) {
-              console.log(`[ClaimUpload] Stage 6/7 — JSON validation passed: ${aiResult.claims.length} claim(s)`);
-              enforceFieldBoundary(aiResult.claims, 'cms1500');
-              const aiPatientGroups = aiResult.patientName
-                ? [{ patientName: aiResult.patientName, claims: aiResult.claims }]
-                : null;
-              console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${aiResult.claims.length} claim(s) via AI (CMS1500)`);
+              enforceFieldBoundary(flatClaims, 'cms1500');
+              const groups = cms1500GroupsFromClaims(patientGroups);
+              for (const g of groups) {
+                const missingDx = g.lines.filter(l => !l.diagnosisCodes).length;
+                if (missingDx > 0) g.warnings.push(`${missingDx} line(s) have no diagnosis codes: the Box 24E pointer could not be resolved against Box 21. Enter them manually if needed.`);
+              }
+              console.log(`[ClaimUpload] Stage 7/7 — Review pending: ${groups.reduce((n, g) => n + g.lines.length, 0)} CMS1500 line(s) via template parser`);
               res.json({
-                claims: aiResult.claims,
-                patientGroups: aiPatientGroups,
+                claims: flatClaims,
+                patientGroups: patientGroups.length > 0 ? patientGroups : null,
                 extractedLength: extractedText.length,
-                templateUsed: `AI (CMS1500)`,
+                templateUsed: 'CMS1500',
                 uploadType: 'cms1500',
-                confidence: aiResult.confidence,
-                extractionNotes: aiResult.extractionNotes,
+                importDocument: buildImportDocument({ kind: 'cms1500', sha256, fileName: originalname, pageCount, extractionMethod: 'CMS1500 template (text layer)', groups }),
               });
               return;
             }
-          } catch (aiError) {
-            console.error('[ClaimUpload] CMS1500 AI extraction failed (continuing with empty template result, request will not crash):', aiError);
           }
 
-          enforceFieldBoundary(flatClaims, 'cms1500');
-          res.json({
-            claims: flatClaims,
-            patientGroups: patientGroups.length > 0 ? patientGroups : null,
-            extractedLength: extractedText.length,
-            templateUsed: 'CMS1500',
-            uploadType: 'cms1500',
-          });
+          if (!isPdf) {
+            res.status(422).json({ error: 'CMS1500 uploads must be PDF files.' });
+            return;
+          }
+
+          // Scanned / image-only (or unparseable) CMS1500: read EVERY page
+          // through the configured AI provider's document vision, one result
+          // per page, and assemble deterministically (server/cms1500Vision.ts).
+          // A provider failure is a controlled error, never a silent empty or
+          // partial success.
+          if (!pageCount) {
+            res.status(422).json({ error: 'This PDF could not be opened. Re-save or re-scan it and try again.' });
+            return;
+          }
+          if (pageCount > MAX_SCANNED_PAGES) {
+            res.status(422).json({ error: `This scan has ${pageCount} pages. Split it into files of at most ${MAX_SCANNED_PAGES} pages and upload them together with Bulk CMS1500 Upload.` });
+            return;
+          }
+          try {
+            console.log(`[ClaimUpload] Stage 5/7 — CMS1500 page vision: ${pageCount} page(s), no usable text layer`);
+            const { pages, missingPages, method } = await extractCms1500PagesWithVision(buffer, originalname, pageCount);
+            const assembled = assembleCms1500Pages(pages, pageCount, missingPages);
+            const lineCount = assembled.groups.reduce((n, g) => n + g.lines.length, 0);
+            console.log(`[ClaimUpload] Stage 7/7 — Review pending: ${lineCount} CMS1500 line(s) from ${pages.length}/${pageCount} page(s) in ${assembled.groups.length} group(s)`);
+            if (lineCount === 0) {
+              res.status(422).json({ error: 'No CMS1500 service lines could be read from this file.' });
+              return;
+            }
+            res.json({
+              claims: [],
+              patientGroups: null,
+              extractedLength: extractedText.length,
+              templateUsed: 'CMS1500 (scanned, page vision)',
+              uploadType: 'cms1500',
+              importDocument: buildImportDocument({
+                kind: 'cms1500', sha256, fileName: originalname, pageCount,
+                extractionMethod: `CMS1500 page vision, ${method === 'rendered_pages' ? 'each page read twice' : 'whole-PDF fallback'} (${pages.length}/${pageCount} pages read)`,
+                groups: assembled.groups, warnings: assembled.warnings,
+              }),
+            });
+          } catch (visionError) {
+            console.error('[ClaimUpload] CMS1500 page vision failed:', visionError instanceof Error ? visionError.message : visionError);
+            res.status(502).json({ error: 'The scanned CMS1500 could not be read by the document reader. Nothing was saved — try again.' });
+          }
           return;
         }
+
+        const eobPageCount = !isXlsx && !isCsv ? await getPdfPageCount(buffer) : null;
+        const eobDocument = (groups: Array<{ patientName?: string | null; claims: any[] }>, extractionMethod: string) =>
+          buildImportDocument({ kind: 'eob', sha256, fileName: originalname, pageCount: eobPageCount, extractionMethod, groups: eobGroupsFromClaims(groups) });
 
         // Step 1: Try rule-based template recognition first (fast, accurate)
         // For reimbursement PDFs, use pdftotext -layout so each service line's charge/
@@ -745,6 +811,12 @@ export function registerClaimUploadRoute(app: Express) {
             templateUsed: templateResult.templateName,
             uploadType: 'reimbursement',
             reimbursementReviewNeeded: reimbursementReviewNeeded.length > 0 ? reimbursementReviewNeeded : undefined,
+            importDocument: eobDocument(
+              templateResult.patientGroups && templateResult.patientGroups.length > 0
+                ? templateResult.patientGroups
+                : groupFlatClaimsByPatient(templateResult.claims),
+              templateResult.templateName,
+            ),
           });
           return;
         }
@@ -783,6 +855,7 @@ export function registerClaimUploadRoute(app: Express) {
               uploadType: 'reimbursement',
               confidence: aiResult.confidence,
               extractionNotes: aiResult.extractionNotes,
+              importDocument: eobDocument(groupFlatClaimsByPatient(aiResult.claims), `AI (${aiResult.detectedInsurer || 'Unknown'})`),
             });
             return;
           }
@@ -804,6 +877,7 @@ export function registerClaimUploadRoute(app: Express) {
             uploadType: 'reimbursement',
             confidence: aiResult.confidence,
             extractionNotes: aiResult.extractionNotes ?? 'No service line data was found for this patient in the document.',
+            importDocument: eobDocument([], `AI (${aiResult.detectedInsurer || 'Unknown'})`),
           });
           return;
         } catch (aiError) {
@@ -828,7 +902,13 @@ export function registerClaimUploadRoute(app: Express) {
         enforceFieldBoundary(claims, 'reimbursement');
         claims.forEach(reconcileClaimStatusWithPaymentEvidence);
         console.log(`[ClaimUpload] Stage 7/7 — Database save pending: ${claims.length} claim(s) via legacy AI extraction`);
-        res.json({ claims, extractedLength: extractedText.length, templateUsed: 'AI Extraction (Legacy)', uploadType: 'reimbursement' });
+        res.json({
+          claims, extractedLength: extractedText.length, templateUsed: 'AI Extraction (Legacy)', uploadType: 'reimbursement',
+          // The legacy extractor has no per-claim patient attribution, so its
+          // lines form one group with no name: a reviewer must confirm the
+          // patient explicitly before anything from it can be saved.
+          importDocument: eobDocument([{ patientName: null, claims }], 'AI Extraction (Legacy)'),
+        });
       } catch (err: any) {
         console.error('[ClaimUpload] Error:', err);
         res.status(500).json({ error: err.message ?? 'Failed to process file.' });

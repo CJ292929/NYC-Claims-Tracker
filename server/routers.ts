@@ -35,8 +35,6 @@ import {
   deleteClaimRecordWithAudit,
   ClaimRecordNotFoundError,
   ClaimRecordPatientMismatchError,
-  upsertClaimRecord,
-  ClaimLineIdentityAmbiguousError,
   classifyClaimFollowUp,
   sortByFollowUpUrgency,
   aggregateClaimStatusCounts,
@@ -57,15 +55,13 @@ import {
   InsurerCatalogHasForeignKeysError,
   InsurerCatalogEntryNotFoundError,
   InsurerDeletedError,
-  findCms1500EnrichmentCandidates,
-  patientHasAnyClaimRecords,
-  applyCms1500Enrichment,
   LastActiveAccountManagerError,
   ClinicUserConflictError,
   listActivityLog,
   listHistoryForEntity,
-  type Cms1500EnrichmentCandidate as Cms1500EnrichmentCandidateDTO,
+  ClaimImportRuleError,
 } from "./db";
+import { commitClaimImport, importCommitInput, importPreviewInput, previewClaimImport } from "./claimImport";
 import type { ClinicUser } from "../drizzle/schema";
 import { sdk } from "./_core/sdk";
 import { getActorContext } from "./actorIdentity";
@@ -120,26 +116,6 @@ function parseDate(s: string | null | undefined): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
-// P4-P14: within one claim/date group's service lines, assigns each line a
-// 0-based "source line index" scoped to lines sharing the same CPT code —
-// the position it occupies among same-CPT repeats, in the order the source
-// document/import lists them. Lines with a unique CPT in the group get
-// index 0 (no repeat). Passed to upsertClaimRecord so two legitimate
-// same-date/same-CPT lines (e.g. two 97530 sessions billed the same day)
-// land in two distinct rows instead of the second silently overwriting the
-// first — see server/db.ts upsertClaimRecord and
-// server/upsertClaimRecord.idempotency.test.ts. Re-running this over the
-// same ordered lines array always reproduces the same indices, which is
-// what keeps re-importing the same document idempotent.
-function computeSourceLineIndices(lines: Array<{ cptCodes?: string | null }>): number[] {
-  const seenCount = new Map<string, number>();
-  return lines.map(line => {
-    const key = (line.cptCodes ?? "").trim();
-    const index = seenCount.get(key) ?? 0;
-    seenCount.set(key, index + 1);
-    return index;
-  });
-}
 
 // Client-facing staff shape — never includes passwordHash or tokenVersion
 // (see S3 report / adminOrOwnerProcedure notes in trpc.ts).
@@ -162,6 +138,17 @@ function assertMayWriteVisitFinancials(
 }
 
 // ─── Routers ──────────────────────────────────────────────────────────────────
+
+/** P4-P24: the pre-CMS1500-first save paths. Super Admin gated like every
+ *  claims.* procedure; always refuses, without reading its input. */
+const retiredClaimsImportProcedure = superAdminProcedure
+  .input(z.unknown())
+  .mutation(() => {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "This upload flow was replaced by the CMS1500-first import. Reload the page and upload the CMS1500 first, then the EOB.",
+    });
+  });
 
 export const appRouter = router({
   system: systemRouter,
@@ -1089,78 +1076,11 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    upsert: superAdminProcedure
-      .input(z.object({
-        patientId: z.string().uuid(),
-        authPeriod: z.number(),
-        placeOfService: z.string().nullable().optional(),
-        dateOfService: z.string().nullable().optional(),
-        visitNumber: z.number().nullable().optional(),
-        cptCodes: z.string().nullable().optional(),
-        unitsBilled: z.number().nullable().optional(),
-        diagnosisCodes: z.string().nullable().optional(),
-        modifier: z.string().nullable().optional(),
-        chargeAmount: z.number().nullable().optional(),
-        insuranceReimbursement: z.number().nullable().optional(),
-        patientAmountPaid: z.number().nullable().optional(),
-        patientAmountDue: z.number().nullable().optional(),
-        insuranceBilled: z.string().nullable().optional(),
-        oaClaimNumber: z.string().nullable().optional(),
-        claimSubmittedDate: z.string().nullable().optional(),
-        expireBcbsClaimNumber: z.string().nullable().optional(),
-        claimStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted', 'needs_review']).optional(),
-        paymentReceived: z.number().nullable().optional(),
-        checkDate: z.string().nullable().optional(),
-        checkNumberVirtualCard: z.string().nullable().optional(),
-        dateReceived: z.string().nullable().optional(),
-        dateOfAppeal: z.string().nullable().optional(),
-        referenceNo: z.string().nullable().optional(),
-        lmn: z.string().nullable().optional(),
-        // P4-P14: 0-based position of this line among source lines sharing
-        // its CPT code within the same save batch — see
-        // computeSourceLineIndices. Omitted entirely by any caller that
-        // doesn't have a notion of "repeated lines" (preserves exact prior
-        // matching behavior for those callers).
-        sourceLineIndex: z.number().int().min(0).nullable().optional(),
-      }))
-      .mutation(async ({ input, ctx }) => {
-        try {
-          await upsertClaimRecord({
-            patientId: input.patientId,
-            authPeriod: input.authPeriod,
-            placeOfService: input.placeOfService ?? null,
-            dateOfService: parseDate(input.dateOfService),
-            visitNumber: input.visitNumber ?? null,
-            cptCodes: input.cptCodes ?? null,
-            sourceLineIndex: input.sourceLineIndex ?? null,
-            unitsBilled: input.unitsBilled ?? null,
-            diagnosisCodes: input.diagnosisCodes ?? null,
-            modifier: input.modifier ?? null,
-            chargeAmount: input.chargeAmount ?? null,
-            insuranceReimbursement: input.insuranceReimbursement ?? null,
-            patientAmountPaid: input.patientAmountPaid ?? null,
-            patientAmountDue: input.patientAmountDue ?? null,
-            insuranceBilled: input.insuranceBilled ?? null,
-            oaClaimNumber: input.oaClaimNumber ?? null,
-            claimSubmittedDate: parseDate(input.claimSubmittedDate),
-            expireBcbsClaimNumber: input.expireBcbsClaimNumber ?? null,
-            claimStatus: input.claimStatus ?? 'submitted',
-            paymentReceived: input.paymentReceived ?? null,
-            checkDate: parseDate(input.checkDate),
-            checkNumberVirtualCard: input.checkNumberVirtualCard ?? null,
-            dateReceived: parseDate(input.dateReceived),
-            dateOfAppeal: parseDate(input.dateOfAppeal),
-            referenceNo: input.referenceNo ?? null,
-            lmn: input.lmn ?? null,
-          }, getActorContext(ctx.user));
-        } catch (err) {
-          if (err instanceof ClaimLineIdentityAmbiguousError) {
-            throw new TRPCError({ code: "CONFLICT", message: err.message });
-          }
-          throw err;
-        }
-        return { success: true };
-      }),
+    // P4-P24: superseded by importPreview / importCommit below. Kept as
+    // explicit refusals (still Super Admin gated) rather than removed, so a
+    // browser still running the previous bundle during a deploy gets a clear
+    // message instead of creating EOB-first rows or enriching untracked rows.
+    upsert: retiredClaimsImportProcedure,
 
     historyForClaim: superAdminProcedure
       .input(z.object({ id: z.string().uuid() }))
@@ -1169,473 +1089,41 @@ export const appRouter = router({
       }),
 
     /**
-     * CMS1500 enrichment, step 1 — preview only, no writes.
-     *
-     * For each CMS1500 line (identified by its date of service + CPT
-     * code(s)), finds existing claim rows for this patient across EVERY auth
-     * period (never just their latest) and classifies the result:
-     *   - 0 candidates -> 'no_match' (or 'no_claims' if the patient has no
-     *     claim rows at all, meaning the reimbursement file was never
-     *     uploaded)
-     *   - 1 candidate WITH reimbursement evidence (see
-     *     Cms1500EnrichmentCandidate.hasReimbursementEvidence) -> 'matched',
-     *     safe to auto-apply
-     *   - 1 candidate with NO reimbursement evidence -> 'matched_unconfirmed'
-     *     — claims_records has no provenance column, so a lone match could
-     *     be a manual entry or a legacy/pre-fix CMS1500-only row rather than
-     *     an actual reimbursement row; this is disclosed to staff and
-     *     requires an explicit confirmation click before it's included in
-     *     the commit, never auto-applied like a confirmed 'matched' line
-     *   - 2+ candidates -> 'needs_selection' (staff must pick which row)
+     * P4-P24: CMS1500-first import preview — no writes. Classifies every
+     * extracted line of every patient group in one uploaded file (see
+     * server/claimImport.ts and shared/claimImport.ts for the rules).
      */
-    cms1500EnrichmentPreview: superAdminProcedure
-      .input(z.object({
-        patientId: z.string().uuid(),
-        lines: z.array(z.object({
-          lineKey: z.string(),
-          dateOfService: z.string().nullable(),
-          cptCodes: z.string().nullable(),
-        })),
-      }))
+    importPreview: superAdminProcedure
+      .input(importPreviewInput)
       .mutation(async ({ input }) => {
-        const hasAnyClaims = await patientHasAnyClaimRecords(input.patientId);
-        const results = await Promise.all(input.lines.map(async (line) => {
-          const dos = parseDate(line.dateOfService);
-          if (!dos) {
-            return { lineKey: line.lineKey, status: 'invalid_date' as const, candidates: [] as Cms1500EnrichmentCandidateDTO[] };
-          }
-          const candidates = await findCms1500EnrichmentCandidates(input.patientId, dos, line.cptCodes ?? null);
-          if (candidates.length === 0) {
-            const status: 'no_match' | 'no_claims' = hasAnyClaims ? 'no_match' : 'no_claims';
-            return { lineKey: line.lineKey, status, candidates: [] as Cms1500EnrichmentCandidateDTO[] };
-          }
-          if (candidates.length === 1) {
-            const status: 'matched' | 'matched_unconfirmed' = candidates[0].hasReimbursementEvidence ? 'matched' : 'matched_unconfirmed';
-            return { lineKey: line.lineKey, status, candidates, claimRecordId: candidates[0].id };
-          }
-          return { lineKey: line.lineKey, status: 'needs_selection' as const, candidates };
-        }));
-        return { hasAnyClaims, results };
+        try {
+          return await previewClaimImport(input);
+        } catch (err) {
+          if (err instanceof ClaimImportRuleError) throw new TRPCError({ code: "NOT_FOUND", message: err.message });
+          throw err;
+        }
       }),
 
     /**
-     * CMS1500 enrichment, step 2 — commit.
-     *
-     * Only patches visit_number / diagnosis_codes / modifier / units_billed
-     * on the specific row identified by `claimRecordId` for each line (the
-     * auto-matched id from the preview, or the id staff explicitly selected
-     * for an ambiguous line). Re-validates ownership + compatibility
-     * server-side before writing — never inserts a new row, never touches
-     * charge_amount or any payment field. Lines the client never resolved
-     * (no_match/no_claims/needs_selection without a pick) are simply absent
-     * from `lines` and so are never sent here at all.
+     * P4-P24: commit reviewed lines from one uploaded file. Each line is one
+     * atomic write+audit RPC call; per-line results come back as saved /
+     * unchanged / skipped / review_required / failed, so one bad line never
+     * hides the others. Actor identity comes from the verified session only.
      */
-    cms1500EnrichmentCommit: superAdminProcedure
-      .input(z.object({
-        patientId: z.string().uuid(),
-        lines: z.array(z.object({
-          lineKey: z.string(),
-          claimRecordId: z.string().uuid(),
-          dateOfService: z.string().nullable(),
-          cptCodes: z.string().nullable(),
-          visitNumber: z.number().nullable().optional(),
-          diagnosisCodes: z.string().nullable().optional(),
-          modifier: z.string().nullable().optional(),
-          unitsBilled: z.number().nullable().optional(),
-        })),
-      }))
+    importCommit: superAdminProcedure
+      .input(importCommitInput)
       .mutation(async ({ input, ctx }) => {
-        const actor = getActorContext(ctx.user);
-        // One id per commit click (the user's final save action) groups every
-        // line this call writes — distinct from any id an earlier automated
-        // extraction step may have used — so the Activity Log can show them
-        // as one related event set (see import_batch_id in the P4-P17 migration).
-        const importBatchId = randomUUID();
-        const results: Array<{ lineKey: string; status: 'saved' | 'failed'; error?: string }> = [];
-        for (const line of input.lines) {
-          try {
-            const dos = parseDate(line.dateOfService);
-            if (!dos) throw new Error('Invalid or missing date of service.');
-            await applyCms1500Enrichment({
-              claimRecordId: line.claimRecordId,
-              patientId: input.patientId,
-              dateOfService: dos,
-              cptCodes: line.cptCodes ?? null,
-              visitNumber: line.visitNumber ?? null,
-              diagnosisCodes: line.diagnosisCodes ?? null,
-              modifier: line.modifier ?? null,
-              unitsBilled: line.unitsBilled ?? null,
-              actor,
-              importBatchId,
-            });
-            results.push({ lineKey: line.lineKey, status: 'saved' });
-          } catch (err: any) {
-            results.push({ lineKey: line.lineKey, status: 'failed', error: err?.message ?? 'Unknown error' });
-          }
+        try {
+          return await commitClaimImport(input, getActorContext(ctx.user));
+        } catch (err) {
+          if (err instanceof ClaimImportRuleError) throw new TRPCError({ code: "NOT_FOUND", message: err.message });
+          throw err;
         }
-        return { results };
       }),
 
-    /**
-     * Bulk import claims from a multi-patient EOB file.
-     * Matches patient names (case-insensitive) against dashboard patients,
-     * finds each patient's latest auth period, and saves all their claims.
-     */
-    bulkImportFromEOB: superAdminProcedure
-      .input(z.object({
-        uploadType: z.enum(['reimbursement', 'cms1500']).default('reimbursement'),
-        patientGroups: z.array(z.object({
-          patientName: z.string(),
-          claims: z.array(z.object({
-            // Date-level fields (shared across all CPT lines for this date)
-            placeOfService: z.string().nullable().optional(),
-            dateOfService: z.string().nullable().optional(),
-            visitNumber: z.number().nullable().optional(),
-            insuranceBilled: z.string().nullable().optional(),
-            oaClaimNumber: z.string().nullable().optional(),
-            claimSubmittedDate: z.string().nullable().optional(),
-            expireBcbsClaimNumber: z.string().nullable().optional(),
-            claimStatus: z.enum(['submitted', 'approved', 'pending', 'denied', 'pended', 'rejected', 'resubmitted', 'needs_review']).optional(),
-            checkDate: z.string().nullable().optional(),
-            checkNumberVirtualCard: z.string().nullable().optional(),
-            dateReceived: z.string().nullable().optional(),
-            dateOfAppeal: z.string().nullable().optional(),
-            referenceNo: z.string().nullable().optional(),
-            lmn: z.string().nullable().optional(),
-            // CPT sub-rows (one claim record per line)
-            cptLines: z.array(z.object({
-              cptCodes: z.string().nullable().optional(),
-              chargeAmount: z.number().nullable().optional(),
-              insuranceReimbursement: z.number().nullable().optional(),
-              patientAmountPaid: z.number().nullable().optional(),
-              patientAmountDue: z.number().nullable().optional(),
-              unitsBilled: z.number().nullable().optional(),
-              modifier: z.string().nullable().optional(),
-              diagnosisCodes: z.string().nullable().optional(),
-            })).optional(),
-            // Fallback flat fields (when no cptLines)
-            cptCodes: z.string().nullable().optional(),
-            unitsBilled: z.number().nullable().optional(),
-            diagnosisCodes: z.string().nullable().optional(),
-            modifier: z.string().nullable().optional(),
-            chargeAmount: z.number().nullable().optional(),
-            insuranceReimbursement: z.number().nullable().optional(),
-            patientAmountPaid: z.number().nullable().optional(),
-            patientAmountDue: z.number().nullable().optional(),
-            paymentReceived: z.number().nullable().optional(),
-          }))
-        })),
-        // Staff-confirmed matches for groups whose extracted name only
-        // produced an ambiguous "candidate" in the preview (see
-        // shared/nameMatch.ts classifyPatientMatch) — e.g. a spelled-out
-        // middle name the fuzzy matcher correctly refuses to auto-match.
-        // Index into patientGroups; never used to override a name that
-        // *does* safely fuzzy-match (that path is untouched below).
-        confirmedMatches: z.array(z.object({
-          groupIndex: z.number().int().nonnegative(),
-          patientId: z.string().uuid(),
-        })).optional(),
-      }))
-      .mutation(async ({ input, ctx }) => {
-        const { supabase } = await import('./supabase');
-        const allPatients = await getAllPatients();
-        const uploadType = input.uploadType ?? 'reimbursement';
-        const actor = getActorContext(ctx.user);
-        // One id for this entire import request groups every claim it
-        // touches — the initiating user is `actor` above; this id is what
-        // distinguishes one bulk save from another in the Activity Log (see
-        // import_batch_id in the P4-P17 migration).
-        const importBatchId = randomUUID();
-
-        // Validate confirmedMatches structurally before any import work runs:
-        // every groupIndex must refer to a group actually present in this
-        // request, and a client can never submit two different confirmations
-        // for the same group (that's a conflicting/ambiguous instruction, not
-        // something to silently resolve by taking the last one).
-        const confirmedMatches = input.confirmedMatches ?? [];
-        const seenGroupIndexes = new Set<number>();
-        for (const c of confirmedMatches) {
-          if (c.groupIndex >= input.patientGroups.length) {
-            throw new TRPCError({
-              code: 'BAD_REQUEST',
-              message: `confirmedMatches: groupIndex ${c.groupIndex} does not refer to any group in this import`,
-            });
-          }
-          if (seenGroupIndexes.has(c.groupIndex)) {
-            throw new TRPCError({
-              code: 'BAD_REQUEST',
-              message: `confirmedMatches: conflicting duplicate confirmation for groupIndex ${c.groupIndex}`,
-            });
-          }
-          seenGroupIndexes.add(c.groupIndex);
-        }
-        const confirmedByIndex = new Map(
-          confirmedMatches.map(c => [c.groupIndex, c.patientId])
-        );
-
-        const results: Array<{
-          patientName: string;
-          matched: boolean;
-          patientId?: string;
-          dashboardName?: string;
-          authPeriod?: number;
-          claimsImported: number;
-          error?: string;
-          ambiguousCandidates?: number;
-          // cms1500-only: lines skipped because no reimbursement row exists yet
-          // to enrich, or because multiple candidate rows require the staff
-          // member to resolve the match explicitly via the single-patient
-          // CMS1500 enrichment flow (cms1500EnrichmentPreview/Commit) instead.
-          skippedNoMatch?: number;
-          skippedNoReimbursementUploaded?: number;
-          skippedNeedsSelection?: number;
-          skippedUnconfirmedProvenance?: number;
-          // Per-line detail for every cms1500 line skipped above -- never
-          // just a count. Lets staff see exactly which dates/CPTs need
-          // attention and routes them to the single-patient CMS1500 review
-          // (cms1500EnrichmentPreview/Commit), which supports both the
-          // multi-candidate selection and the unconfirmed-provenance
-          // confirmation this bulk flow can't offer inline.
-          skippedCms1500Lines?: Array<{
-            dateOfService: string | null;
-            cptCodes: string | null;
-            reason: 'no_match' | 'no_reimbursement_uploaded' | 'needs_selection' | 'unconfirmed_provenance' | 'invalid_date';
-          }>;
-        }> = [];
-
-        for (let groupIndex = 0; groupIndex < input.patientGroups.length; groupIndex++) {
-          const group = input.patientGroups[groupIndex];
-          // Fuzzy name matching: handles "ALLISON AUYEUNG" ↔ "AUYEUNG, ALLISON"
-          // and other format variations (First Last, Last First, Last, First, mixed case)
-          const { classifyPatientMatch } = await import('@shared/nameMatch');
-          const { confirmed: safeMatch, candidates } = classifyPatientMatch(group.patientName, allPatients);
-          // A staff confirmation only ever fills in for a name the fuzzy
-          // matcher didn't already safely resolve — it can't override a
-          // *different* safe match. The confirmed id must also belong to
-          // THIS group's own eligible candidate set (the same list the
-          // preview showed the staff member to choose from) — not just any
-          // patient that happens to exist in the system — otherwise a
-          // confirmation meant for one ambiguous name could be replayed
-          // against an unrelated group, or an unrecognized/stale patientId
-          // (e.g. the patient was deleted after the preview was shown) could
-          // slip a claim onto the wrong record. An id that isn't an eligible
-          // candidate is ignored rather than trusted blindly.
-          const confirmedId = safeMatch ? null : confirmedByIndex.get(groupIndex) ?? null;
-          const confirmedPatient = confirmedId
-            ? candidates.find(p => p.id === confirmedId) ?? null
-            : null;
-          const matchedPatient = safeMatch ?? confirmedPatient;
-
-          if (!matchedPatient) {
-            results.push({
-              patientName: group.patientName,
-              matched: false,
-              claimsImported: 0,
-              // Distinguishes "nothing in the file resembles a dashboard
-              // patient" from "a likely match exists but requires explicit
-              // staff confirmation" (e.g. a middle-name difference) — the
-              // confirmation UI lives in the client preview; an unconfirmed
-              // candidate is still correctly skipped here, never auto-imported.
-              ...(candidates.length > 0 ? { ambiguousCandidates: candidates.length } : {}),
-            });
-            continue;
-          }
-
-          // Find the latest auth period for this patient from visit_records
-          const { data: periodRows } = await supabase
-            .from('visit_records')
-            .select('auth_period')
-            .eq('patient_id', matchedPatient.id);
-
-          const maxPeriod = periodRows && periodRows.length > 0
-            ? Math.max(...(periodRows as { auth_period: number }[]).map(r => r.auth_period ?? 1))
-            : 1;
-
-          // Save all claims for this patient
-          // Each date group may have cptLines (one record per CPT code) or be a flat claim
-          let claimsImported = 0;
-          let skippedNoMatch = 0;
-          let skippedNoReimbursementUploaded = 0;
-          let skippedNeedsSelection = 0;
-          let skippedUnconfirmedProvenance = 0;
-          let skippedAmbiguousLineIdentity = 0;
-          const skippedCms1500Lines: Array<{ dateOfService: string | null; cptCodes: string | null; reason: 'no_match' | 'no_reimbursement_uploaded' | 'needs_selection' | 'unconfirmed_provenance' | 'invalid_date' }> = [];
-          // P4-P14: reimbursement lines that upsertClaimRecord refused to
-          // save because an existing legacy (pre-line-identity) row at this
-          // patient/date/CPT might already be a merged/overwritten artifact
-          // of the bug this column fixes — never silently guessed, always
-          // surfaced to staff instead. See ClaimLineIdentityAmbiguousError.
-          const skippedReimbursementLines: Array<{ dateOfService: string | null; cptCodes: string | null; reason: 'needs_review' }> = [];
-          try {
-            if (uploadType === 'cms1500') {
-              // CMS1500 never creates or writes a financial row. Each line is
-              // matched against existing claims_records across every auth
-              // period this patient has (never just maxPeriod) by exact date
-              // of service + CPT code; only visit #/diagnosis/modifier/units
-              // are ever patched, and only when exactly one candidate row is
-              // found. 0 candidates -> skipped (no reimbursement row to
-              // enrich yet); 2+ candidates -> skipped here too, since this
-              // bulk/multi-patient flow has no per-line selection UI — staff
-              // must resolve those via the single-patient CMS1500 enrichment
-              // flow (cms1500EnrichmentPreview/Commit), which does support it.
-              const hasAnyClaims = await patientHasAnyClaimRecords(matchedPatient.id);
-              for (const claim of group.claims) {
-                const lines = claim.cptLines && claim.cptLines.length > 0
-                  ? claim.cptLines
-                  : [{
-                      cptCodes: claim.cptCodes ?? null,
-                      unitsBilled: claim.unitsBilled ?? null,
-                      modifier: claim.modifier ?? null,
-                      diagnosisCodes: claim.diagnosisCodes ?? null,
-                    }];
-                const dos = parseDate(claim.dateOfService);
-                for (const line of lines) {
-                  if (!dos) {
-                    skippedNoMatch++;
-                    skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'invalid_date' });
-                    continue;
-                  }
-                  const candidates = await findCms1500EnrichmentCandidates(matchedPatient.id, dos, line.cptCodes ?? null);
-                  if (candidates.length === 0) {
-                    if (hasAnyClaims) {
-                      skippedNoMatch++;
-                      skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'no_match' });
-                    } else {
-                      skippedNoReimbursementUploaded++;
-                      skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'no_reimbursement_uploaded' });
-                    }
-                    continue;
-                  }
-                  if (candidates.length > 1) {
-                    skippedNeedsSelection++;
-                    skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'needs_selection' });
-                    continue;
-                  }
-                  if (!candidates[0].hasReimbursementEvidence) {
-                    // claims_records has no provenance column -- a lone
-                    // match with none of the reimbursement-only fields ever
-                    // set could be a manual entry or a legacy/pre-fix
-                    // CMS1500-only row rather than an actual reimbursement
-                    // row. This bulk flow has no per-line confirmation UI,
-                    // so it skips rather than guessing; staff can confirm it
-                    // explicitly via the single-patient CMS1500 flow.
-                    skippedUnconfirmedProvenance++;
-                    skippedCms1500Lines.push({ dateOfService: claim.dateOfService ?? null, cptCodes: line.cptCodes ?? null, reason: 'unconfirmed_provenance' });
-                    continue;
-                  }
-                  await applyCms1500Enrichment({
-                    claimRecordId: candidates[0].id,
-                    patientId: matchedPatient.id,
-                    dateOfService: dos,
-                    cptCodes: line.cptCodes ?? null,
-                    visitNumber: claim.visitNumber ?? null,
-                    diagnosisCodes: line.diagnosisCodes ?? null,
-                    modifier: line.modifier ?? null,
-                    unitsBilled: line.unitsBilled ?? null,
-                    actor,
-                    importBatchId,
-                  });
-                  claimsImported++;
-                }
-              }
-            } else {
-              for (const claim of group.claims) {
-                const lines = claim.cptLines && claim.cptLines.length > 0
-                  ? claim.cptLines
-                  : [{ // fallback: treat the claim itself as a single line
-                      cptCodes: claim.cptCodes ?? null,
-                      chargeAmount: claim.chargeAmount ?? null,
-                      insuranceReimbursement: claim.insuranceReimbursement ?? null,
-                      patientAmountPaid: claim.patientAmountPaid ?? null,
-                      patientAmountDue: claim.patientAmountDue ?? null,
-                      unitsBilled: claim.unitsBilled ?? null,
-                      modifier: claim.modifier ?? null,
-                      diagnosisCodes: claim.diagnosisCodes ?? null,
-                    }];
-
-                const lineIndices = computeSourceLineIndices(lines);
-                for (let lIdx = 0; lIdx < lines.length; lIdx++) {
-                  const line = lines[lIdx];
-                  // Reimbursement is the ONLY upload type this branch handles
-                  // now (cms1500 is handled entirely above) — it owns charge
-                  // and every payment field, and establishes new claim rows.
-                  try {
-                    await upsertClaimRecord({
-                      patientId: matchedPatient.id,
-                      authPeriod: maxPeriod,
-                      dateOfService: parseDate(claim.dateOfService),
-                      cptCodes: line.cptCodes ?? null,
-                      sourceLineIndex: lineIndices[lIdx],
-                      claimStatus: claim.claimStatus ?? 'submitted',
-                      oaClaimNumber: claim.oaClaimNumber ?? null,
-                      insuranceReimbursement: line.insuranceReimbursement ?? null,
-                      patientAmountPaid: line.patientAmountPaid ?? null,
-                      patientAmountDue: line.patientAmountDue ?? null,
-                      checkDate: parseDate(claim.checkDate),
-                      checkNumberVirtualCard: claim.checkNumberVirtualCard ?? null,
-                      referenceNo: claim.referenceNo ?? null,
-                      insuranceBilled: claim.insuranceBilled ?? null,
-                      paymentReceived: line.insuranceReimbursement ?? null,
-                      placeOfService: null,
-                      visitNumber: null,
-                      claimSubmittedDate: null,
-                      expireBcbsClaimNumber: null,
-                      // Line-item billing detail (units/diagnosis/modifier/charge)
-                      // many EOBs also print alongside their payment columns.
-                      unitsBilled: line.unitsBilled ?? null,
-                      diagnosisCodes: line.diagnosisCodes ?? null,
-                      modifier: line.modifier ?? null,
-                      chargeAmount: line.chargeAmount ?? null,
-                      dateReceived: parseDate(claim.dateReceived),
-                      dateOfAppeal: parseDate(claim.dateOfAppeal),
-                      lmn: claim.lmn ?? null,
-                    }, actor, importBatchId);
-                    claimsImported++;
-                  } catch (lineErr) {
-                    if (lineErr instanceof ClaimLineIdentityAmbiguousError) {
-                      skippedAmbiguousLineIdentity++;
-                      skippedReimbursementLines.push({
-                        dateOfService: claim.dateOfService ?? null,
-                        cptCodes: line.cptCodes ?? null,
-                        reason: 'needs_review',
-                      });
-                      continue;
-                    }
-                    throw lineErr;
-                  }
-                }
-              }
-            }
-            results.push({
-              patientName: group.patientName,
-              matched: true,
-              patientId: matchedPatient.id,
-              dashboardName: matchedPatient.name,
-              authPeriod: maxPeriod,
-              claimsImported,
-              ...(skippedNoMatch > 0 ? { skippedNoMatch } : {}),
-              ...(skippedNoReimbursementUploaded > 0 ? { skippedNoReimbursementUploaded } : {}),
-              ...(skippedNeedsSelection > 0 ? { skippedNeedsSelection } : {}),
-              ...(skippedUnconfirmedProvenance > 0 ? { skippedUnconfirmedProvenance } : {}),
-              ...(skippedCms1500Lines.length > 0 ? { skippedCms1500Lines } : {}),
-              ...(skippedAmbiguousLineIdentity > 0 ? { skippedAmbiguousLineIdentity } : {}),
-              ...(skippedReimbursementLines.length > 0 ? { skippedReimbursementLines } : {}),
-            });
-          } catch (err: any) {
-            results.push({
-              patientName: group.patientName,
-              matched: true,
-              patientId: matchedPatient.id,
-              dashboardName: matchedPatient.name,
-              authPeriod: maxPeriod,
-              claimsImported,
-              error: err?.message ?? 'Unknown error',
-            });
-          }
-        }
-
-        return { results };
-      }),
+    cms1500EnrichmentPreview: retiredClaimsImportProcedure,
+    cms1500EnrichmentCommit: retiredClaimsImportProcedure,
+    bulkImportFromEOB: retiredClaimsImportProcedure,
 
     markResolved: superAdminProcedure
       .input(z.object({ id: z.string().uuid() }))

@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical, Settings, History, EyeOff } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical, Settings, History, EyeOff, FileStack } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
@@ -16,7 +16,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
-import { findMatchingPatient, fuzzyNameMatch, classifyPatientMatch } from '@shared/nameMatch';
 import { insurerMatchValues } from '@shared/insuranceCatalog';
 import { parseCsvText, parseCsvRow, normalizePatientName, emptyCsvImportSummary, type CsvImportSummary } from '@/lib/csvImport';
 import { historicalInsurerNames, isStaleInsurerSelection, matchesPatientFilters } from '@/lib/patientFilters';
@@ -43,16 +42,9 @@ import { getPatientMetrics } from '@/lib/patientMetrics';
 import { getPatientOverviewMetrics } from '@/lib/patientOverviewMetrics';
 import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
-import { resolveClaimReviewView } from '@/lib/claimReviewRouting';
-import {
-  assignSourceLineIndices,
-  isReviewRequiredError,
-  appendFailureNote,
-  clearFailureNote,
-  buildSurvivingRow,
-  summarizeSaveResult,
-} from '@/lib/claimSaveRetry';
-import { createSingleFlightGuard, createRequestGuard } from '@/lib/concurrencyGuards';
+import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
+import { ClaimImportDialog } from '@/components/claims/ClaimImportDialog';
+import { sumKnownMoney } from '@shared/claimImport';
 import { formatCalendarDate } from '@/lib/date';
 import type { AuthUrgency } from '@shared/authUrgency';
 
@@ -453,131 +445,15 @@ export default function Dashboard() {
   const [showAddClaimDialog, setShowAddClaimDialog] = useState(false);
   const [addClaimPeriod, setAddClaimPeriod] = useState<number | null>(null);
   const [isSavingClaim, setIsSavingClaim] = useState(false);
-  // PDF/CSV upload state
-  const [showClaimUploadDialog, setShowClaimUploadDialog] = useState(false);
-  const [claimUploadPeriod, setClaimUploadPeriod] = useState<number | null>(null);
-  const [claimUploadType, setClaimUploadType] = useState<'reimbursement' | 'cms1500'>('reimbursement');
-  const [isExtractingClaims, setIsExtractingClaims] = useState(false);
-  // P4-P16/P4-P16R: a stale response from an earlier upload (double
-  // upload, or a slow request superseded by a second file pick before the
-  // first one returned) must never apply its result on top of a newer
-  // one -- without this, two in-flight extractions resolving out of order
-  // could each call setEditingExtractedClaims and leave the preview
-  // showing a mix, or a retry click racing a still-pending extraction
-  // could be overwritten by the extraction's result rather than the
-  // retry's. See client/src/lib/concurrencyGuards.ts.
-  const uploadRequestGuardRef = useRef(createRequestGuard());
-  const [extractedClaims, setExtractedClaims] = useState<any[]>([]);
-  const [editingExtractedClaims, setEditingExtractedClaims] = useState<any[]>([]);
-  const [isSavingExtractedClaims, setIsSavingExtractedClaims] = useState(false);
-  // P4-P16R: the "Save N Claims" button's `disabled` prop only takes effect
-  // after React commits the re-render triggered by setIsSavingExtractedClaims
-  // -- two click events dispatched before that commit (a true double-click,
-  // or a second programmatic call) would both pass the `disabled` check and
-  // run the claims.upsert loop concurrently, issuing duplicate writes for
-  // the same rows. This guard is checked and entered synchronously, inside
-  // the same tick as the click handler, so the second call bails out
-  // immediately regardless of render timing. See client/src/lib/concurrencyGuards.ts.
-  const saveGuardRef = useRef(createSingleFlightGuard());
-  const [uploadFileName, setUploadFileName] = useState<string>('');
-  const [detectedTemplate, setDetectedTemplate] = useState<string>('');
-  // Multi-patient EOB: groups from the server (one group per detected patient)
-  const [eobPatientGroups, setEobPatientGroups] = useState<Array<{ patientName: string; claims: any[] }> | null>(null);
-  const [isBulkImporting, setIsBulkImporting] = useState(false);
-  // Staff-confirmed patient for a group whose extracted name only produced a
-  // "candidate" (e.g. differs by a spelled-out middle name) rather than a
-  // safe automatic match — keyed by index into eobPatientGroups. Never
-  // populated automatically; only an explicit staff selection sets this.
-  const [manualMatchOverrides, setManualMatchOverrides] = useState<Record<number, string>>({});
-  const [bulkImportResults, setBulkImportResults] = useState<Array<{
-    patientName: string;
-    matched: boolean;
-    patientId?: string;
-    dashboardName?: string;
-    authPeriod?: number;
-    claimsImported: number;
-    error?: string;
-    ambiguousCandidates?: number;
-    skippedNoMatch?: number;
-    skippedNoReimbursementUploaded?: number;
-    skippedNeedsSelection?: number;
-    skippedUnconfirmedProvenance?: number;
-    skippedCms1500Lines?: Array<{
-      dateOfService: string | null;
-      cptCodes: string | null;
-      reason: 'no_match' | 'no_reimbursement_uploaded' | 'needs_selection' | 'unconfirmed_provenance' | 'invalid_date';
-    }>;
-    skippedAmbiguousLineIdentity?: number;
-    skippedReimbursementLines?: Array<{
-      dateOfService: string | null;
-      cptCodes: string | null;
-      reason: 'needs_review';
-    }>;
-  }> | null>(null);
-  // ── CMS1500 enrichment (P4-P10) ───────────────────────────────────────────
-  // CMS1500 never creates or edits a financial row — it only enriches an
-  // existing Reimbursement/EOB row's clinical fields (visit #, diagnosis,
-  // modifier, units). `cms1500Lines` holds the raw extracted fields per line
-  // (keyed by lineKey); `cms1500Preview` holds the server's match
-  // classification for those same lines; `cms1500Selections` holds the
-  // staff's explicit pick for any line the server reported as ambiguous.
-  type Cms1500Line = {
-    lineKey: string;
-    dateOfService: string | null;
-    cptCodes: string | null;
-    visitNumber: number | null;
-    diagnosisCodes: string | null;
-    modifier: string | null;
-    unitsBilled: number | null;
-  };
-  type Cms1500Candidate = {
-    id: string;
-    authPeriod: number;
-    chargeAmount: number | null;
-    insuranceReimbursement: number | null;
-    patientAmountPaid: number | null;
-    patientAmountDue: number | null;
-    visitNumber: number | null;
-    diagnosisCodes: string | null;
-    modifier: string | null;
-    unitsBilled: number | null;
-    // claims_records has no column recording how a row was created, so this
-    // is a best-effort proxy: true when the row has at least one field only
-    // a Reimbursement/EOB upload ever writes (present, even as an explicit
-    // zero — a denied/zero-payment EOB line still counts). False means the
-    // row could just as easily be a manual entry or a legacy/pre-fix
-    // CMS1500-only insert, not a confirmed reimbursement row.
-    hasReimbursementEvidence: boolean;
-  };
-  type Cms1500PreviewLine = {
-    lineKey: string;
-    status: 'matched' | 'matched_unconfirmed' | 'needs_selection' | 'no_match' | 'no_claims' | 'invalid_date';
-    candidates: Cms1500Candidate[];
-    claimRecordId?: string;
-  };
-  const [cms1500Lines, setCms1500Lines] = useState<Cms1500Line[]>([]);
-  const [cms1500Preview, setCms1500Preview] = useState<{ hasAnyClaims: boolean; results: Cms1500PreviewLine[] } | null>(null);
-  const [isPreviewingCms1500, setIsPreviewingCms1500] = useState(false);
-  const [cms1500Selections, setCms1500Selections] = useState<Record<string, string>>({});
-  // Explicit staff confirmation that an unconfirmed-provenance single match
-  // really is the reimbursement row — never auto-set; only ticking the
-  // checkbox in the preview UI adds a lineKey here.
-  const [cms1500ProvenanceConfirmations, setCms1500ProvenanceConfirmations] = useState<Record<string, boolean>>({});
-  const [cms1500CommitResults, setCms1500CommitResults] = useState<Array<{ lineKey: string; status: 'saved' | 'failed'; error?: string }> | null>(null);
-  const [isSavingCms1500, setIsSavingCms1500] = useState(false);
-  // Which save path the claim upload preview dialog routes to --
-  // 'cms1500Enrichment' (enrichment-only commit) vs 'reimbursementTable'
-  // (legacy full-write claims.upsert). Computed early (component body, not
-  // inside a specific route branch's JSX) since the dialog using it is
-  // nested inside more than one of this component's conditional early
-  // returns. See resolveClaimReviewView's doc comment for why this must be
-  // a shared, tested function rather than an inline ternary re-derived
-  // separately in the JSX.
-  const claimReviewView = resolveClaimReviewView({
-    eobPatientGroups,
-    editingExtractedClaimsLength: editingExtractedClaims.length,
-    claimUploadType,
-  });
+  // P4-P24: the CMS1500 / EOB import dialog — opened by a patient period's
+  // upload buttons (single-patient) or by the two bulk uploads.
+  const [claimImport, setClaimImport] = useState<{
+    kind: 'cms1500' | 'eob';
+    mode: 'single' | 'bulk';
+    patient: { id: string; name: string } | null;
+    authPeriod: number | null;
+    files: File[];
+  } | null>(null);
   const [claimFormData, setClaimFormData] = useState({
     placeOfService: '',
     dateOfService: '',
@@ -964,8 +840,6 @@ export default function Dashboard() {
     onError: (e) => toast.error(`Failed to delete claim: ${e.message}`),
   });
 
-  const upsertClaim = trpc.claims.upsert.useMutation();
-
   const createClaim = trpc.claims.create.useMutation({
     onSuccess: () => {
       // Invalidate all claims queries for the active patient
@@ -991,19 +865,6 @@ export default function Dashboard() {
       setIsSavingClaim(false);
     },
   });
-
-  const bulkImportFromEOB = trpc.claims.bulkImportFromEOB.useMutation({
-    onSuccess: (data) => {
-      setBulkImportResults(data.results);
-      utils.claims.getByPatientAndPeriod.invalidate();
-      utils.claims.getFollowUpClaims.invalidate();
-      utils.claims.getStatusCounts.invalidate();
-    },
-    onError: (e) => toast.error(`Bulk import failed: ${e.message}`),
-  });
-
-  const cms1500EnrichmentPreview = trpc.claims.cms1500EnrichmentPreview.useMutation();
-  const cms1500EnrichmentCommit = trpc.claims.cms1500EnrichmentCommit.useMutation();
 
   const logoutMutation = trpc.auth.logout.useMutation();
 
@@ -1366,610 +1227,48 @@ export default function Dashboard() {
     return n;
   };
 
-  // ── PDF/CSV Claim Upload ──────────────────────────────────────────────────
-
-  const handleClaimFileUpload = async (file: File, period: number, uploadType: 'reimbursement' | 'cms1500' = 'reimbursement') => {
-    if (!file) return;
-    console.log('[EOB Upload] handleClaimFileUpload called with file:', file.name, 'uploadType:', uploadType, 'activePatient:', activePatient?.name);
-    // P4-P16: this call's own id -- if a second upload starts (double
-    // click, or a new file picked before this one's request returns) the
-    // guard's current id advances past it, and every place below that
-    // would otherwise write extraction results into state checks
-    // `isStale()` first and bails instead of clobbering/duplicating state
-    // set by the newer, still-current request.
-    const requestId = uploadRequestGuardRef.current.start();
-    const isStale = () => !uploadRequestGuardRef.current.isCurrent(requestId);
-    setUploadFileName(file.name);
-    setClaimUploadType(uploadType);
-    setIsExtractingClaims(true);
-    setExtractedClaims([]);
-    setEditingExtractedClaims([]);
-    setEobPatientGroups(null);
-    setBulkImportResults(null);
-    setManualMatchOverrides({});
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('uploadType', uploadType);
-      const res = await fetch('/api/claims/upload-extract', {
-        method: 'POST',
-        credentials: 'include',
-        body: formData,
-      });
-      const rawBody = await res.text();
-      let json: any;
-      try {
-        json = JSON.parse(rawBody);
-      } catch {
-        // The server didn't return JSON at all -- typically the hosting
-        // platform's own error page (e.g. a serverless function timeout or
-        // crash) rather than anything the app itself produced. Surface a
-        // clear message instead of the raw JSON.parse SyntaxError.
-        console.error('[EOB Upload] Non-JSON response:', rawBody.slice(0, 500));
-        throw new Error(
-          res.status === 504 || /timed?\s*out/i.test(rawBody)
-            ? 'The server took too long processing this file (it may be large or complex). Please try again.'
-            : `Server returned an unexpected response (status ${res.status}). Please try again.`
-        );
-      }
-      if (!res.ok) throw new Error(json.error ?? 'Extraction failed');
-
-      // A newer upload superseded this one while the request was in
-      // flight -- its own result (or the dialog being reset/closed) is
-      // already in state; applying this stale response on top would mean
-      // whichever of the two requests happens to resolve last silently
-      // wins, and if that's this one, it could reintroduce a different
-      // file's groups into the current preview.
-      if (isStale()) return;
-
-      setDetectedTemplate(json.templateUsed ?? '');
-
-      // Some payers (e.g. Globe Life) print only ONE combined Plan Paid for
-      // several CPT lines, with no per-line breakdown — the extractor never
-      // writes that amount onto any line (would either duplicate it per
-      // line or require fabricating a split), so it's surfaced here as an
-      // explicit manual-review notice instead of silently not appearing
-      // anywhere. See reimbursementReviewNeeded in claimUpload.ts.
-      if (json.reimbursementReviewNeeded?.length > 0) {
-        const totalPlanPaid = json.reimbursementReviewNeeded.reduce((sum: number, r: { planPaid: number }) => sum + r.planPaid, 0);
-        toast.warning(
-          `${json.reimbursementReviewNeeded.length} claim block${json.reimbursementReviewNeeded.length !== 1 ? 's' : ''} ` +
-          `need manual Plan Paid review — the payer reported $${totalPlanPaid.toFixed(2)} combined across multiple service ` +
-          `lines with no per-line breakdown. Not saved to any line; confirm the real allocation before relying on these amounts.`,
-          { duration: 15000 }
-        );
-      }
-
-      // ── Multi-patient mode: server returned patientGroups ──────────────────
-      if (json.patientGroups && json.patientGroups.length > 0) {
-        console.log('[EOB Upload] patientGroups received:', json.patientGroups);
-        console.log('[EOB Upload] showDetailView:', showDetailView, 'activePatient:', activePatient?.name);
-        // If we have an active patient (single-patient dialog), try to find their data
-        // in the patientGroups and use it for the single-patient review flow.
-        if (activePatient) {
-          console.log('[EOB Upload] Active patient:', activePatient.name);
-          const matchedGroup = findMatchingPatient(
-            activePatient.name,
-            json.patientGroups.map((g: any) => ({ name: g.patientName }))
-          );
-          console.log('[EOB Upload] Matched group:', matchedGroup);
-          const matchedGroupData = matchedGroup
-            ? json.patientGroups.find((g: any) => g.patientName === matchedGroup.name)
-            : null;
-          console.log('[EOB Upload] Matched group data:', matchedGroupData);
-          console.log('[EOB Upload] Matched group data claims length:', matchedGroupData?.claims?.length);
-          if (matchedGroupData && matchedGroupData.claims && matchedGroupData.claims.length > 0) {
-            console.log('[EOB Upload] Single-patient mode: processing matched patient');
-            // Flatten the matched patient's claims into the single-patient review format
-            const flatClaims: any[] = [];
-            for (const claim of matchedGroupData.claims) {
-              const lines: any[] = claim.cptLines?.length > 0 ? claim.cptLines : [claim];
-              for (const line of lines) {
-                flatClaims.push({
-                  ...claim,
-                  cptCodes: line.cptCodes ?? claim.cptCodes ?? '',
-                  chargeAmount: line.chargeAmount ?? claim.chargeAmount ?? null,
-                  insuranceReimbursement: line.insuranceReimbursement ?? claim.insuranceReimbursement ?? null,
-                  patientAmountPaid: line.patientAmountPaid ?? claim.patientAmountPaid ?? null,
-                  patientAmountDue: line.patientAmountDue ?? claim.patientAmountDue ?? null,
-                  unitsBilled: line.unitsBilled ?? claim.unitsBilled ?? null,
-                  modifier: line.modifier ?? claim.modifier ?? null,
-                  diagnosisCodes: line.diagnosisCodes ?? claim.diagnosisCodes ?? null,
-                });
-              }
-            }
-            const rawRows = flatClaims.map((c: any, i: number) => ({
-              _key: i,
-              placeOfService: c.placeOfService ?? '',
-              dateOfService: c.dateOfService ?? '',
-              visitNumber: c.visitNumber != null ? String(c.visitNumber) : '',
-              cptCodes: c.cptCodes ?? '',
-              unitsBilled: c.unitsBilled != null ? String(c.unitsBilled) : '',
-              diagnosisCodes: c.diagnosisCodes ?? '',
-              modifier: c.modifier ?? '',
-              chargeAmount: c.chargeAmount != null ? String(c.chargeAmount) : '',
-              insuranceReimbursement: c.insuranceReimbursement != null ? String(c.insuranceReimbursement) : '',
-              patientAmountPaid: c.patientAmountPaid != null ? String(c.patientAmountPaid) : '',
-              patientAmountDue: c.patientAmountDue != null ? String(c.patientAmountDue) : '',
-              insuranceBilled: c.insuranceBilled ?? '',
-              oaClaimNumber: c.oaClaimNumber ?? '',
-              claimSubmittedDate: c.claimSubmittedDate ?? '',
-              expireBcbsClaimNumber: c.expireBcbsClaimNumber ?? '',
-              claimStatus: c.claimStatus ?? 'submitted',
-              paymentReceived: c.paymentReceived != null ? String(c.paymentReceived) : '',
-              checkDate: c.checkDate ?? '',
-              checkNumberVirtualCard: c.checkNumberVirtualCard ?? '',
-              dateReceived: c.dateReceived ?? '',
-              lmn: c.lmn ?? '',
-              referenceNo: c.referenceNo ?? '',
-              dateOfAppeal: c.dateOfAppeal ?? '',
-              notes: c.notes ?? '',
-            }));
-            // Group by date of service
-            const dateGroupMap = new Map<string, any>();
-            for (const row of rawRows) {
-              const dateKey = row.dateOfService || 'no-date';
-              if (!dateGroupMap.has(dateKey)) {
-                dateGroupMap.set(dateKey, { ...row, _key: dateGroupMap.size, cptLines: [] });
-              }
-              const grp = dateGroupMap.get(dateKey)!;
-              grp.cptLines.push({
-                _key: row._key, cptCodes: row.cptCodes, chargeAmount: row.chargeAmount,
-                insuranceReimbursement: row.insuranceReimbursement, patientAmountPaid: row.patientAmountPaid,
-                patientAmountDue: row.patientAmountDue, unitsBilled: row.unitsBilled,
-                modifier: row.modifier, diagnosisCodes: row.diagnosisCodes, notes: row.notes,
-              });
-            }
-            const normalized = Array.from(dateGroupMap.values());
-            setExtractedClaims(normalized);
-            setEditingExtractedClaims(normalized);
-            toast.success(`Extracted ${normalized.length} claim${normalized.length !== 1 ? 's' : ''} (${rawRows.length} CPT lines) for ${activePatient.name} from ${file.name} (${json.templateUsed})`);
-            return;
-          } else if (showDetailView && json.claims && json.claims.length > 0) {
-            // Recovery path for when matchedGroupData came back empty/unmatched:
-            // json.claims is the FLAT multi-patient list (every patient the AI
-            // found in the document), so it must be filtered down to only the
-            // active patient's claims before use here — using it unfiltered
-            // would silently display/save every patient in the file under
-            // activePatient's name (real cross-patient contamination bug).
-            const targetClaims = json.claims.filter(
-              (c: any) => c.patientName && fuzzyNameMatch(c.patientName, activePatient.name)
-            );
-            if (targetClaims.length === 0) {
-              console.log('[EOB Upload] No claims in flat response matched active patient; falling back to bulk review.');
-              setEobPatientGroups(json.patientGroups);
-              const { candidates } = classifyPatientMatch(activePatient.name, json.patientGroups.map((g: any) => ({ name: g.patientName })));
-              toast.error(
-                candidates.length > 0
-                  ? `No safe match for ${activePatient.name} — but "${candidates[0].name}" in this file looks similar (e.g. a middle name). Review and confirm below before importing.`
-                  : `No data found for ${activePatient.name} in this file. Detected patients: ${json.patientGroups.map((g: any) => g.patientName).join(', ')} — review below.`
-              );
-              return;
-            }
-            console.log(`[EOB Upload] Matched group had no claims; recovered ${targetClaims.length} claim(s) for ${activePatient.name} from flat response.`);
-            const rawRows = targetClaims.map((c: any, i: number) => ({
-              _key: i,
-              placeOfService: c.placeOfService ?? '',
-              dateOfService: c.dateOfService ?? '',
-              visitNumber: c.visitNumber != null ? String(c.visitNumber) : '',
-              cptCodes: c.cptCodes ?? '',
-              unitsBilled: c.unitsBilled != null ? String(c.unitsBilled) : '',
-              diagnosisCodes: c.diagnosisCodes ?? '',
-              modifier: c.modifier ?? '',
-              chargeAmount: c.chargeAmount != null ? String(c.chargeAmount) : '',
-              insuranceReimbursement: c.insuranceReimbursement != null ? String(c.insuranceReimbursement) : '',
-              patientAmountPaid: c.patientAmountPaid != null ? String(c.patientAmountPaid) : '',
-              patientAmountDue: c.patientAmountDue != null ? String(c.patientAmountDue) : '',
-              insuranceBilled: c.insuranceBilled ?? '',
-              oaClaimNumber: c.oaClaimNumber ?? '',
-              claimSubmittedDate: c.claimSubmittedDate ?? '',
-              expireBcbsClaimNumber: c.expireBcbsClaimNumber ?? '',
-              claimStatus: c.claimStatus ?? 'submitted',
-              paymentReceived: c.paymentReceived != null ? String(c.paymentReceived) : '',
-              checkDate: c.checkDate ?? '',
-              checkNumberVirtualCard: c.checkNumberVirtualCard ?? '',
-              dateReceived: c.dateReceived ?? '',
-              lmn: c.lmn ?? '',
-              referenceNo: c.referenceNo ?? '',
-              dateOfAppeal: c.dateOfAppeal ?? '',
-              notes: c.notes ?? '',
-            }));
-            const dateGroupMap = new Map<string, any>();
-            for (const row of rawRows) {
-              const dateKey = row.dateOfService || 'no-date';
-              if (!dateGroupMap.has(dateKey)) {
-                dateGroupMap.set(dateKey, { ...row, _key: dateGroupMap.size, cptLines: [] });
-              }
-              const grp = dateGroupMap.get(dateKey)!;
-              grp.cptLines.push({
-                _key: row._key, cptCodes: row.cptCodes, chargeAmount: row.chargeAmount,
-                insuranceReimbursement: row.insuranceReimbursement, patientAmountPaid: row.patientAmountPaid,
-                patientAmountDue: row.patientAmountDue, unitsBilled: row.unitsBilled,
-                modifier: row.modifier, diagnosisCodes: row.diagnosisCodes, notes: row.notes,
-              });
-            }
-            const normalized = Array.from(dateGroupMap.values());
-            setExtractedClaims(normalized);
-            setEditingExtractedClaims(normalized);
-            toast.success(`Extracted ${normalized.length} claim${normalized.length !== 1 ? 's' : ''} (${rawRows.length} CPT lines) for ${activePatient.name} from ${file.name} (${json.templateUsed})`);
-            return;
-          }
-        }
-        // No active patient or no match — fall through to bulk mode
-        console.log('[EOB Upload] Falling through to bulk mode. activePatient:', activePatient);
-        setEobPatientGroups(json.patientGroups);
-        const totalClaims = json.patientGroups.reduce((sum: number, g: any) => sum + g.claims.length, 0);
-        toast.success(
-          `Detected ${json.patientGroups.length} patient${json.patientGroups.length !== 1 ? 's' : ''} with ${totalClaims} date group${totalClaims !== 1 ? 's' : ''} in ${file.name} — review and import below.`
-        );
-        return;
-      }
-
-      // ── Single-patient mode (AI or single-patient template) ───────────────
-      if (!json.claims || json.claims.length === 0) {
-        // extractionNotes carries a specific explanation when extraction ran
-        // successfully but legitimately found nothing (e.g. the patient's
-        // name appears only in a header/subscriber list with no service
-        // lines of their own) -- prefer that over the generic message so
-        // this doesn't read as a failure when nothing actually went wrong.
-        toast.error(json.extractionNotes || 'No claim data could be extracted from this file. Please check the file content.');
-        return;
-      }
-      // This branch is also reached when the AI found MULTIPLE patients but
-      // the server didn't build a patientGroups response for them (it only
-      // does so when every claim happened to share one exact patientName —
-      // see aiClaimExtractor.ts). In that case json.claims is the unfiltered,
-      // every-patient-in-the-document list, so it must be scoped down to the
-      // active patient here too, the same way the patientGroups fallback
-      // above already is — otherwise every patient in a multi-patient EOB
-      // gets saved under whichever patient's page the file was uploaded to.
-      let claimsForActivePatient = json.claims;
-      if (activePatient) {
-        const distinctNames = new Set(
-          json.claims.map((c: any) => c.patientName).filter(Boolean)
-        );
-        if (distinctNames.size > 1) {
-          const filtered = json.claims.filter(
-            (c: any) => c.patientName && fuzzyNameMatch(c.patientName, activePatient.name)
-          );
-          if (filtered.length === 0) {
-            // No patientGroups metadata came back from the server for this
-            // response shape, so build an ad-hoc group per distinct name
-            // directly from the flat claims list -- this is what lets the
-            // bulk review UI (and its candidate-confirmation flow for a
-            // middle-name-only difference) render instead of a dead end.
-            const adHocGroups = Array.from(distinctNames).map(name => ({
-              patientName: name as string,
-              claims: json.claims.filter((c: any) => c.patientName === name),
-            }));
-            setEobPatientGroups(adHocGroups);
-            const { candidates } = classifyPatientMatch(activePatient.name, adHocGroups.map(g => ({ name: g.patientName })));
-            toast.error(
-              candidates.length > 0
-                ? `No safe match for ${activePatient.name} — but "${candidates[0].name}" in this file looks similar (e.g. a middle name). Review and confirm below before importing.`
-                : `No data found for ${activePatient.name} in this file. Detected patients: ${Array.from(distinctNames).join(', ')} — review below.`
-            );
-            return;
-          }
-          console.log(`[EOB Upload] json.claims contained ${distinctNames.size} distinct patients with no patientGroups response; filtered to ${filtered.length} claim(s) for ${activePatient.name}.`);
-          claimsForActivePatient = filtered;
-        }
-      }
-      // Normalize extracted rows to string form for editing
-      const rawRows = claimsForActivePatient.map((c: any, i: number) => ({
-        _key: i,
-        placeOfService: c.placeOfService ?? '',
-        dateOfService: c.dateOfService ?? '',
-        visitNumber: c.visitNumber != null ? String(c.visitNumber) : '',
-        cptCodes: c.cptCodes ?? '',
-        unitsBilled: c.unitsBilled != null ? String(c.unitsBilled) : '',
-        diagnosisCodes: c.diagnosisCodes ?? '',
-        modifier: c.modifier ?? '',
-        chargeAmount: c.chargeAmount != null ? String(c.chargeAmount) : '',
-        insuranceReimbursement: c.insuranceReimbursement != null ? String(c.insuranceReimbursement) : '',
-        patientAmountPaid: c.patientAmountPaid != null ? String(c.patientAmountPaid) : '',
-        patientAmountDue: c.patientAmountDue != null ? String(c.patientAmountDue) : '',
-        insuranceBilled: c.insuranceBilled ?? '',
-        oaClaimNumber: c.oaClaimNumber ?? '',
-        claimSubmittedDate: c.claimSubmittedDate ?? '',
-        expireBcbsClaimNumber: c.expireBcbsClaimNumber ?? '',
-        claimStatus: c.claimStatus ?? 'submitted',
-        paymentReceived: c.paymentReceived != null ? String(c.paymentReceived) : '',
-        checkDate: c.checkDate ?? '',
-        checkNumberVirtualCard: c.checkNumberVirtualCard ?? '',
-        dateReceived: c.dateReceived ?? '',
-        lmn: c.lmn ?? '',
-        referenceNo: c.referenceNo ?? '',
-        dateOfAppeal: c.dateOfAppeal ?? '',
-        notes: c.notes ?? '',
-      }));
-
-      // Group rows by date — each unique date = 1 claim
-      const dateGroupMap = new Map<string, any>();
-      for (const row of rawRows) {
-        const dateKey = row.dateOfService || 'no-date';
-        if (!dateGroupMap.has(dateKey)) {
-          dateGroupMap.set(dateKey, {
-            ...row,
-            _key: dateGroupMap.size,
-            cptLines: [],
-          });
-        }
-        const group = dateGroupMap.get(dateKey)!;
-        group.cptLines.push({
-          _key: row._key,
-          cptCodes: row.cptCodes,
-          chargeAmount: row.chargeAmount,
-          insuranceReimbursement: row.insuranceReimbursement,
-          patientAmountPaid: row.patientAmountPaid,
-          patientAmountDue: row.patientAmountDue,
-          unitsBilled: row.unitsBilled,
-          modifier: row.modifier,
-          diagnosisCodes: row.diagnosisCodes,
-          notes: row.notes,
-        });
-      }
-      const normalized = Array.from(dateGroupMap.values());
-
-      setExtractedClaims(normalized);
-      setEditingExtractedClaims(normalized);
-      const templateMsg = json.templateUsed && json.templateUsed !== 'AI Extraction'
-        ? ` (${json.templateUsed})`
-        : ' (AI Extraction)';
-      toast.success(`Extracted ${normalized.length} claim${normalized.length !== 1 ? 's' : ''} (${rawRows.length} CPT lines) from ${file.name}${templateMsg}`);
-    } catch (err: any) {
-      if (!isStale()) toast.error(`Upload failed: ${err.message}`);
-    } finally {
-      // Only this request's own spinner state -- a stale request's finally
-      // running after a newer upload started must not stop the newer
-      // request's still-in-progress spinner.
-      if (!isStale()) setIsExtractingClaims(false);
-    }
+  // ── CMS1500 / EOB import (P4-P24) ─────────────────────────────────────────
+  // Both upload kinds, single-patient and bulk, go through ClaimImportDialog
+  // (preview → explicit review → claims.importCommit). See
+  // client/src/components/claims/ClaimImportDialog.tsx.
+  const invalidateClaims = () => {
+    utils.claims.getByPatientAndPeriod.invalidate();
+    utils.claims.getFollowUpClaims.invalidate();
+    utils.claims.getStatusCounts.invalidate();
   };
 
-  const handleSaveExtractedClaims = async () => {
-    if (!activePatient || claimUploadPeriod === null) return;
-    // Defense-in-depth: this full read/write claims.upsert path (charge,
-    // payment fields, insert-on-no-match) is only ever wired to the "Save N
-    // Claims" button in the reimbursementTable view (see
-    // resolveClaimReviewView) -- but if a future edit ever called this
-    // directly for a CMS1500 extraction, it must refuse rather than write a
-    // charge/payment field or insert a row for CMS1500 data.
-    if (claimUploadType === 'cms1500') {
-      toast.error('Internal error: CMS1500 data cannot be saved through the reimbursement claim upsert path.');
-      return;
-    }
-    // P4-P16R: synchronous re-entrancy guard -- see the comment on
-    // saveGuardRef. A second call (double-click, or any other re-entry)
-    // while a save is already running bails out here, before touching any
-    // row, instead of relying on the (React-render-delayed) `disabled`
-    // prop alone.
-    if (!saveGuardRef.current.tryEnter()) return;
-    setIsSavingExtractedClaims(true);
-    let saved = 0;
-    // P4-P16: retryRows holds lines whose failure may be transient/fixable
-    // (safe for staff to just click Save again); reviewRows holds lines
-    // the server rejected as identity-ambiguous (ClaimLineIdentityAmbiguousError,
-    // surfaced as a CONFLICT) -- those need a human decision, not a blind
-    // retry. Keeping them in separate buckets (rather than one shared
-    // array that a row gets pushed into once per failing line) also fixes
-    // the bug where a date-group with 2+ failing CPT lines ended up as the
-    // SAME row object appended multiple times, which rendered as the same
-    // group duplicated in this dialog on retry.
-    const retryRows: any[] = [];
-    const reviewRows: any[] = [];
-    for (const row of editingExtractedClaims) {
-      // Save one DB row per CPT line (not consolidated)
-      const cptLines: any[] = row.cptLines && row.cptLines.length > 0 ? row.cptLines : [row];
-      // P4-P14/P4-P16: each line's 0-based position within its (date, CPT)
-      // group is assigned ONCE and stuck on the line object itself (not
-      // recomputed from array position every attempt). A retry only ever
-      // contains the subset of lines that still failed -- recomputing from
-      // that shrunken subset's position would renumber a surviving line
-      // (e.g. what used to be index 1) to index 0, pointing it at a
-      // different existing row than the one it actually corresponds to.
-      assignSourceLineIndices(cptLines);
+  const claimImportDialog = claimImport && canAccessClaims ? (
+    <ClaimImportDialog
+      open
+      onOpenChange={(open) => { if (!open) setClaimImport(null); }}
+      kind={claimImport.kind}
+      mode={claimImport.mode}
+      contextPatient={claimImport.patient}
+      contextAuthPeriod={claimImport.authPeriod}
+      initialFiles={claimImport.files}
+      onSaved={invalidateClaims}
+    />
+  ) : null;
 
-      const stillFailing: any[] = [];
-      let rowNeedsReview = false;
-      for (const line of cptLines) {
-        try {
-          const lineReimb = line.insuranceReimbursement !== '' && line.insuranceReimbursement != null ? parseFloat(line.insuranceReimbursement) : null;
-          await upsertClaim.mutateAsync({
-            patientId: activePatient.id,
-            authPeriod: claimUploadPeriod,
-            placeOfService: row.placeOfService || line.placeOfService || null,
-            dateOfService: row.dateOfService || line.dateOfService || null,
-            visitNumber: row.visitNumber !== '' && row.visitNumber != null ? parseInt(row.visitNumber, 10) : null,
-            cptCodes: line.cptCodes || null,
-            sourceLineIndex: line._sourceLineIndex,
-            unitsBilled: line.unitsBilled ? parseInt(line.unitsBilled) : (row.unitsBilled ? parseInt(row.unitsBilled) : null),
-            diagnosisCodes: line.diagnosisCodes || row.diagnosisCodes || null,
-            modifier: line.modifier || row.modifier || null,
-            chargeAmount: line.chargeAmount ? parseFloat(line.chargeAmount) : null,
-            insuranceReimbursement: lineReimb,
-            patientAmountPaid: line.patientAmountPaid !== '' && line.patientAmountPaid != null ? parseFloat(line.patientAmountPaid) : null,
-            patientAmountDue: line.patientAmountDue !== '' && line.patientAmountDue != null ? parseFloat(line.patientAmountDue) : null,
-            insuranceBilled: row.insuranceBilled || line.insuranceBilled || null,
-            oaClaimNumber: row.oaClaimNumber || line.oaClaimNumber || null,
-            claimSubmittedDate: row.claimSubmittedDate || line.claimSubmittedDate || null,
-            expireBcbsClaimNumber: row.expireBcbsClaimNumber || line.expireBcbsClaimNumber || null,
-            claimStatus: (row.claimStatus as any) || (line.claimStatus as any) || 'submitted',
-            paymentReceived: row.paymentReceived ? parseFloat(row.paymentReceived) : (lineReimb ?? null),
-            checkDate: row.checkDate || line.checkDate || null,
-            checkNumberVirtualCard: row.checkNumberVirtualCard || line.checkNumberVirtualCard || null,
-            dateReceived: row.dateReceived || line.dateReceived || null,
-            dateOfAppeal: row.dateOfAppeal || line.dateOfAppeal || null,
-            referenceNo: row.referenceNo || line.referenceNo || null,
-            lmn: row.lmn || line.lmn || null,
-          });
-          saved++;
-          // Clear any stale failure note from a prior attempt now that this
-          // specific line has actually saved.
-          line.notes = clearFailureNote(line.notes);
-        } catch (e: any) {
-          // A CONFLICT from claims.upsert is ClaimLineIdentityAmbiguousError
-          // (server/db.ts) -- a pre-existing legacy row whose identity can't
-          // be safely disambiguated. That needs staff review, not a blind
-          // retry; every other error (validation, schema, network) is
-          // treated as retryable.
-          const needsReview = isReviewRequiredError(e);
-          line.notes = appendFailureNote(line.notes, needsReview, e.message);
-          if (needsReview) rowNeedsReview = true;
-          stillFailing.push(line);
-        }
-      }
-
-      if (stillFailing.length > 0) {
-        // A fresh row object carrying ONLY the lines that still need
-        // attention -- lines that already saved are never resent.
-        (rowNeedsReview ? reviewRows : retryRows).push(buildSurvivingRow(row, stillFailing));
-      }
-    }
-    saveGuardRef.current.exit();
-    setIsSavingExtractedClaims(false);
-    if (saved > 0) {
-      utils.claims.getByPatientAndPeriod.invalidate();
-      utils.claims.getFollowUpClaims.invalidate();
-      utils.claims.getStatusCounts.invalidate();
-    }
-
-    const remaining = [...reviewRows, ...retryRows];
-    if (remaining.length === 0) {
-      toast.success(`${saved} claim${saved !== 1 ? 's' : ''} saved successfully!`);
-      setShowClaimUploadDialog(false);
-      setExtractedClaims([]);
-      setEditingExtractedClaims([]);
-    } else {
-      // Keep only the still-failing lines in the dialog so staff can retry
-      // them specifically -- one summary toast instead of a toast per line.
-      setEditingExtractedClaims(remaining);
-      toast.error(summarizeSaveResult(saved, retryRows, reviewRows), { duration: 15000 });
-    }
-  };
-
-  // ── CMS1500 enrichment (P4-P10) ─────────────────────────────────────────────
-  // CMS1500 never creates or edits a Charge/Reimbursement/Payment field — it
-  // only fills in visit #, diagnosis, modifier, and units on a Reimbursement/
-  // EOB row that must already exist. This flattens the extracted groups into
-  // per-CPT-line enrichment candidates (ignoring any charge/payment fields
-  // the extractor may have populated) and asks the server which existing
-  // claim row, if any, each line matches.
-  const buildCms1500Lines = (): Cms1500Line[] => {
-    const lines: Cms1500Line[] = [];
-    editingExtractedClaims.forEach((group: any, gIdx: number) => {
-      const cptLines: any[] = group.cptLines && group.cptLines.length > 0 ? group.cptLines : [group];
-      cptLines.forEach((line: any, lIdx: number) => {
-        lines.push({
-          lineKey: `${gIdx}-${lIdx}`,
-          dateOfService: group.dateOfService || line.dateOfService || null,
-          cptCodes: line.cptCodes || null,
-          visitNumber: group.visitNumber !== '' && group.visitNumber != null ? parseInt(group.visitNumber, 10) : null,
-          diagnosisCodes: line.diagnosisCodes || group.diagnosisCodes || null,
-          modifier: line.modifier || group.modifier || null,
-          unitsBilled: line.unitsBilled !== '' && line.unitsBilled != null ? parseInt(line.unitsBilled, 10) : null,
-        });
-      });
-    });
-    return lines;
-  };
-
-  const runCms1500Preview = async () => {
-    if (!activePatient) return;
-    const lines = buildCms1500Lines();
-    setCms1500Lines(lines);
-    setCms1500Preview(null);
-    setCms1500Selections({});
-    setCms1500ProvenanceConfirmations({});
-    setCms1500CommitResults(null);
-    if (lines.length === 0) return;
-    setIsPreviewingCms1500(true);
-    try {
-      const result = await cms1500EnrichmentPreview.mutateAsync({
-        patientId: activePatient.id,
-        lines: lines.map(l => ({ lineKey: l.lineKey, dateOfService: l.dateOfService, cptCodes: l.cptCodes })),
-      });
-      setCms1500Preview(result);
-    } catch (err: any) {
-      toast.error(`Could not check for matching reimbursement rows: ${err.message}`);
-    } finally {
-      setIsPreviewingCms1500(false);
-    }
-  };
-
-  const handleCommitCms1500Enrichment = async () => {
-    if (!activePatient || !cms1500Preview) return;
-    // Defense-in-depth mirror of the guard in handleSaveExtractedClaims.
-    if (claimUploadType !== 'cms1500') {
-      toast.error('Internal error: this enrichment-only path cannot be used for a reimbursement upload.');
-      return;
-    }
-    const byKey = new Map(cms1500Lines.map(l => [l.lineKey, l]));
-    const resolvable = cms1500Preview.results
-      .map(r => {
-        const claimRecordId = r.status === 'matched'
-          ? r.claimRecordId
-          : r.status === 'matched_unconfirmed'
-            ? (cms1500ProvenanceConfirmations[r.lineKey] ? r.claimRecordId : undefined)
-            : r.status === 'needs_selection'
-              ? cms1500Selections[r.lineKey]
-              : undefined;
-        return claimRecordId ? { r, claimRecordId } : null;
-      })
-      .filter((x): x is { r: Cms1500PreviewLine; claimRecordId: string } => x !== null);
-
-    if (resolvable.length === 0) {
-      toast.error('No lines are ready to save — nothing matched a reimbursement row, an ambiguous match still needs a selection, or an unconfirmed match still needs confirmation.');
-      return;
-    }
-
-    setIsSavingCms1500(true);
-    try {
-      const result = await cms1500EnrichmentCommit.mutateAsync({
-        patientId: activePatient.id,
-        lines: resolvable.map(({ r, claimRecordId }) => {
-          const line = byKey.get(r.lineKey)!;
-          return {
-            lineKey: r.lineKey,
-            claimRecordId,
-            dateOfService: line.dateOfService,
-            cptCodes: line.cptCodes,
-            visitNumber: line.visitNumber,
-            diagnosisCodes: line.diagnosisCodes,
-            modifier: line.modifier,
-            unitsBilled: line.unitsBilled,
-          };
-        }),
-      });
-      setCms1500CommitResults(result.results);
-      const savedCount = result.results.filter(r => r.status === 'saved').length;
-      const failedCount = result.results.filter(r => r.status === 'failed').length;
-      const skippedCount = cms1500Preview.results.length - resolvable.length;
-      if (savedCount > 0) {
-        toast.success(`${savedCount} line${savedCount !== 1 ? 's' : ''} enriched with clinical detail.`);
-        utils.claims.getByPatientAndPeriod.invalidate();
-        utils.claims.getFollowUpClaims.invalidate();
-        utils.claims.getStatusCounts.invalidate();
-      }
-      if (failedCount > 0) toast.error(`${failedCount} line${failedCount !== 1 ? 's' : ''} failed to save.`);
-      if (skippedCount > 0) toast(`${skippedCount} line${skippedCount !== 1 ? 's' : ''} skipped (no matching reimbursement row, or still unresolved).`);
-    } catch (err: any) {
-      toast.error(`CMS1500 enrichment failed: ${err.message}`);
-    } finally {
-      setIsSavingCms1500(false);
-    }
-  };
-
-  // Whenever a CMS1500 extraction lands in the single-patient review table,
-  // immediately check which (if any) existing reimbursement row each line
-  // matches — before staff ever sees a "Save" button, so the preview always
-  // shows the real match state rather than a blank/raw table.
-  useEffect(() => {
-    if (claimUploadType === 'cms1500' && !eobPatientGroups && editingExtractedClaims.length > 0 && activePatient) {
-      runCms1500Preview();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingExtractedClaims, claimUploadType, eobPatientGroups, activePatient]);
+  // Super Admin only — the bulk uploads span every patient.
+  const claimsBulkUploadActions = canAccessClaims ? (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button size="sm" variant="outline" className="gap-1.5" data-testid="claims-bulk-upload-menu">
+          <FileStack className="w-4 h-4" />
+          <span className="hidden sm:inline">Bulk Claims Upload</span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={() => setClaimImport({ kind: 'cms1500', mode: 'bulk', patient: null, authPeriod: null, files: [] })}>
+          Bulk CMS1500 Upload
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => setClaimImport({ kind: 'eob', mode: 'bulk', patient: null, authPeriod: null, files: [] })}>
+          Bulk Insurance Reimbursement Upload
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  ) : null;
 
   // ── CSV Upload ─────────────────────────────────────────────────────────────
 
@@ -2420,6 +1719,7 @@ export default function Dashboard() {
         >
           <ClaimsAccessDenied onGoToPatientRecords={() => navigate('/patients/records')} />
           {bulkUploadDialog}
+          {claimImportDialog}
         </DashboardShell>
       );
     }
@@ -2437,6 +1737,7 @@ export default function Dashboard() {
           canAccessClaims={canAccessClaims}
           topbarTitle={activeSection === 'visits' ? 'Visits' : 'Claims'}
           topbarSubtitle="No patient selected"
+          topbarActions={activeSection === 'claims' ? claimsBulkUploadActions : undefined}
         >
           <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-20 text-center">
             <p className="text-muted-foreground mb-4">
@@ -2449,6 +1750,7 @@ export default function Dashboard() {
             </Button>
           </div>
           {bulkUploadDialog}
+          {claimImportDialog}
         </DashboardShell>
       );
     }
@@ -3053,43 +2355,16 @@ export default function Dashboard() {
                               <Download className="h-4 w-4" />
                               Export
                             </Button>
-                            {/* Insurance Reimbursement Upload button */}
-                            <label
-                              htmlFor={`claim-upload-reimb-${period}`}
-                              className="cursor-pointer inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap"
-                              title="Upload Insurance Reimbursement EOB (PDF/CSV) to auto-fill insurance reimbursement, CPT codes, charge amounts"
-                            >
-                              {isExtractingClaims && claimUploadPeriod === period && claimUploadType === 'reimbursement'
-                                ? <><Loader2 className="h-4 w-4 animate-spin" /> Extracting…</>
-                                : <><Upload className="h-4 w-4" /> Insurance Reimbursement Upload</>
-                              }
-                            </label>
-                            <input
-                              id={`claim-upload-reimb-${period}`}
-                              type="file"
-                              accept=".pdf,.csv,.xlsx,.xls,.xlsm"
-                              className="hidden"
-                              onChange={(e) => {
-                                const file = e.target.files?.[0];
-                                if (!file) return;
-                                console.log('[EOB Upload] File selected:', file.name);
-                                setClaimUploadPeriod(period);
-                                setShowClaimUploadDialog(true);
-                                console.log('[EOB Upload] Dialog opened, calling handleClaimFileUpload');
-                                handleClaimFileUpload(file, period, 'reimbursement');
-                                e.target.value = '';
-                              }}
-                            />
-                            {/* CMS1500 Upload button */}
+                            {/* P4-P24: CMS1500 first (creates the service lines), then the
+                                EOB (adds amounts to those lines). Both open the review
+                                dialog for this patient and period; nothing saves before
+                                an explicit Save there. */}
                             <label
                               htmlFor={`claim-upload-cms-${period}`}
                               className="cursor-pointer inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap"
-                              title="Fill visit details, diagnosis, and modifiers on existing reimbursement rows. Upload the Reimbursement Insurance EOB first — CMS1500 never creates a claim row or changes charge/payment amounts."
+                              title="Step 1 — upload the CMS1500 to create this claim's service lines (date, CPT, modifiers, units, diagnosis). Amounts stay blank until the EOB is uploaded."
                             >
-                              {isExtractingClaims && claimUploadPeriod === period && claimUploadType === 'cms1500'
-                                ? <><Loader2 className="h-4 w-4 animate-spin" /> Extracting…</>
-                                : <><Upload className="h-4 w-4" /> CMS1500 Upload</>
-                              }
+                              <Upload className="h-4 w-4" /> CMS1500 Upload
                             </label>
                             <input
                               id={`claim-upload-cms-${period}`}
@@ -3098,11 +2373,28 @@ export default function Dashboard() {
                               className="hidden"
                               onChange={(e) => {
                                 const file = e.target.files?.[0];
-                                if (!file) return;
-                                setClaimUploadPeriod(period);
-                                setShowClaimUploadDialog(true);
-                                handleClaimFileUpload(file, period, 'cms1500');
                                 e.target.value = '';
+                                if (!file) return;
+                                setClaimImport({ kind: 'cms1500', mode: 'single', patient: { id: activePatient.id, name: activePatient.name }, authPeriod: period, files: [file] });
+                              }}
+                            />
+                            <label
+                              htmlFor={`claim-upload-reimb-${period}`}
+                              className="cursor-pointer inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap"
+                              title="Step 2 — upload the EOB to add billed, paid and patient-responsibility amounts to lines that came from a CMS1500. Upload the CMS1500 first."
+                            >
+                              <Upload className="h-4 w-4" /> Insurance Reimbursement Upload
+                            </label>
+                            <input
+                              id={`claim-upload-reimb-${period}`}
+                              type="file"
+                              accept=".pdf,.csv,.xlsx,.xls,.xlsm"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                e.target.value = '';
+                                if (!file) return;
+                                setClaimImport({ kind: 'eob', mode: 'single', patient: { id: activePatient.id, name: activePatient.name }, authPeriod: period, files: [file] });
                               }}
                             />
                           </div>
@@ -3194,27 +2486,37 @@ export default function Dashboard() {
                             patientAmountPaid: 'patient_amount_paid',
                             patientAmountDue: 'patient_amount_due',
                           };
-                          const dateGroupTotals = new Map<string, Record<string, number> & { count: number }>();
+                          // P4-P24: a line with no amount yet (e.g. a CMS1500 line whose EOB
+                          // hasn't arrived) is unknown, not $0.00 — totals only sum known
+                          // amounts, show "—" when none are known, and mark a partial total.
+                          const groupsByDate = new Map<string, any[]>();
                           for (const c of claims) {
                             const key = c.date_of_service ?? '';
-                            const cur = dateGroupTotals.get(key) ?? { chargeAmount: 0, insuranceReimbursement: 0, patientAmountPaid: 0, patientAmountDue: 0, count: 0 };
-                            for (const [outKey, rawKey] of Object.entries(MONEY_TOTAL_FIELDS)) {
-                              cur[outKey] += c[rawKey] != null ? parseFloat(c[rawKey]) : 0;
-                            }
-                            cur.count += 1;
-                            dateGroupTotals.set(key, cur);
+                            groupsByDate.set(key, [...(groupsByDate.get(key) ?? []), c]);
                           }
+                          const dateGroupTotals = new Map<string, Record<string, { total: number | null; unknownCount: number }>>();
+                          groupsByDate.forEach((rows, key) => {
+                            const totals: Record<string, { total: number | null; unknownCount: number }> = {};
+                            for (const [outKey, rawKey] of Object.entries(MONEY_TOTAL_FIELDS)) {
+                              totals[outKey] = sumKnownMoney(rows.map((r: any) => r[rawKey]));
+                            }
+                            dateGroupTotals.set(key, totals);
+                          });
+                          const formatTotal = (t: { total: number | null; unknownCount: number }) =>
+                            t.total == null ? '—' : `$${t.total.toFixed(2)}${t.unknownCount > 0 ? '*' : ''}`;
+                          const totalTitle = (t: { total: number | null; unknownCount: number }) =>
+                            t.unknownCount > 0 ? `${t.unknownCount} line(s) on this date have no amount yet` : undefined;
                           const renderClaimsTotalsRow = (dateKey: string, keyPrefix: string) => {
                             const g = dateGroupTotals.get(dateKey);
                             if (!g) return null;
                             return (
                               <tr key={`${keyPrefix}-totals-${dateKey}`} className="bg-gray-50/80 font-semibold border-b border-gray-300 text-xs">
                                 {visibleClaimsColumns.map((col, i) => (
-                                  <td key={col.key} className={`border border-gray-200 px-1 py-1 ${col.key in MONEY_TOTAL_FIELDS ? 'text-right text-gray-800' : ''} ${col.key === 'actions' ? 'sticky right-0 bg-gray-50/80 z-10' : ''}`}>
+                                  <td key={col.key} title={col.key in MONEY_TOTAL_FIELDS ? totalTitle(g[col.key]) : undefined} className={`border border-gray-200 px-1 py-1 ${col.key in MONEY_TOTAL_FIELDS ? 'text-right text-gray-800' : ''} ${col.key === 'actions' ? 'sticky right-0 bg-gray-50/80 z-10' : ''}`}>
                                     {i === 0
                                       ? <span className="text-gray-500 italic">Totals</span>
                                       : col.key in MONEY_TOTAL_FIELDS
-                                        ? `$${g[col.key].toFixed(2)}`
+                                        ? formatTotal(g[col.key])
                                         : null}
                                   </td>
                                 ))}
@@ -3288,10 +2590,10 @@ export default function Dashboard() {
                                 const totalsCard = isLastOfDateGroup && g ? (
                                   <div key={`mobile-totals-${claim.date_of_service ?? ''}`} className="p-4 bg-gray-50/80 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
                                     <p className="col-span-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Totals for {claim.date_of_service ? formatCalendarDate(claim.date_of_service) : 'this date'}</p>
-                                    {!hide('chargeAmount') && <p className="text-gray-700">Charge: <span className="font-semibold">${g.chargeAmount.toFixed(2)}</span></p>}
-                                    {!hide('insuranceReimbursement') && <p className="text-gray-700">Ins. Reimb.: <span className="font-semibold">${g.insuranceReimbursement.toFixed(2)}</span></p>}
-                                    {!hide('patientAmountPaid') && <p className="text-gray-700">Pt. Paid: <span className="font-semibold">${g.patientAmountPaid.toFixed(2)}</span></p>}
-                                    {!hide('patientAmountDue') && <p className="text-gray-700">Pt. Due: <span className="font-semibold">${g.patientAmountDue.toFixed(2)}</span></p>}
+                                    {!hide('chargeAmount') && <p className="text-gray-700" title={totalTitle(g.chargeAmount)}>Charge: <span className="font-semibold">{formatTotal(g.chargeAmount)}</span></p>}
+                                    {!hide('insuranceReimbursement') && <p className="text-gray-700" title={totalTitle(g.insuranceReimbursement)}>Ins. Reimb.: <span className="font-semibold">{formatTotal(g.insuranceReimbursement)}</span></p>}
+                                    {!hide('patientAmountPaid') && <p className="text-gray-700" title={totalTitle(g.patientAmountPaid)}>Pt. Paid: <span className="font-semibold">{formatTotal(g.patientAmountPaid)}</span></p>}
+                                    {!hide('patientAmountDue') && <p className="text-gray-700" title={totalTitle(g.patientAmountDue)}>Pt. Due: <span className="font-semibold">{formatTotal(g.patientAmountDue)}</span></p>}
                                   </div>
                                 ) : null;
                                 return [(
@@ -3841,629 +3143,8 @@ export default function Dashboard() {
         </DialogContent>
       </Dialog>
 
-      {/* ── PDF/CSV Upload Preview Dialog ── */}
-      <Dialog
-        open={showClaimUploadDialog}
-        onOpenChange={(open) => {
-          if (!open) {
-            setShowClaimUploadDialog(false);
-            setExtractedClaims([]);
-            setEditingExtractedClaims([]);
-            setEobPatientGroups(null);
-            setBulkImportResults(null);
-            setManualMatchOverrides({});
-          }
-        }}
-      >
-        <DialogContent className="sm:max-w-5xl max-h-[90vh] overflow-y-auto rounded-2xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-brand-blue">
-              <Upload className="w-5 h-5 text-brand-gold" />
-              {eobPatientGroups
-                ? 'Bulk EOB Import — Multiple Patients'
-                : claimUploadType === 'cms1500'
-                  ? 'CMS1500 Upload — Review Extracted Claims'
-                  : 'Insurance Reimbursement Upload — Review Extracted Claims'
-              }
-            </DialogTitle>
-            <DialogDescription>
-              {uploadFileName && <span className="font-medium text-gray-700">{uploadFileName}</span>}
-              {eobPatientGroups ? (
-                <span className="ml-1 text-gray-600">
-                  {' — '}{eobPatientGroups.length} patient{eobPatientGroups.length !== 1 ? 's' : ''} detected.
-                  Matched patients will be auto-imported.
-                </span>
-              ) : (
-                <span className="ml-1 text-gray-600">
-                  {' — '}
-                  Period {claimUploadPeriod} for <span className="font-medium">{activePatient?.name}</span>.
-                  Review and edit each row before saving.
-                </span>
-              )}
-              {detectedTemplate && (
-                <span className={`ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
-                  detectedTemplate !== 'AI Extraction'
-                    ? 'bg-green-100 text-green-800'
-                    : 'bg-blue-100 text-blue-800'
-                }`}>
-                  {detectedTemplate !== 'AI Extraction' ? '✓ ' : '🤖 '}{detectedTemplate}
-                </span>
-              )}
-            </DialogDescription>
-          </DialogHeader>
-
-          {isExtractingClaims ? (
-            <div className="flex flex-col items-center justify-center py-16 gap-4 text-gray-500">
-              <Loader2 className="w-10 h-10 animate-spin text-brand-gold" />
-              <p className="text-sm font-medium">Reading file and extracting claim data…</p>
-              <p className="text-xs text-gray-400">Checking for known insurance templates, then using AI if needed.</p>
-            </div>
-
-          ) : claimReviewView === 'bulk' ? (
-            /* ── Multi-patient EOB preview ── */
-            <div className="space-y-4">
-              {bulkImportResults ? (
-                /* Results view after import */
-                <div className="space-y-3">
-                  <p className="text-sm font-semibold text-gray-700">Import Results:</p>
-                  {bulkImportResults.map((r, i) => (
-                    <div key={i} className={`rounded-lg border ${
-                      r.matched && !r.error ? 'bg-green-50 border-green-200' :
-                      r.error ? 'bg-red-50 border-red-200' :
-                      'bg-yellow-50 border-yellow-200'
-                    }`}>
-                      <div className="flex items-center justify-between px-4 py-3">
-                        <div>
-                          <p className="font-semibold text-sm text-gray-800">{r.patientName}</p>
-                          {r.matched && r.dashboardName && (
-                            <p className="text-xs text-gray-500">Matched: {r.dashboardName} · Auth Period {r.authPeriod}</p>
-                          )}
-                          {!r.matched && r.ambiguousCandidates ? (
-                            <p className="text-xs text-amber-700">
-                              {r.ambiguousCandidates} possible match{r.ambiguousCandidates !== 1 ? 'es' : ''} found but not confirmed — skipped
-                            </p>
-                          ) : !r.matched ? (
-                            <p className="text-xs text-yellow-700">Not found in dashboard — skipped</p>
-                          ) : null}
-                          {r.error && (
-                            <p className="text-xs text-red-600">Error: {r.error}</p>
-                          )}
-                        </div>
-                        <div className="text-right">
-                          {r.matched && !r.error && (
-                            <span className="text-green-700 font-semibold text-sm">✓ {r.claimsImported} claim{r.claimsImported !== 1 ? 's' : ''} imported</span>
-                          )}
-                          {!r.matched && (
-                            <span className="text-yellow-600 font-semibold text-sm">Skipped</span>
-                          )}
-                          {r.error && (
-                            <span className="text-red-600 font-semibold text-sm">{r.claimsImported} saved before error</span>
-                          )}
-                        </div>
-                      </div>
-                      {r.skippedCms1500Lines && r.skippedCms1500Lines.length > 0 && (
-                        <div className="px-4 pb-3 pt-0">
-                          <p className="text-xs font-semibold text-amber-800">
-                            {r.skippedCms1500Lines.length} CMS1500 line{r.skippedCms1500Lines.length !== 1 ? 's' : ''} skipped — no money changed, nothing enriched:
-                          </p>
-                          <ul className="mt-1 space-y-0.5">
-                            {r.skippedCms1500Lines.map((line, li) => (
-                              <li key={li} className="text-xs text-amber-700 font-mono">
-                                {line.dateOfService ?? '—'} · {line.cptCodes ?? '—'} —{' '}
-                                {line.reason === 'no_reimbursement_uploaded' ? 'upload the reimbursement file first'
-                                  : line.reason === 'no_match' ? 'no matching reimbursement row'
-                                  : line.reason === 'needs_selection' ? 'multiple candidate rows — needs selection'
-                                  : line.reason === 'unconfirmed_provenance' ? 'match found but reimbursement not confirmed'
-                                  : 'invalid/missing date'}
-                              </li>
-                            ))}
-                          </ul>
-                          <p className="mt-1 text-xs text-amber-700">
-                            Resolve these on {r.dashboardName ?? r.patientName}'s own page via the single-patient CMS1500 upload, which supports picking the right row and confirming an unconfirmed match.
-                          </p>
-                        </div>
-                      )}
-                      {r.skippedReimbursementLines && r.skippedReimbursementLines.length > 0 && (
-                        <div className="px-4 pb-3 pt-0">
-                          <p className="text-xs font-semibold text-amber-800">
-                            {r.skippedReimbursementLines.length} repeated line{r.skippedReimbursementLines.length !== 1 ? 's' : ''} not saved — needs manual review:
-                          </p>
-                          <ul className="mt-1 space-y-0.5">
-                            {r.skippedReimbursementLines.map((line, li) => (
-                              <li key={li} className="text-xs text-amber-700 font-mono">
-                                {line.dateOfService ?? '—'} · {line.cptCodes ?? '—'} — matches an existing row from before repeated-line tracking; can't confirm it's safe to add without checking the source document
-                              </li>
-                            ))}
-                          </ul>
-                          <p className="mt-1 text-xs text-amber-700">
-                            Verify against the original EOB and enter this line manually on {r.dashboardName ?? r.patientName}'s own page if it's a genuinely separate service line.
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                  <div className="flex justify-end pt-2 border-t">
-                    <Button
-                      onClick={() => {
-                        // Auto-select first imported patient so they can see their claims immediately
-                        const firstImported = bulkImportResults?.find(r => r.matched && !r.error);
-                        if (firstImported?.patientId) {
-                          setSelectedPatientId(firstImported.patientId);
-                        }
-                        setShowClaimUploadDialog(false);
-                        setEobPatientGroups(null);
-                        setBulkImportResults(null);
-                        setManualMatchOverrides({});
-                      }}
-                      className="bg-brand-blue hover:bg-brand-blue-dark text-white"
-                    >
-                      Done
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                /* Preview before import */
-                <>
-                  <p className="text-sm text-gray-600">
-                    <span className="font-semibold text-green-700">{eobPatientGroups!.length}</span> patient{eobPatientGroups!.length !== 1 ? 's' : ''} detected in this file.
-                    Patients matching your dashboard will have their claims auto-imported.
-                  </p>
-                  <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-1">
-                    {eobPatientGroups!.map((group, gIdx) => {
-                      const { confirmed: matchedPatient, candidates } = classifyPatientMatch(group.patientName, patients);
-                      const overriddenId = manualMatchOverrides[gIdx];
-                      const confirmedCandidate = overriddenId ? patients.find(p => p.id === overriddenId) ?? null : null;
-                      const effectiveMatch = matchedPatient ?? confirmedCandidate;
-                      const needsConfirmation = !effectiveMatch && candidates.length > 0;
-                      return (
-                        <div key={gIdx} className={`rounded-lg border ${
-                          effectiveMatch ? 'border-green-300 bg-green-50' : needsConfirmation ? 'border-amber-300 bg-amber-50' : 'border-yellow-300 bg-yellow-50'
-                        }`}>
-                          <div className="flex items-center justify-between px-4 py-2 border-b border-inherit">
-                            <div className="flex items-center gap-2">
-                              {effectiveMatch ? (
-                                <span className="text-green-700 font-bold text-sm">✓ {group.patientName}</span>
-                              ) : needsConfirmation ? (
-                                <span className="text-amber-700 font-bold text-sm">? {group.patientName}</span>
-                              ) : (
-                                <span className="text-yellow-700 font-bold text-sm">⚠ {group.patientName}</span>
-                              )}
-                              {matchedPatient ? (
-                                <span className="text-xs text-green-600 bg-green-100 px-2 py-0.5 rounded">Matched in dashboard</span>
-                              ) : confirmedCandidate ? (
-                                <span className="text-xs text-green-600 bg-green-100 px-2 py-0.5 rounded">Confirmed: {confirmedCandidate.name}</span>
-                              ) : needsConfirmation ? (
-                                <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded">Possible match — name differs (e.g. middle name) — confirm below</span>
-                              ) : (
-                                <span className="text-xs text-yellow-600 bg-yellow-100 px-2 py-0.5 rounded">Not found — will be skipped</span>
-                              )}
-                            </div>
-                            <span className="text-xs text-gray-500">{group.claims.length} date group{group.claims.length !== 1 ? 's' : ''}</span>
-                          </div>
-                          {needsConfirmation && (
-                            <div className="px-4 py-2 border-b border-inherit bg-white/60">
-                              <Label className="text-xs text-amber-800 font-semibold">
-                                This name wasn't an exact/safe match. Confirm which dashboard patient it belongs to, or leave unselected to skip it:
-                              </Label>
-                              <Select
-                                value={overriddenId ?? ''}
-                                onValueChange={(v) => setManualMatchOverrides(prev => ({ ...prev, [gIdx]: v }))}
-                              >
-                                <SelectTrigger className="mt-1 w-full max-w-sm bg-white">
-                                  <SelectValue placeholder="Select patient to confirm match..." />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {candidates.map(c => (
-                                    <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                          )}
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-xs border-collapse">
-                              <thead>
-                                <tr className="bg-white/60">
-                                  <th className="px-3 py-1.5 text-left font-semibold text-gray-600 border-b border-inherit">Date</th>
-                                  <th className="px-3 py-1.5 text-left font-semibold text-gray-600 border-b border-inherit">CPT Codes</th>
-                                  <th className="px-3 py-1.5 text-right font-semibold text-gray-600 border-b border-inherit">Charge</th>
-                                  <th className="px-3 py-1.5 text-right font-semibold text-gray-600 border-b border-inherit">Reimb.</th>
-                                  <th className="px-3 py-1.5 text-right font-semibold text-gray-600 border-b border-inherit">Copay</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {group.claims.map((claim: any, cIdx: number) => {
-                                  const lines: any[] = claim.cptLines?.length > 0 ? claim.cptLines : [{ cptCodes: claim.cptCodes, chargeAmount: claim.chargeAmount, insuranceReimbursement: claim.insuranceReimbursement, patientAmountPaid: claim.patientAmountPaid }];
-                                  const sum = (field: string) => lines.reduce((n: number, l: any) => n + (l[field] != null && l[field] !== '' ? parseFloat(l[field]) : 0), 0);
-                                  return [
-                                    ...lines.map((line: any, lIdx: number) => (
-                                    <tr key={`${cIdx}-${lIdx}`} className="border-b border-gray-100 hover:bg-white/50">
-                                      <td className="px-3 py-1 whitespace-nowrap text-gray-700">
-                                        {lIdx === 0 ? (
-                                          claim.dateOfService
-                                            ? formatCalendarDate(claim.dateOfService, { month: 'numeric', day: 'numeric', year: 'numeric' })
-                                            : '—'
-                                        ) : null}
-                                      </td>
-                                      <td className="px-3 py-1 font-mono text-gray-800">{line.cptCodes || '—'}</td>
-                                      <td className="px-3 py-1 text-right text-gray-700">{line.chargeAmount != null && line.chargeAmount !== '' ? `$${parseFloat(line.chargeAmount).toFixed(2)}` : '—'}</td>
-                                      <td className="px-3 py-1 text-right text-gray-700">{line.insuranceReimbursement != null && line.insuranceReimbursement !== '' ? `$${parseFloat(line.insuranceReimbursement).toFixed(2)}` : '—'}</td>
-                                      <td className="px-3 py-1 text-right text-gray-700">{line.patientAmountPaid != null && line.patientAmountPaid !== '' ? `$${parseFloat(line.patientAmountPaid).toFixed(2)}` : '—'}</td>
-                                    </tr>
-                                    )),
-                                    ...(lines.length > 1 ? [(
-                                      <tr key={`${cIdx}-total`} className="border-b border-gray-200 bg-gray-50/80 font-semibold">
-                                        <td className="px-3 py-1 whitespace-nowrap text-gray-500 italic" colSpan={2}>Total for this date</td>
-                                        <td className="px-3 py-1 text-right text-gray-800">${sum('chargeAmount').toFixed(2)}</td>
-                                        <td className="px-3 py-1 text-right text-gray-800">${sum('insuranceReimbursement').toFixed(2)}</td>
-                                        <td className="px-3 py-1 text-right text-gray-800">${sum('patientAmountPaid').toFixed(2)}</td>
-                                      </tr>
-                                    )] : []),
-                                  ];
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <div className="flex gap-3 justify-end pt-2 border-t">
-                    <Button
-                      variant="outline"
-                      onClick={() => {
-                        setShowClaimUploadDialog(false);
-                        setEobPatientGroups(null);
-                        setBulkImportResults(null);
-                        setManualMatchOverrides({});
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      disabled={isBulkImporting || bulkImportFromEOB.isPending}
-                      onClick={async () => {
-                        setIsBulkImporting(true);
-                        try {
-                          await bulkImportFromEOB.mutateAsync({
-                            patientGroups: eobPatientGroups!,
-                            uploadType: claimUploadType,
-                            // Explicit staff confirmations for groups that only
-                            // produced an ambiguous "candidate" match (see
-                            // classifyPatientMatch) — never auto-applied.
-                            confirmedMatches: Object.entries(manualMatchOverrides).map(([groupIndex, patientId]) => ({
-                              groupIndex: Number(groupIndex),
-                              patientId,
-                            })),
-                          });
-                        } finally {
-                          setIsBulkImporting(false);
-                        }
-                      }}
-                      className="bg-brand-blue hover:bg-brand-blue-dark text-white"
-                    >
-                      {isBulkImporting || bulkImportFromEOB.isPending
-                        ? <><Loader2 className="w-4 h-4 animate-spin mr-2" />Importing…</>
-                        : <><CheckCircle2 className="w-4 h-4 mr-2" />Import All Matched Patients</>}
-                    </Button>
-                  </div>
-                </>
-              )}
-            </div>
-
-          ) : claimReviewView === 'empty' ? (
-            <div className="flex flex-col items-center justify-center py-16 gap-3 text-gray-400">
-              <AlertCircle className="w-10 h-10" />
-              <p className="text-sm">No claims extracted yet. Upload a PDF or CSV file to begin.</p>
-            </div>
-          ) : claimReviewView === 'cms1500Enrichment' ? (
-            /* ── CMS1500 enrichment preview ──────────────────────────────────
-             * CMS1500 never creates a claim row or touches a charge/payment
-             * field — it only fills in visit #, diagnosis, modifier, and
-             * units on a Reimbursement/EOB row that must already exist. */
-            <div className="space-y-4">
-              <p className="text-sm text-gray-600">
-                <span className="font-semibold text-brand-blue">CMS1500 fills in visit details, diagnosis, and modifiers on existing reimbursement rows.</span>
-                {' '}It never creates a claim row or changes a charge/payment amount.
-              </p>
-
-              {isPreviewingCms1500 ? (
-                <div className="flex flex-col items-center justify-center py-12 gap-3 text-gray-500">
-                  <Loader2 className="w-8 h-8 animate-spin text-brand-gold" />
-                  <p className="text-sm">Checking for matching reimbursement rows…</p>
-                </div>
-              ) : cms1500Preview ? (
-                <div className="space-y-3 max-h-[55vh] overflow-y-auto pr-1">
-                  {cms1500Preview.results.map((r) => {
-                    const line = cms1500Lines.find(l => l.lineKey === r.lineKey);
-                    if (!line) return null;
-                    const dateLabel = line.dateOfService
-                      ? formatCalendarDate(line.dateOfService, { month: 'numeric', day: 'numeric', year: 'numeric' })
-                      : '—';
-                    const committed = cms1500CommitResults?.find(c => c.lineKey === r.lineKey);
-                    return (
-                      <div
-                        key={r.lineKey}
-                        className={`rounded-lg border px-4 py-3 ${
-                          committed?.status === 'saved' ? 'border-green-300 bg-green-50' :
-                          committed?.status === 'failed' ? 'border-red-300 bg-red-50' :
-                          r.status === 'matched' ? 'border-green-300 bg-green-50' :
-                          r.status === 'matched_unconfirmed' ? 'border-amber-300 bg-amber-50' :
-                          r.status === 'needs_selection' ? 'border-amber-300 bg-amber-50' :
-                          'border-yellow-300 bg-yellow-50'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-sm">
-                            <span className="font-mono font-semibold text-gray-800">{dateLabel}</span>
-                            <span className="ml-2 font-mono text-blue-700">{line.cptCodes || '—'}</span>
-                          </div>
-                          <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
-                            committed?.status === 'saved' ? 'bg-green-100 text-green-800' :
-                            committed?.status === 'failed' ? 'bg-red-100 text-red-800' :
-                            r.status === 'matched' ? 'bg-green-100 text-green-800' :
-                            r.status === 'matched_unconfirmed' ? 'bg-amber-100 text-amber-800' :
-                            r.status === 'needs_selection' ? 'bg-amber-100 text-amber-800' :
-                            'bg-yellow-100 text-yellow-800'
-                          }`}>
-                            {committed?.status === 'saved' ? '✓ Saved'
-                              : committed?.status === 'failed' ? `Failed`
-                              : r.status === 'matched' ? 'Matched — will update'
-                              : r.status === 'matched_unconfirmed' ? 'Confirm this is the reimbursement row'
-                              : r.status === 'needs_selection' ? 'Needs selection'
-                              : r.status === 'no_claims' ? 'No reimbursement row — skipped'
-                              : r.status === 'no_match' ? 'No matching row — skipped'
-                              : 'Invalid date — skipped'}
-                          </span>
-                        </div>
-
-                        {committed?.status === 'failed' && (
-                          <p className="text-xs text-red-700 mt-1">{committed.error}</p>
-                        )}
-
-                        {!committed && r.status === 'matched' && (
-                          <p className="text-xs text-gray-600 mt-1">
-                            Will update: {[
-                              line.visitNumber != null ? `Visit #${line.visitNumber}` : null,
-                              line.diagnosisCodes ? `Dx ${line.diagnosisCodes}` : null,
-                              line.modifier ? `Modifier ${line.modifier}` : null,
-                              line.unitsBilled != null ? `${line.unitsBilled} unit${line.unitsBilled !== 1 ? 's' : ''}` : null,
-                            ].filter(Boolean).join(' · ') || 'nothing new (all fields already blank)'}
-                          </p>
-                        )}
-
-                        {!committed && r.status === 'matched_unconfirmed' && (
-                          <div className="mt-2 space-y-1.5">
-                            <p className="text-xs text-amber-800">
-                              This system doesn't track how a claim row was created, and this row has no reimbursement
-                              data on it yet (no insurance reimbursement, patient paid/due, claim #, or check info) —
-                              it could be the right reimbursement row before an EOB adds payment info, or it could be a
-                              manual/legacy entry. Confirm this is the correct row before saving.
-                            </p>
-                            <label className="flex items-center gap-2 text-xs font-medium text-amber-900">
-                              <input
-                                type="checkbox"
-                                checked={!!cms1500ProvenanceConfirmations[r.lineKey]}
-                                onChange={(e) => setCms1500ProvenanceConfirmations(prev => ({ ...prev, [r.lineKey]: e.target.checked }))}
-                              />
-                              Yes, this is the correct reimbursement row — apply visit/diagnosis/modifier/units to it.
-                            </label>
-                          </div>
-                        )}
-
-                        {!committed && r.status === 'needs_selection' && (
-                          <div className="mt-2">
-                            <Label className="text-xs text-amber-800 font-semibold">
-                              Multiple existing rows match this date/CPT — select which one to enrich:
-                            </Label>
-                            <Select
-                              value={cms1500Selections[r.lineKey] ?? ''}
-                              onValueChange={(v) => setCms1500Selections(prev => ({ ...prev, [r.lineKey]: v }))}
-                            >
-                              <SelectTrigger className="mt-1 w-full max-w-md bg-white">
-                                <SelectValue placeholder="Select a row…" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {r.candidates.map(c => (
-                                  <SelectItem key={c.id} value={c.id}>
-                                    Period {c.authPeriod} — Charge ${c.chargeAmount != null ? c.chargeAmount.toFixed(2) : '—'}, Reimb. ${c.insuranceReimbursement != null ? c.insuranceReimbursement.toFixed(2) : '—'}
-                                    {!c.hasReimbursementEvidence ? ' (no reimbursement data recorded)' : ''}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        )}
-
-                        {!committed && r.status === 'no_claims' && (
-                          <p className="text-xs text-yellow-700 mt-1">Upload the reimbursement file first.</p>
-                        )}
-                        {!committed && r.status === 'no_match' && (
-                          <p className="text-xs text-yellow-700 mt-1">No existing reimbursement row for this date/CPT — skipped.</p>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : null}
-
-              <div className="flex gap-3 justify-end pt-2 border-t">
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setShowClaimUploadDialog(false);
-                    setExtractedClaims([]);
-                    setEditingExtractedClaims([]);
-                    setCms1500Preview(null);
-                    setCms1500Lines([]);
-                    setCms1500Selections({});
-                    setCms1500ProvenanceConfirmations({});
-                    setCms1500CommitResults(null);
-                  }}
-                >
-                  {cms1500CommitResults ? 'Close' : 'Cancel'}
-                </Button>
-                {!cms1500CommitResults && (
-                  <Button
-                    disabled={isSavingCms1500 || isPreviewingCms1500 || !cms1500Preview}
-                    onClick={handleCommitCms1500Enrichment}
-                    className="bg-brand-blue hover:bg-brand-blue-dark text-white"
-                  >
-                    {isSavingCms1500
-                      ? <><Loader2 className="w-4 h-4 animate-spin mr-2" />Saving…</>
-                      : <><CheckCircle2 className="w-4 h-4 mr-2" />Save Matched Lines</>}
-                  </Button>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-gray-600">
-                  <span className="font-semibold text-green-700">{editingExtractedClaims.length}</span> claim{editingExtractedClaims.length !== 1 ? 's' : ''} extracted
-                  {editingExtractedClaims.reduce((n: number, g: any) => n + (g.cptLines?.length || 1), 0) !== editingExtractedClaims.length && (
-                    <span className="text-gray-400 ml-1">({editingExtractedClaims.reduce((n: number, g: any) => n + (g.cptLines?.length || 1), 0)} CPT lines)</span>
-                  )}. Review before saving.
-                </p>
-              </div>
-
-              {/* Grouped preview table */}
-              <div className="overflow-x-auto rounded-lg border border-gray-200">
-                <table className="w-full text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-brand-cream border-b border-brand-cream-dark">
-                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Date of Service</th>
-                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">CPT Code</th>
-                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Diagnosis</th>
-                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Modifier</th>
-                      <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Units</th>
-                      <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Charge</th>
-                      <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Ins. Reimb.</th>
-                      <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Pt. Paid</th>
-                      <th className="px-3 py-2 text-right font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Pt. Due</th>
-                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Status</th>
-                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Payment Date</th>
-                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap border-r border-brand-cream-dark">Claim #</th>
-                      <th className="px-3 py-2 text-left font-semibold text-brand-blue uppercase text-[10px] tracking-wider whitespace-nowrap">Ins. Billed</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {editingExtractedClaims.map((group: any, gIdx: number) => {
-                      const lines: any[] = group.cptLines?.length > 0 ? group.cptLines : [{
-                        _key: group._key,
-                        cptCodes: group.cptCodes,
-                        chargeAmount: group.chargeAmount,
-                        insuranceReimbursement: group.insuranceReimbursement,
-                        patientAmountPaid: group.patientAmountPaid,
-                        patientAmountDue: group.patientAmountDue,
-                        unitsBilled: group.unitsBilled,
-                        modifier: group.modifier,
-                        diagnosisCodes: group.diagnosisCodes,
-                      }];
-                      const sum = (field: string) => lines.reduce((n: number, l: any) => n + (l[field] != null && l[field] !== '' ? parseFloat(l[field]) : 0), 0);
-                      return [
-                        ...lines.map((line: any, lIdx: number) => (
-                        <tr key={`${gIdx}-${lIdx}`} className={`border-b ${lIdx === lines.length - 1 ? 'border-gray-300' : 'border-gray-100'} hover:bg-brand-cream/50`}>
-                          {/* Date — show only on first CPT line of each group */}
-                          <td className="px-3 py-1.5 border-r border-gray-200 whitespace-nowrap font-medium text-gray-800">
-                            {lIdx === 0 ? (
-                              group.dateOfService
-                                ? formatCalendarDate(group.dateOfService, { month: 'numeric', day: 'numeric', year: 'numeric' })
-                                : <span className="text-gray-300">—</span>
-                            ) : null}
-                          </td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 font-mono text-blue-700">
-                            <span className="inline-flex items-center gap-1">
-                              {line.cptCodes || <span className="text-gray-300">—</span>}
-                              {line.notes ? (
-                                <span title={line.notes}>
-                                  <AlertTriangle
-                                    className={`w-3 h-3 flex-shrink-0 ${line.notes.includes('⚠️') ? 'text-amber-500' : 'text-gray-400'}`}
-                                  />
-                                </span>
-                              ) : null}
-                            </span>
-                          </td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-gray-700">{line.diagnosisCodes || <span className="text-gray-300">—</span>}</td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-gray-700">{line.modifier || <span className="text-gray-300">—</span>}</td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-right text-gray-700">{line.unitsBilled != null && line.unitsBilled !== '' ? line.unitsBilled : <span className="text-gray-300">—</span>}</td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.chargeAmount != null && line.chargeAmount !== '' ? `$${parseFloat(line.chargeAmount).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.insuranceReimbursement != null && line.insuranceReimbursement !== '' ? `$${parseFloat(line.insuranceReimbursement).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.patientAmountPaid != null && line.patientAmountPaid !== '' ? `$${parseFloat(line.patientAmountPaid).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-right">{line.patientAmountDue != null && line.patientAmountDue !== '' ? `$${parseFloat(line.patientAmountDue).toFixed(2)}` : <span className="text-gray-300">—</span>}</td>
-                          {/* Status — show only on first line */}
-                          <td className="px-3 py-1.5 border-r border-gray-200">
-                            {lIdx === 0 && (
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                                group.claimStatus === 'approved' ? 'bg-green-100 text-green-800' :
-                                group.claimStatus === 'denied' ? 'bg-red-100 text-red-800' :
-                                'bg-blue-100 text-blue-800'
-                              }`}>{group.claimStatus || 'submitted'}</span>
-                            )}
-                          </td>
-                          {/* Payment Date — show only on first line */}
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-gray-700 whitespace-nowrap">
-                            {lIdx === 0 && (
-                              group.checkDate
-                                ? formatCalendarDate(group.checkDate, { month: 'numeric', day: 'numeric', year: 'numeric' })
-                                : <span className="text-gray-300">—</span>
-                            )}
-                          </td>
-                          {/* Claim # — show only on first line */}
-                          <td className="px-3 py-1.5 border-r border-gray-200 text-gray-600">
-                            {lIdx === 0 && (group.oaClaimNumber || <span className="text-gray-300">—</span>)}
-                          </td>
-                          {/* Ins. Billed — show only on first line */}
-                          <td className="px-3 py-1.5 text-gray-600">
-                            {lIdx === 0 && (group.insuranceBilled || <span className="text-gray-300">—</span>)}
-                          </td>
-                        </tr>
-                        )),
-                        ...(lines.length > 1 ? [(
-                          <tr key={`${gIdx}-total`} className="border-b border-gray-300 bg-gray-50/80 font-semibold">
-                            <td className="px-3 py-1.5 border-r border-gray-200 text-gray-500 italic whitespace-nowrap" colSpan={5}>Total for this date</td>
-                            <td className="px-3 py-1.5 border-r border-gray-200 text-right text-gray-800">${sum('chargeAmount').toFixed(2)}</td>
-                            <td className="px-3 py-1.5 border-r border-gray-200 text-right text-gray-800">${sum('insuranceReimbursement').toFixed(2)}</td>
-                            <td className="px-3 py-1.5 border-r border-gray-200 text-right text-gray-800">${sum('patientAmountPaid').toFixed(2)}</td>
-                            <td className="px-3 py-1.5 border-r border-gray-200 text-right text-gray-800">${sum('patientAmountDue').toFixed(2)}</td>
-                            <td className="px-3 py-1.5 border-r border-gray-200" colSpan={3}></td>
-                            <td className="px-3 py-1.5"></td>
-                          </tr>
-                        )] : []),
-                      ];
-                    })}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="flex gap-3 justify-end pt-2 border-t">
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setShowClaimUploadDialog(false);
-                    setExtractedClaims([]);
-                    setEditingExtractedClaims([]);
-                  }}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  disabled={isSavingExtractedClaims || editingExtractedClaims.length === 0}
-                  onClick={handleSaveExtractedClaims}
-                  className="bg-brand-blue hover:bg-brand-blue-dark text-white"
-                >
-                  {isSavingExtractedClaims
-                    ? <><Loader2 className="w-4 h-4 animate-spin mr-2" />Saving…</>
-                    : <><CheckCircle2 className="w-4 h-4 mr-2" />Save {editingExtractedClaims.length} Claim{editingExtractedClaims.length !== 1 ? 's' : ''}</>
-                  }
-                </Button>
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
-
       {bulkUploadDialog}
+          {claimImportDialog}
       {patientActionDialogs}
       </DashboardShell>
     );
@@ -4810,6 +3491,7 @@ export default function Dashboard() {
           />
         </div>
         {bulkUploadDialog}
+          {claimImportDialog}
       </DashboardShell>
     );
   }
@@ -4861,6 +3543,7 @@ export default function Dashboard() {
           />
         </div>
         {bulkUploadDialog}
+          {claimImportDialog}
         {patientActionDialogs}
         {deleteInsurerConfirmDialog}
         {permanentDeleteInsurerConfirmDialog}
@@ -4912,6 +3595,7 @@ export default function Dashboard() {
           />
         </div>
         {bulkUploadDialog}
+          {claimImportDialog}
       </DashboardShell>
     );
   }
@@ -4938,6 +3622,7 @@ export default function Dashboard() {
           <AuthorizationOverview onNavigate={navigate} />
         </div>
         {bulkUploadDialog}
+          {claimImportDialog}
       </DashboardShell>
     );
   }
@@ -4963,6 +3648,7 @@ export default function Dashboard() {
           <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
         </div>
         {bulkUploadDialog}
+          {claimImportDialog}
       </DashboardShell>
     );
   }
@@ -4989,6 +3675,7 @@ export default function Dashboard() {
           <AuthorizationRecordsWorkspace onViewVisits={(id) => selectPatient(id, '/visits')} />
         </div>
         {bulkUploadDialog}
+          {claimImportDialog}
       </DashboardShell>
     );
   }
@@ -5011,6 +3698,7 @@ export default function Dashboard() {
               below) so it also opens from the sidebar action on every route;
               this button just opens it without navigating. */}
           {bulkUploadTrigger}
+          {claimsBulkUploadActions}
           {addPatientAction}
         </>
       }
@@ -5051,6 +3739,7 @@ export default function Dashboard() {
       </div>
 
       {bulkUploadDialog}
+          {claimImportDialog}
       {patientActionDialogs}
     </DashboardShell>
   );
