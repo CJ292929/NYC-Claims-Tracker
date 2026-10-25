@@ -65,7 +65,7 @@ interface DbPatient {
   isActive: boolean;
   dischargeDate: number | null;
   dischargeReason: string | null;
-  /** Claim data — only present in responses for the Super Admin (P4-P23). */
+  /** Claim data — only present in responses for Claims-access roles (P4-P25). */
   claimsStatus?: string;
   createdAt: Date;
   updatedAt: Date;
@@ -482,7 +482,7 @@ export default function Dashboard() {
   });
 
   // ── Queries ────────────────────────────────────────────────────────────────
-  // P4-P23: Claims are Super Admin only. Resolved before any claims query so
+  // P4-P25: Claims are Owner/Super Admin + Clinic Admin only. Resolved before any claims query so
   // every claims.* query below can be gated on it (`enabled`). ProtectedRoute
   // only renders Dashboard once auth.me has resolved, and canAccessClaims
   // treats an unresolved user as no access, so no claims request is made and
@@ -1250,7 +1250,7 @@ export default function Dashboard() {
     />
   ) : null;
 
-  // Super Admin only — the bulk uploads span every patient.
+  // Claims-access roles only — the bulk uploads span every patient.
   const claimsBulkUploadActions = canAccessClaims ? (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -1560,7 +1560,7 @@ export default function Dashboard() {
                 className="mt-1 border-brand-cream-dark focus:border-brand-blue"
               />
             </div>
-            {/* Claims status is claim data — Super Admin only (P4-P23). */}
+            {/* Claims status is claim data — Claims access only (P4-P25). */}
             {canAccessClaims && (
             <div>
               <Label htmlFor="edit-patient-claims-status" className="text-brand-blue font-semibold">Claims Status</Label>
@@ -1896,7 +1896,7 @@ export default function Dashboard() {
                   // P4-P23: the session table no longer shows the three
                   // financial totals (or their Claims-derived auto-fill and
                   // period Totals footer) for any role — those values stay
-                  // stored and are Claims/Super Admin data. Its last three
+                  // stored and are Claims-access data. Its last three
                   // columns are the per-session workflow fields instead.
                   return (
                     <div key={`period-${period}`}>
@@ -1922,7 +1922,7 @@ export default function Dashboard() {
                           </CardDescription>
                         </div>
                         <div className="flex items-center gap-2">
-                          {/* Super Admin only (P4-P23) */}
+                          {/* Claims access only (P4-P25) */}
                           {canAccessClaims && (
                           <Button
                             className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold px-5 py-2.5 rounded-lg inline-flex items-center gap-2 transition-all shadow-sm hover:shadow-md"
@@ -3711,7 +3711,7 @@ export default function Dashboard() {
           {[
             { icon: <Users className="w-4 h-4 text-brand-blue" />, label: 'Active Patients', value: dashboardKpis.activePatients, sub: 'Currently active, all insurances', tone: 'navy' as const },
             { icon: <AlertTriangle className="w-4 h-4 text-destructive" />, label: 'Authorization Attention', value: dashboardKpis.authorizationAttention, sub: 'Needs authorization action', tone: 'destructive' as const },
-            // Claims KPI is Super Admin only (P4-P23).
+            // Claims KPI requires Claims access (P4-P25).
             ...(canAccessClaims ? [{ icon: <AlertCircle className="w-4 h-4 text-brand-gold-dark" />, label: 'Claims Follow-Up', value: dashboardKpis.claimsFollowUp, sub: 'Unresolved, all insurances', tone: 'gold' as const }] : []),
             { icon: <CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />, label: 'Completed Patients', value: dashboardKpis.completedPatients, sub: 'Sessions exhausted', tone: 'gold' as const },
           ].map(({ icon, label, value, sub, tone }) => (

@@ -1,11 +1,12 @@
 /**
- * server/superAdminClaimsAccess.test.ts — P4-P23
+ * server/claimsAccess.test.ts — P4-P23, P4-P25
  *
  * Router-level (real appRouter, mocked ./db) coverage for:
  *   - every claims.* procedure — enumerated from the router itself, so a
- *     procedure added later is covered automatically — is Super Admin only;
+ *     procedure added later is covered automatically — is open to the
+ *     Owner/Super Admin and Clinic Admins and denied to Staff;
  *   - shared patient/visit/history/activity-log responses omit Claims
- *     fields for clinic admins and staff, and keep them for the Super Admin;
+ *     fields for staff, and keep them for Claims-access roles;
  *   - Claims-financial writes through shared endpoints are rejected;
  *   - visits.updateSessionFields validation, partial updates, and gating.
  *
@@ -60,6 +61,7 @@ const supabaseFrom = vi.fn(() => {
 vi.mock("./supabase", () => ({ supabase: { from: supabaseFrom } }));
 
 import { appRouter } from "./routers";
+import { hasClaimsAccess } from "@shared/claimsAccess";
 
 const PATIENT_ID = "11111111-1111-4111-8111-111111111111";
 const VISIT_ID = "22222222-2222-4222-8222-222222222222";
@@ -124,7 +126,20 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe("claims.* is Super Admin only", () => {
+describe("shared hasClaimsAccess", () => {
+  it("allows owner admins and clinic admins only", () => {
+    expect(hasClaimsAccess({ kind: "owner", role: "admin" })).toBe(true);
+    expect(hasClaimsAccess({ kind: "clinic", role: "admin" })).toBe(true);
+    expect(hasClaimsAccess({ kind: "clinic", role: "admin", mustChangePassword: false })).toBe(true);
+    expect(hasClaimsAccess({ kind: "clinic", role: "staff" })).toBe(false);
+    expect(hasClaimsAccess({ kind: "owner", role: "user" })).toBe(false);
+    expect(hasClaimsAccess({ kind: "clinic", role: "admin", mustChangePassword: true })).toBe(false);
+    expect(hasClaimsAccess(null)).toBe(false);
+    expect(hasClaimsAccess(undefined)).toBe(false);
+  });
+});
+
+describe("claims.* requires Claims access (Owner/Super Admin, Clinic Admin)", () => {
   it("covers the full claims router (sanity: nothing silently skipped)", () => {
     expect(CLAIM_PROCEDURES).toEqual(expect.arrayContaining([
       "getByPatientAndPeriod", "create", "update", "delete", "upsert", "historyForClaim",
@@ -135,7 +150,6 @@ describe("claims.* is Super Admin only", () => {
   });
 
   for (const [label, user, code] of [
-    ["clinic admin", CLINIC_ADMIN, "FORBIDDEN"],
     ["clinic staff", CLINIC_STAFF, "FORBIDDEN"],
     ["non-admin OAuth session", NON_ADMIN_OAUTH, "FORBIDDEN"],
     ["anonymous", null, "UNAUTHORIZED"],
@@ -152,28 +166,30 @@ describe("claims.* is Super Admin only", () => {
   }
 
   it("denial message reveals nothing about claim data", async () => {
-    await expect(callClaims(CLINIC_ADMIN, "getByPatientAndPeriod", { patientId: PATIENT_ID, authPeriod: 1 }))
-      .rejects.toThrow("Claims access is restricted to the Super Admin (10004)");
+    await expect(callClaims(CLINIC_STAFF, "getByPatientAndPeriod", { patientId: PATIENT_ID, authPeriod: 1 }))
+      .rejects.toThrow("Claims access is restricted to administrators (10004)");
   });
 
-  it("lets the Super Admin through the gate (reaches input validation / handler)", async () => {
-    for (const name of CLAIM_PROCEDURES) {
-      // {} is invalid for most inputs: a BAD_REQUEST proves the auth gate
-      // passed; the handful of all-optional inputs reach the handler.
-      const outcome = await callClaims(SUPER_ADMIN, name, {}).then(
-        () => "ok",
-        (e: { code?: string }) => e.code ?? "error",
-      );
-      expect(outcome, `claims.${name}`).not.toBe("FORBIDDEN");
-      expect(outcome, `claims.${name}`).not.toBe("UNAUTHORIZED");
-    }
-  });
+  for (const [label, user] of [["Super Admin", SUPER_ADMIN], ["clinic admin", CLINIC_ADMIN]] as const) {
+    it(`lets ${label} through the gate (reaches input validation / handler)`, async () => {
+      for (const name of CLAIM_PROCEDURES) {
+        // {} is invalid for most inputs: a BAD_REQUEST proves the auth gate
+        // passed; the handful of all-optional inputs reach the handler.
+        const outcome = await callClaims(user, name, {}).then(
+          () => "ok",
+          (e: { code?: string }) => e.code ?? "error",
+        );
+        expect(outcome, `claims.${name}`).not.toBe("FORBIDDEN");
+        expect(outcome, `claims.${name}`).not.toBe("UNAUTHORIZED");
+      }
+    });
 
-  it("Super Admin can read claims rows", async () => {
-    dbMock.getClaimsByPatientAndPeriod.mockResolvedValue([{ id: "c1" }]);
-    await expect(callClaims(SUPER_ADMIN, "getByPatientAndPeriod", { patientId: PATIENT_ID, authPeriod: 1 }))
-      .resolves.toEqual([{ id: "c1" }]);
-  });
+    it(`${label} can read claims rows`, async () => {
+      dbMock.getClaimsByPatientAndPeriod.mockResolvedValue([{ id: "c1" }]);
+      await expect(callClaims(user, "getByPatientAndPeriod", { patientId: PATIENT_ID, authPeriod: 1 }))
+        .resolves.toEqual([{ id: "c1" }]);
+    });
+  }
 
   it("a clinic session forced to change its password is still denied", async () => {
     const forced = clinicUser("admin", { mustChangePassword: true });
@@ -182,16 +198,24 @@ describe("claims.* is Super Admin only", () => {
 });
 
 describe("auth.me capability", () => {
-  it("is true only for the owner identity", async () => {
+  it("isSuperAdmin stays owner-only (account-management identity is unchanged)", async () => {
     await expect(callerFor(SUPER_ADMIN).auth.me()).resolves.toMatchObject({ isSuperAdmin: true });
     await expect(callerFor(CLINIC_ADMIN).auth.me()).resolves.toMatchObject({ isSuperAdmin: false });
     await expect(callerFor(CLINIC_STAFF).auth.me()).resolves.toMatchObject({ isSuperAdmin: false });
     await expect(callerFor(NON_ADMIN_OAUTH).auth.me()).resolves.toMatchObject({ isSuperAdmin: false });
   });
 
-  it("a clinic admin whose bridged users row somehow says role=admin is still not Super Admin", async () => {
-    const spoofed = { ...CLINIC_ADMIN, role: "admin" } as AuthenticatedUser;
-    await expect(callerFor(spoofed).auth.me()).resolves.toMatchObject({ isSuperAdmin: false });
+  it("canAccessClaims is true for Super Admin and clinic admin, false for staff and non-admin OAuth", async () => {
+    await expect(callerFor(SUPER_ADMIN).auth.me()).resolves.toMatchObject({ canAccessClaims: true });
+    await expect(callerFor(CLINIC_ADMIN).auth.me()).resolves.toMatchObject({ canAccessClaims: true });
+    await expect(callerFor(CLINIC_STAFF).auth.me()).resolves.toMatchObject({ canAccessClaims: false });
+    await expect(callerFor(NON_ADMIN_OAUTH).auth.me()).resolves.toMatchObject({ canAccessClaims: false });
+    await expect(callerFor(clinicUser("admin", { mustChangePassword: true })).auth.me()).resolves.toMatchObject({ canAccessClaims: false });
+  });
+
+  it("a clinic staff whose bridged users row somehow says role=admin still has no Claims access", async () => {
+    const spoofed = { ...CLINIC_STAFF, role: "admin" } as AuthenticatedUser;
+    await expect(callerFor(spoofed).auth.me()).resolves.toMatchObject({ isSuperAdmin: false, canAccessClaims: false });
     await expect(callClaims(spoofed, "getStatusCounts", {})).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 });
@@ -209,8 +233,8 @@ const VISIT = {
   createdAt: new Date(), updatedAt: new Date(),
 };
 
-describe("shared responses omit Claims fields for Admin/Staff", () => {
-  for (const [label, user] of [["clinic admin", CLINIC_ADMIN], ["clinic staff", CLINIC_STAFF]] as const) {
+describe("shared responses omit Claims fields for Staff", () => {
+  for (const [label, user] of [["clinic staff", CLINIC_STAFF], ["non-admin OAuth session", NON_ADMIN_OAUTH]] as const) {
     it(`${label}: patients.list / patients.get omit claimsStatus`, async () => {
       dbMock.getAllPatients.mockResolvedValue([PATIENT]);
       dbMock.getPatientById.mockResolvedValue(PATIENT);
@@ -238,6 +262,9 @@ describe("shared responses omit Claims fields for Admin/Staff", () => {
       expect(dbMock.updatePatient).not.toHaveBeenCalled();
     });
 
+  }
+
+  for (const [label, user] of [["clinic staff", CLINIC_STAFF], ["clinic admin", CLINIC_ADMIN]] as const) {
     it(`${label}: still edits nonfinancial authorization fields normally`, async () => {
       dbMock.getPatientById.mockResolvedValue(PATIENT);
       await callerFor(user).visits.update({ id: VISIT_ID, sessionsRemaining: 3, authStatus: "pending" });
@@ -247,15 +274,19 @@ describe("shared responses omit Claims fields for Admin/Staff", () => {
     });
   }
 
-  it("Super Admin keeps every field and may still write financial totals", async () => {
-    dbMock.getAllPatients.mockResolvedValue([PATIENT]);
-    dbMock.getVisitsByPatientId.mockResolvedValue([VISIT]);
-    expect((await callerFor(SUPER_ADMIN).patients.list())[0]).toMatchObject({ claimsStatus: "denied" });
-    expect((await callerFor(SUPER_ADMIN).visits.listByPatient({ patientId: PATIENT_ID }))[0])
-      .toMatchObject({ totalInsuranceReimbursement: 120.5, totalPatientDue: 10, totalPatientPaid: 5 });
-    await callerFor(SUPER_ADMIN).visits.update({ id: VISIT_ID, totalPatientPaid: 7 });
-    expect(dbMock.updateVisitRecord).toHaveBeenCalledWith(VISIT_ID, { totalPatientPaid: 7 }, expect.anything());
-  });
+  for (const [label, user] of [["Super Admin", SUPER_ADMIN], ["clinic admin", CLINIC_ADMIN]] as const) {
+    it(`${label} keeps every field and may still write financial totals`, async () => {
+      dbMock.getAllPatients.mockResolvedValue([PATIENT]);
+      dbMock.getPatientById.mockResolvedValue(PATIENT);
+      dbMock.getVisitsByPatientId.mockResolvedValue([VISIT]);
+      expect((await callerFor(user).patients.list())[0]).toMatchObject({ claimsStatus: "denied" });
+      expect(await callerFor(user).patients.get({ id: PATIENT_ID })).toMatchObject({ claimsStatus: "denied" });
+      expect((await callerFor(user).visits.listByPatient({ patientId: PATIENT_ID }))[0])
+        .toMatchObject({ totalInsuranceReimbursement: 120.5, totalPatientDue: 10, totalPatientPaid: 5 });
+      await callerFor(user).visits.update({ id: VISIT_ID, totalPatientPaid: 7 });
+      expect(dbMock.updateVisitRecord).toHaveBeenCalledWith(VISIT_ID, { totalPatientPaid: 7 }, expect.anything());
+    });
+  }
 });
 
 describe("history and Activity Log redaction", () => {
@@ -282,34 +313,38 @@ describe("history and Activity Log redaction", () => {
     dbMock.listHistoryForEntity.mockResolvedValue([
       row({ entityType: "patient", action: "PATIENT_UPDATE", beforeData: { name: "A", claims_status: "denied" }, afterData: { name: "B", claims_status: "approved" } }),
     ]);
-    const rows = await callerFor(CLINIC_ADMIN).patients.history({ id: PATIENT_ID });
+    const rows = await callerFor(CLINIC_STAFF).patients.history({ id: PATIENT_ID });
     expect(JSON.stringify(rows)).not.toMatch(/claims_status/);
     expect(rows[0]).toMatchObject({ beforeData: { name: "A" }, afterData: { name: "B" } });
   });
 
-  it("insurer history drops the retained claims count only", async () => {
-    dbMock.listHistoryForEntity.mockResolvedValue([
-      row({ entityType: "insurer_catalog", action: "INSURER_PERMANENT_DELETE", beforeData: { name: "X", retained_references: { patients: 1, visits: 2, claims: 3 } } }),
-    ]);
+  it("insurer history and the Activity Log stay admin/owner only — staff never reach them", async () => {
+    await expect(callerFor(CLINIC_STAFF).insurance.history({ id: VISIT_ID })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(callerFor(CLINIC_STAFF).activityLog.list({})).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(callerFor(CLINIC_STAFF).activityLog.list({ entityType: "claim_record" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(dbMock.listHistoryForEntity).not.toHaveBeenCalled();
+    expect(dbMock.listActivityLog).not.toHaveBeenCalled();
+  });
+
+  it("clinic admin: insurer history keeps the retained claims count", async () => {
+    const deleteRow = row({ entityType: "insurer_catalog", action: "INSURER_PERMANENT_DELETE", beforeData: { name: "X", retained_references: { patients: 1, visits: 2, claims: 3 } } });
+    dbMock.listHistoryForEntity.mockResolvedValue([deleteRow]);
     const rows = await callerFor(CLINIC_ADMIN).insurance.history({ id: VISIT_ID });
-    expect(rows[0].beforeData).toEqual({ name: "X", retained_references: { patients: 1, visits: 2 } });
+    expect(rows[0].beforeData).toEqual({ name: "X", retained_references: { patients: 1, visits: 2, claims: 3 } });
   });
 
-  it("activity log: clinic admin gets claims excluded in the query and cannot filter to claims", async () => {
-    dbMock.listActivityLog.mockResolvedValue({ rows: [row({ entityType: "claim_record", action: "CLAIM_RECORD_UPDATE" })], total: 1 });
-    const result = await callerFor(CLINIC_ADMIN).activityLog.list({});
-    expect(dbMock.listActivityLog).toHaveBeenCalledWith(expect.objectContaining({ excludeClaims: true }));
-    expect(result.rows).toEqual([]); // defense in depth even if the query let one through
-    await expect(callerFor(CLINIC_ADMIN).activityLog.list({ entityType: "claim_record" })).rejects.toMatchObject({ code: "FORBIDDEN" });
-  });
-
-  it("activity log: Super Admin sees claims", async () => {
-    const claimRow = row({ entityType: "claim_record", action: "CLAIM_RECORD_UPDATE" });
-    dbMock.listActivityLog.mockResolvedValue({ rows: [claimRow], total: 1 });
-    const result = await callerFor(SUPER_ADMIN).activityLog.list({ entityType: "claim_record" });
-    expect(dbMock.listActivityLog).toHaveBeenCalledWith(expect.objectContaining({ excludeClaims: false }));
-    expect(result.rows).toEqual([claimRow]);
-  });
+  for (const [label, user] of [["Super Admin", SUPER_ADMIN], ["clinic admin", CLINIC_ADMIN]] as const) {
+    it(`activity log: ${label} sees claims, and patient history keeps claims_status`, async () => {
+      const claimRow = row({ entityType: "claim_record", action: "CLAIM_RECORD_UPDATE" });
+      dbMock.listActivityLog.mockResolvedValue({ rows: [claimRow], total: 1 });
+      const result = await callerFor(user).activityLog.list({ entityType: "claim_record" });
+      expect(dbMock.listActivityLog).toHaveBeenCalledWith(expect.objectContaining({ excludeClaims: false }));
+      expect(result.rows).toEqual([claimRow]);
+      const patientRow = row({ entityType: "patient", action: "PATIENT_UPDATE", afterData: { claims_status: "approved" } });
+      dbMock.listHistoryForEntity.mockResolvedValue([patientRow]);
+      expect(await callerFor(user).patients.history({ id: PATIENT_ID })).toEqual([patientRow]);
+    });
+  }
 });
 
 describe("visits.updateSessionFields", () => {

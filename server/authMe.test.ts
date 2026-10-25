@@ -47,6 +47,7 @@ describe("auth.me", () => {
       email: "owner@example.com",
       role: "admin",
       isSuperAdmin: true,
+      canAccessClaims: true,
     });
   });
 
@@ -85,6 +86,7 @@ describe("auth.me", () => {
       role: "staff",
       mustChangePassword: true,
       isSuperAdmin: false,
+      canAccessClaims: false,
     });
     const serialized = JSON.stringify(result);
     expect(serialized).not.toMatch(/passwordHash/i);

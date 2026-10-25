@@ -133,7 +133,7 @@ export default function ActivityLog() {
                 <SelectTrigger><SelectValue placeholder="All types" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All types</SelectItem>
-                  {/* Claim history is Super Admin only (P4-P23) — the server rejects the filter otherwise. */}
+                  {/* Claim history requires Claims access (P4-P25) — the server rejects the filter otherwise. */}
                   {Object.entries(ENTITY_LABELS).filter(([value]) => value !== "claim_record" || canAccessClaims(authUser)).map(([value, label]) => (
                     <SelectItem key={value} value={value}>{label}</SelectItem>
                   ))}

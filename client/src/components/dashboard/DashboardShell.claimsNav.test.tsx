@@ -5,7 +5,8 @@ import { DashboardShell } from "./DashboardShell";
 
 afterEach(cleanup);
 
-// P4-P23: the Claims nav item is Super Admin only, on BOTH the desktop
+// P4-P25: the Claims nav item is shown only with Claims access (Owner/Super
+// Admin, Clinic Admin — see canAccessClaims in authGate.ts), on BOTH the desktop
 // sidebar and the mobile drawer (the earlier Staff Management parity bug
 // showed the two can drift), and fails closed when the prop is omitted.
 function renderShell(props: { canAccessClaims?: boolean; canManageStaff?: boolean }) {
@@ -21,13 +22,13 @@ function renderShell(props: { canAccessClaims?: boolean; canManageStaff?: boolea
 }
 
 describe("DashboardShell Claims nav visibility", () => {
-  it("shows Claims on desktop and mobile for the Super Admin", () => {
+  it("shows Claims on desktop and mobile with Claims access (Super Admin / Clinic Admin)", () => {
     const { desktopNav, mobileNav } = renderShell({ canAccessClaims: true, canManageStaff: true });
     expect(within(desktopNav).getByText("Claims")).toBeTruthy();
     expect(within(mobileNav).getByText("Claims")).toBeTruthy();
   });
 
-  it("hides Claims on desktop and mobile for a clinic admin, keeping Patients/Authorizations/Management", () => {
+  it("hides Claims on desktop and mobile without Claims access, keeping Patients/Authorizations/Management", () => {
     const { desktopNav, mobileNav } = renderShell({ canAccessClaims: false, canManageStaff: true });
     for (const nav of [desktopNav, mobileNav]) {
       expect(within(nav).queryByText("Claims")).toBeNull();

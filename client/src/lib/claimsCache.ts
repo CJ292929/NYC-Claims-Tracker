@@ -2,7 +2,7 @@
  * client/src/lib/claimsCache.ts — P4-P23
  *
  * React Query keeps every fetched response in memory until it is removed.
- * Claims responses are Super Admin only, so cached data must not outlive the
+ * Claims responses are for Claims-access roles only (P4-P25), so cached data must not outlive the
  * identity that fetched it: on sign-out, on a switch to a different account,
  * or when the signed-in account loses Claims access, the cache is purged
  * (see IdentityCacheGuard in App.tsx and handleSignOut in Dashboard.tsx).

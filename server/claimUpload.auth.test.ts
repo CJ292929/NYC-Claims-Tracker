@@ -114,9 +114,10 @@ describe('POST /api/claims/upload-extract auth boundary', () => {
     expect(authenticateRequest).toHaveBeenCalledTimes(1);
   });
 
-  // P4-P23: CMS1500/EOB extraction is Super Admin only. Clinic admins and
-  // staff — and a non-admin owner-style session — get 403 before multer or
-  // any extraction runs, with a body that says nothing about claims data.
+  // P4-P25: CMS1500/EOB extraction requires Claims access (Owner/Super
+  // Admin, Clinic Admin). Staff — and a non-admin owner-style session — get
+  // 403 before multer or any extraction runs, with a body that says nothing
+  // about claims data.
   const base = {
     id: 'u', openId: 'clinic_x', email: null, name: 'x', loginMethod: 'password',
     createdAt: new Date(), updatedAt: new Date(), lastSignedIn: new Date(),
@@ -125,8 +126,21 @@ describe('POST /api/claims/upload-extract auth boundary', () => {
     ...base, role: 'user',
     clinicUser: { clinicUserId: 'c1', username: 'x', name: 'X', email: null, department: null, role, mustChangePassword: false },
   });
+  it('passes an authenticated clinic admin through the auth boundary', async () => {
+    authenticateRequest.mockResolvedValueOnce(clinic('admin') as any);
+    const res = await fetch(`${baseUrl}/api/claims/upload-extract`, { method: 'POST' });
+    expect(res.status).not.toBe(401);
+    expect(res.status).not.toBe(403);
+  });
+
+  it('rejects a clinic admin forced to change password with 403', async () => {
+    const forced = clinic('admin');
+    authenticateRequest.mockResolvedValueOnce({ ...forced, clinicUser: { ...forced.clinicUser, mustChangePassword: true } } as any);
+    const res = await fetch(`${baseUrl}/api/claims/upload-extract`, { method: 'POST' });
+    expect(res.status).toBe(403);
+  });
+
   for (const [label, user] of [
-    ['clinic admin', clinic('admin')],
     ['clinic staff', clinic('staff')],
     ['non-admin owner-style session', { ...base, role: 'user' }],
   ] as const) {
@@ -136,7 +150,7 @@ describe('POST /api/claims/upload-extract auth boundary', () => {
       form.append('file', new Blob(['%PDF-1.4'], { type: 'application/pdf' }), 'x.pdf');
       const res = await fetch(`${baseUrl}/api/claims/upload-extract`, { method: 'POST', body: form });
       expect(res.status).toBe(403);
-      expect(await res.json()).toEqual({ error: expect.stringMatching(/Super Admin/) });
+      expect(await res.json()).toEqual({ error: 'Claims access is restricted to administrators (10004)' });
     });
   }
 });
