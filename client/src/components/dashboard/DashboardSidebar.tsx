@@ -107,8 +107,8 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
  * on SidebarNav, threaded down from DashboardShell. */
 const ADMIN_ONLY_GROUP_LABELS = new Set(['Management']);
 
-/** Items gated to the Super Admin only (P4-P23) — see canAccessClaims. */
-const SUPER_ADMIN_ONLY_SECTIONS = new Set<NavSection>(['claims']);
+/** Items gated to Claims-access roles (P4-P25: Owner/Super Admin, Clinic Admin) — see canAccessClaims. */
+const CLAIMS_ACCESS_SECTIONS = new Set<NavSection>(['claims']);
 
 /** Group keys whose children include the given section. */
 function parentKeysContaining(activeSection: NavSection): string[] {
@@ -139,16 +139,16 @@ export function SidebarNav({
    * (Staff Management) from normal staff. Mirrors the server's
    * adminOrOwnerProcedure gate; see client/src/lib/authGate.ts. */
   canManageStaff?: boolean;
-  /** P4-P23: Super Admin only — hides the Claims item for everyone else.
+  /** P4-P25: Owner/Super Admin and Clinic Admin only — hides the Claims item from Staff.
    * Defaults to false so a caller that forgets the prop fails closed.
-   * Mirrors superAdminProcedure; see canAccessClaims in authGate.ts. */
+   * Mirrors claimsAccessProcedure; see canAccessClaims in authGate.ts. */
   canAccessClaims?: boolean;
 }) {
   const visibleNavGroups = NAV_GROUPS.filter(
     (group) => canManageStaff || !ADMIN_ONLY_GROUP_LABELS.has(group.label)
   ).map((group) => ({
     ...group,
-    items: group.items.filter((item) => canAccessClaims || !SUPER_ADMIN_ONLY_SECTIONS.has(item.key as NavSection)),
+    items: group.items.filter((item) => canAccessClaims || !CLAIMS_ACCESS_SECTIONS.has(item.key as NavSection)),
   }));
 
   // Which parent groups (e.g. "Patients") are expanded. Initialized open for

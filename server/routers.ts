@@ -4,8 +4,9 @@ import { TRPCError } from "@trpc/server";
 import { COOKIE_NAME, MIN_CLINIC_PASSWORD_LENGTH } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { adminOrOwnerProcedure, normalProtectedProcedure, protectedProcedure, publicProcedure, router, superAdminProcedure } from "./_core/trpc";
+import { adminOrOwnerProcedure, normalProtectedProcedure, protectedProcedure, publicProcedure, router, claimsAccessProcedure } from "./_core/trpc";
 import { isSuperAdmin } from "./_core/superAdmin";
+import { canAccessClaims } from "./_core/claimsAccess";
 import { redactAuditRows, redactPatient, redactVisitRecord, VISIT_FINANCIAL_FIELDS } from "./claimsRedaction";
 import { sessionWorkflowFieldsInput } from "@shared/sessionWorkflowFields";
 import { CLAIMS_ACCESS_DENIED_ERR_MSG } from "@shared/const";
@@ -125,13 +126,13 @@ function toSafeStaff(user: ClinicUser) {
 }
 
 // P4-P23: the per-session financial totals are Claims financial data —
-// writable by the Super Admin only. Rejected (not silently dropped) so a
-// caller can't believe a value was saved.
+// writable by Claims-access roles only (Owner/Super Admin, Clinic Admin).
+// Rejected (not silently dropped) so a caller can't believe a value was saved.
 function assertMayWriteVisitFinancials(
-  user: Parameters<typeof isSuperAdmin>[0],
+  user: Parameters<typeof canAccessClaims>[0],
   input: Partial<Record<(typeof VISIT_FINANCIAL_FIELDS)[number], unknown>>
 ) {
-  if (isSuperAdmin(user)) return;
+  if (canAccessClaims(user)) return;
   if (VISIT_FINANCIAL_FIELDS.some(field => input[field] !== undefined)) {
     throw new TRPCError({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
   }
@@ -139,9 +140,9 @@ function assertMayWriteVisitFinancials(
 
 // ─── Routers ──────────────────────────────────────────────────────────────────
 
-/** P4-P24: the pre-CMS1500-first save paths. Super Admin gated like every
+/** P4-P24: the pre-CMS1500-first save paths. Claims-access gated like every
  *  claims.* procedure; always refuses, without reading its input. */
-const retiredClaimsImportProcedure = superAdminProcedure
+const retiredClaimsImportProcedure = claimsAccessProcedure
   .input(z.unknown())
   .mutation(() => {
     throw new TRPCError({
@@ -173,6 +174,9 @@ export const appRouter = router({
           mustChangePassword: staff.mustChangePassword,
           // Always false for a clinic session — see server/_core/superAdmin.ts.
           isSuperAdmin: false as boolean,
+          // P4-P25: true for a Clinic Admin, false for Staff — same
+          // canAccessClaims() every server-side Claims gate uses.
+          canAccessClaims: canAccessClaims(user),
         };
       }
 
@@ -182,10 +186,11 @@ export const appRouter = router({
         name: user.name,
         email: user.email,
         role: user.role,
-        // P4-P23 client capability for Claims access. Computed by the same
-        // isSuperAdmin() every server-side Claims gate uses, so the UI can
-        // never show Claims to a session the server would refuse.
         isSuperAdmin: isSuperAdmin(user),
+        // P4-P25 Claims capability. Computed by the same canAccessClaims()
+        // every server-side Claims gate uses, so the UI can never show
+        // Claims to a session the server would refuse.
+        canAccessClaims: canAccessClaims(user),
       };
     }),
     logout: publicProcedure.mutation(({ ctx }) => {
@@ -532,10 +537,10 @@ export const appRouter = router({
 
   // ── Patients ────────────────────────────────────────────────────────────────
   patients: router({
-    // claimsStatus is claim data — omitted for everyone but the Super Admin.
+    // claimsStatus is claim data — omitted for sessions without Claims access (P4-P25).
     list: normalProtectedProcedure.query(async ({ ctx }) => {
-      const superAdmin = isSuperAdmin(ctx.user);
-      return (await getAllPatients()).map(p => redactPatient(p, superAdmin));
+      const claimsAllowed = canAccessClaims(ctx.user);
+      return (await getAllPatients()).map(p => redactPatient(p, claimsAllowed));
     }),
 
     get: normalProtectedProcedure
@@ -543,7 +548,7 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         const patient = await getPatientById(input.id);
         if (!patient) throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
-        return redactPatient(patient, isSuperAdmin(ctx.user));
+        return redactPatient(patient, canAccessClaims(ctx.user));
       }),
 
     create: normalProtectedProcedure
@@ -592,8 +597,8 @@ export const appRouter = router({
       .mutation(async ({ input, ctx }) => {
         const { id, authDate, authValidUntil, claimsStatus, ...rest } = input;
 
-        // P4-P23: claims_status is claim data — only the Super Admin may set it.
-        if (claimsStatus !== undefined && !isSuperAdmin(ctx.user)) {
+        // P4-P25: claims_status is claim data — only Claims-access roles may set it.
+        if (claimsStatus !== undefined && !canAccessClaims(ctx.user)) {
           throw new TRPCError({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
         }
 
@@ -645,7 +650,7 @@ export const appRouter = router({
     history: normalProtectedProcedure
       .input(z.object({ id: z.string().uuid() }))
       .query(async ({ ctx, input }) => {
-        return redactAuditRows(await listHistoryForEntity("patient", input.id), isSuperAdmin(ctx.user));
+        return redactAuditRows(await listHistoryForEntity("patient", input.id), canAccessClaims(ctx.user));
       }),
   }),
 
@@ -758,19 +763,21 @@ export const appRouter = router({
       .input(z.object({ id: z.string().uuid() }))
       .query(async ({ ctx, input }) => {
         // Strips the retained claims COUNT from permanent-delete rows for
-        // non-Super-Admins (see claimsRedaction.ts).
-        return redactAuditRows(await listHistoryForEntity("insurer_catalog", input.id), isSuperAdmin(ctx.user));
+        // callers without Claims access (see claimsRedaction.ts). Every
+        // caller this gate admits has Claims access today (P4-P25); kept as
+        // defense in depth.
+        return redactAuditRows(await listHistoryForEntity("insurer_catalog", input.id), canAccessClaims(ctx.user));
       }),
   }),
 
   // ── Visit Records ────────────────────────────────────────────────────────────
   visits: router({
-    // Per-session financial totals are Super Admin only (P4-P23).
+    // Per-session financial totals require Claims access (P4-P25).
     listByPatient: normalProtectedProcedure
       .input(z.object({ patientId: z.string().uuid() }))
       .query(async ({ ctx, input }) => {
-        const superAdmin = isSuperAdmin(ctx.user);
-        return (await getVisitsByPatientId(input.patientId)).map(v => redactVisitRecord(v, superAdmin));
+        const claimsAllowed = canAccessClaims(ctx.user);
+        return (await getVisitsByPatientId(input.patientId)).map(v => redactVisitRecord(v, claimsAllowed));
       }),
 
     create: normalProtectedProcedure
@@ -914,21 +921,21 @@ export const appRouter = router({
     historyForPatient: normalProtectedProcedure
       .input(z.object({ patientId: z.string().uuid() }))
       .query(async ({ ctx, input }) => {
-        return redactAuditRows(await listHistoryForEntity("visit_record", input.patientId), isSuperAdmin(ctx.user));
+        return redactAuditRows(await listHistoryForEntity("visit_record", input.patientId), canAccessClaims(ctx.user));
       }),
   }),
 
   // P4-P23: the whole Claims surface — rows, financial totals, history,
   // follow-up/status aggregates, CMS1500/EOB enrichment and bulk import —
-  // is Super Admin only (superAdminProcedure, server/_core/trpc.ts).
+  // requires Claims access (claimsAccessProcedure, server/_core/trpc.ts).
   claims: router({
-    getByPatientAndPeriod: superAdminProcedure
+    getByPatientAndPeriod: claimsAccessProcedure
       .input(z.object({ patientId: z.string().uuid(), authPeriod: z.number() }))
       .query(async ({ input }) => {
         return await getClaimsByPatientAndPeriod(input.patientId, input.authPeriod);
       }),
 
-    create: superAdminProcedure
+    create: claimsAccessProcedure
       .input(z.object({
         patientId: z.string().uuid(),
         authPeriod: z.number(),
@@ -987,7 +994,7 @@ export const appRouter = router({
         return { success: true, claimId };
       }),
 
-    update: superAdminProcedure
+    update: claimsAccessProcedure
       .input(z.object({
         id: z.string().uuid(),
         placeOfService: z.string().nullable().optional(),
@@ -1052,7 +1059,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    delete: superAdminProcedure
+    delete: claimsAccessProcedure
       .input(z.object({ id: z.string().uuid(), patientId: z.string().uuid() }))
       .mutation(async ({ input, ctx }) => {
         const actor = getActorContext(ctx.user);
@@ -1077,12 +1084,12 @@ export const appRouter = router({
       }),
 
     // P4-P24: superseded by importPreview / importCommit below. Kept as
-    // explicit refusals (still Super Admin gated) rather than removed, so a
+    // explicit refusals (still Claims-access gated) rather than removed, so a
     // browser still running the previous bundle during a deploy gets a clear
     // message instead of creating EOB-first rows or enriching untracked rows.
     upsert: retiredClaimsImportProcedure,
 
-    historyForClaim: superAdminProcedure
+    historyForClaim: claimsAccessProcedure
       .input(z.object({ id: z.string().uuid() }))
       .query(async ({ input }) => {
         return listHistoryForEntity("claim_record", input.id);
@@ -1093,7 +1100,7 @@ export const appRouter = router({
      * extracted line of every patient group in one uploaded file (see
      * server/claimImport.ts and shared/claimImport.ts for the rules).
      */
-    importPreview: superAdminProcedure
+    importPreview: claimsAccessProcedure
       .input(importPreviewInput)
       .mutation(async ({ input }) => {
         try {
@@ -1110,7 +1117,7 @@ export const appRouter = router({
      * unchanged / skipped / review_required / failed, so one bad line never
      * hides the others. Actor identity comes from the verified session only.
      */
-    importCommit: superAdminProcedure
+    importCommit: claimsAccessProcedure
       .input(importCommitInput)
       .mutation(async ({ input, ctx }) => {
         try {
@@ -1125,7 +1132,7 @@ export const appRouter = router({
     cms1500EnrichmentCommit: retiredClaimsImportProcedure,
     bulkImportFromEOB: retiredClaimsImportProcedure,
 
-    markResolved: superAdminProcedure
+    markResolved: claimsAccessProcedure
       .input(z.object({ id: z.string().uuid() }))
       .mutation(async ({ input }) => {
         const { supabase } = await import('./supabase');
@@ -1138,7 +1145,7 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    getFollowUpClaims: superAdminProcedure
+    getFollowUpClaims: claimsAccessProcedure
       .input(z.object({ insurance: z.string().optional() }).optional())
       .query(async ({ input }) => {
         // Fetch every unresolved claim in a status that can ever need follow-up,
@@ -1203,7 +1210,7 @@ export const appRouter = router({
         return sortByFollowUpUrgency(classified);
       }),
 
-    getStatusCounts: superAdminProcedure
+    getStatusCounts: claimsAccessProcedure
       .input(z.object({ insurance: z.string().optional() }).optional())
       .query(async ({ input }) => {
         // Powers the "Claims Status" sidebar panel. Always counts claims_records
@@ -1249,9 +1256,10 @@ export const appRouter = router({
         pageSize: z.number().int().min(1).max(200).default(50),
       }))
       .query(async ({ ctx, input }) => {
-        // P4-P23: clinic admins keep the Activity Log, minus Claims.
-        const superAdmin = isSuperAdmin(ctx.user);
-        if (!superAdmin && input.entityType === "claim_record") {
+        // P4-P25: every caller this gate admits has Claims access today;
+        // the Claims filter/redaction stays as defense in depth.
+        const claimsAllowed = canAccessClaims(ctx.user);
+        if (!claimsAllowed && input.entityType === "claim_record") {
           throw new TRPCError({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
         }
         const result = await listActivityLog({
@@ -1262,9 +1270,9 @@ export const appRouter = router({
           dateTo: parseDate(input.dateTo),
           page: input.page,
           pageSize: input.pageSize,
-          excludeClaims: !superAdmin,
+          excludeClaims: !claimsAllowed,
         });
-        return { ...result, rows: redactAuditRows(result.rows, superAdmin) };
+        return { ...result, rows: redactAuditRows(result.rows, claimsAllowed) };
       }),
   }),
 });

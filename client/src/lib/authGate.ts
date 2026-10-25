@@ -1,9 +1,11 @@
+import { hasClaimsAccess } from "@shared/claimsAccess";
+
 /** Structural shape of trpc.auth.me's response — duck-typed here so this
  * stays independently testable without importing server code into the
  * client bundle. See server/routers.ts auth.me for the authoritative shape. */
 export type AuthMeUser =
-  | { authType: "owner"; role: "user" | "admin"; isSuperAdmin?: boolean }
-  | { authType: "clinic"; role: "admin" | "staff"; mustChangePassword: boolean; isSuperAdmin?: boolean };
+  | { authType: "owner"; role: "user" | "admin"; isSuperAdmin?: boolean; canAccessClaims?: boolean }
+  | { authType: "clinic"; role: "admin" | "staff"; mustChangePassword: boolean; isSuperAdmin?: boolean; canAccessClaims?: boolean };
 
 /**
  * True only for a clinic staff session with must_change_password=true.
@@ -26,15 +28,22 @@ export function canManageStaff(user: AuthMeUser | null | undefined): boolean {
 }
 
 /**
- * P4-P23: Claims (tab, routes, View Claims links, claim queries, uploads)
- * are Super Admin only. Reads the server-computed `isSuperAdmin` flag from
- * auth.me — the client never re-derives the mapping (see
- * server/_core/superAdmin.ts) — and treats a missing/unknown user (still
- * loading, logged out) as NO access, so nothing claim-related is rendered
- * or fetched before identity is confirmed.
+ * P4-P25: Claims (tab, routes, View Claims links, claim queries, uploads,
+ * exports, templates) are for the Owner/Super Admin and Clinic Admins only —
+ * never Staff. Applies the same shared predicate the server gates use
+ * (shared/claimsAccess.ts) AND requires the server-computed
+ * `canAccessClaims` flag from auth.me, so if the two ever disagree the UI
+ * fails closed. A missing/unknown user (still loading, logged out) is NO
+ * access, so nothing claim-related is rendered or fetched before identity
+ * is confirmed.
  */
 export function canAccessClaims(user: AuthMeUser | null | undefined): boolean {
-  return !!user && user.isSuperAdmin === true;
+  if (!user || user.canAccessClaims !== true) return false;
+  return hasClaimsAccess(
+    user.authType === "clinic"
+      ? { kind: "clinic", role: user.role, mustChangePassword: user.mustChangePassword }
+      : { kind: "owner", role: user.role }
+  );
 }
 
 /** Stable identity key for cache scoping: changes whenever the signed-in

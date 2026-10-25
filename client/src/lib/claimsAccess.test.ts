@@ -15,22 +15,29 @@ import {
 } from "./claimsCache";
 import { mergeSavedSessionField, normalizeRemarksDraft } from "./sessionFieldSave";
 
-const owner = { authType: "owner" as const, id: "o1", role: "admin" as const, isSuperAdmin: true };
-const clinicAdmin = { authType: "clinic" as const, id: "u2", clinicUserId: "c2", role: "admin" as const, mustChangePassword: false, isSuperAdmin: false };
-const clinicStaff = { authType: "clinic" as const, id: "u3", clinicUserId: "c3", role: "staff" as const, mustChangePassword: false, isSuperAdmin: false };
+const owner = { authType: "owner" as const, id: "o1", role: "admin" as const, isSuperAdmin: true, canAccessClaims: true };
+const clinicAdmin = { authType: "clinic" as const, id: "u2", clinicUserId: "c2", role: "admin" as const, mustChangePassword: false, isSuperAdmin: false, canAccessClaims: true };
+const clinicStaff = { authType: "clinic" as const, id: "u3", clinicUserId: "c3", role: "staff" as const, mustChangePassword: false, isSuperAdmin: false, canAccessClaims: false };
 
 describe("canAccessClaims", () => {
-  it("is true only when the server says isSuperAdmin", () => {
+  it("is true for the Owner/Super Admin and Clinic Admins, false for Staff (P4-P25)", () => {
     expect(canAccessClaims(owner)).toBe(true);
-    expect(canAccessClaims(clinicAdmin)).toBe(false);
+    expect(canAccessClaims(clinicAdmin)).toBe(true);
     expect(canAccessClaims(clinicStaff)).toBe(false);
   });
 
-  it("fails closed while identity is unknown or the flag is missing", () => {
+  it("fails closed while identity is unknown or the server flag is missing", () => {
     expect(canAccessClaims(null)).toBe(false);
     expect(canAccessClaims(undefined)).toBe(false);
     // An admin role alone (e.g. an older server response without the flag) is not enough.
     expect(canAccessClaims({ authType: "owner", role: "admin" })).toBe(false);
+    expect(canAccessClaims({ authType: "clinic", role: "admin", mustChangePassword: false })).toBe(false);
+  });
+
+  it("fails closed when the server flag and the shared role predicate disagree", () => {
+    expect(canAccessClaims({ ...clinicStaff, canAccessClaims: true })).toBe(false);
+    expect(canAccessClaims({ ...clinicAdmin, mustChangePassword: true })).toBe(false);
+    expect(canAccessClaims({ authType: "owner", role: "user", canAccessClaims: true })).toBe(false);
   });
 });
 
@@ -38,7 +45,7 @@ describe("authIdentityKey / identityTransition", () => {
   it("distinguishes accounts and capability changes", () => {
     const keys = [owner, clinicAdmin, clinicStaff].map(authIdentityKey);
     expect(new Set(keys).size).toBe(3);
-    expect(authIdentityKey({ ...owner, isSuperAdmin: false })).not.toBe(authIdentityKey(owner));
+    expect(authIdentityKey({ ...owner, canAccessClaims: false })).not.toBe(authIdentityKey(owner));
     expect(authIdentityKey(null)).toBeNull();
   });
 

@@ -3,7 +3,7 @@
  *
  * Exercises the REAL application persistence path end to end:
  *
- *   appRouter.createCaller (claims.importPreview / importCommit, Super Admin
+ *   appRouter.createCaller (claims.importPreview / importCommit, Claims-access
  *   gate) → server/claimImport.ts → server/db.ts → @supabase/supabase-js →
  *   local PostgREST (public.ecr.aws/supabase/postgrest:v14.5, the image the
  *   Supabase CLI runs) → commit_cms1500_line_with_audit /
@@ -671,19 +671,21 @@ describeDb("CMS1500-first import through the real app + PostgREST + Postgres", (
       }
     });
 
-    it("Admin and Staff are denied on every import procedure, with no writes", async () => {
+    it("Staff are denied on every import procedure, with no writes; Clinic Admin passes the gate (P4-P25)", async () => {
       const before = await counts(DB);
       const cms = cmsDoc("OTHERPERSON, SAM", [{ dateOfService: "2026-03-14", cptCodes: "97110" }]);
       const input = {
         kind: "cms1500" as const, document: { sha256: cms.sha256, fileName: "x.pdf", pageCount: 1 },
         groups: [{ groupKey: cms.groupKey, patientName: cms.patientName, allLineKeys: [cms.lines[0].sourceLineKey], lines: [{ ...cmsLineInput(cms.lines[0]), decision: { action: "create" as const } }] }],
       };
-      for (const user of [clinic("admin"), clinic("staff")]) {
-        await expect(caller(user).claims.importCommit(input)).rejects.toMatchObject({ code: "FORBIDDEN" });
-        await expect(caller(user).claims.importPreview({ ...input, groups: [{ ...input.groups[0], lines: [cmsLineInput(cms.lines[0])] }] })).rejects.toMatchObject({ code: "FORBIDDEN" });
-        await expect(caller(user).claims.upsert({})).rejects.toMatchObject({ code: "FORBIDDEN" });
-        await expect(caller(user).claims.bulkImportFromEOB({})).rejects.toMatchObject({ code: "FORBIDDEN" });
-      }
+      const previewInput = { ...input, groups: [{ ...input.groups[0], lines: [cmsLineInput(cms.lines[0])] }] };
+      const staff = clinic("staff");
+      await expect(caller(staff).claims.importCommit(input)).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(caller(staff).claims.importPreview(previewInput)).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(caller(staff).claims.upsert({})).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(caller(staff).claims.bulkImportFromEOB({})).rejects.toMatchObject({ code: "FORBIDDEN" });
+      // Preview never writes, so a successful Clinic Admin preview leaves counts unchanged too.
+      await expect(caller(clinic("admin")).claims.importPreview(previewInput)).resolves.toBeDefined();
       expect(await counts(DB)).toEqual(before);
     });
 

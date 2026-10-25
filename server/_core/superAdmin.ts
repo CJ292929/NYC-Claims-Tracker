@@ -1,9 +1,10 @@
 /**
  * server/_core/superAdmin.ts — P4-P23
  *
- * The ONE authoritative definition of "Super Admin" — the only identity
- * allowed to see or touch Claims data (claim rows, claim financial totals,
- * claim history, exports, CMS1500/EOB extraction and imports).
+ * The ONE authoritative definition of "Super Admin" (reported as
+ * auth.me.isSuperAdmin). P4-P25: Claims access is no longer Super Admin
+ * only — Clinic Admins have it too — and is decided by
+ * server/_core/claimsAccess.ts / shared/claimsAccess.ts, not here.
  *
  * Mapping: there is no separate Super Admin role column in this codebase.
  * The existing verified owner identity IS the Super Admin:
@@ -15,11 +16,6 @@
  * can change account roles". It deliberately does NOT include clinic admins
  * (clinic_users.role = "admin"), and never looks at a username, email, or
  * display name.
- *
- * Every Claims gate — superAdminProcedure (tRPC), requireSuperAdmin
- * (raw Express routes), and the response-redaction helpers in
- * server/claimsRedaction.ts — calls this function, so there is exactly one
- * place to change if a real Super Admin role is introduced later.
  */
 import type { AuthenticatedUser } from "./sdk";
 

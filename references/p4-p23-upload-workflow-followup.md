@@ -21,6 +21,11 @@
 >   reads disagree on are left blank and flagged rather than picked.
 >
 > The rest of this note is kept as the original design record.
+>
+> **P4-P25:** Claims (including these uploads) are now open to Clinic Admins as
+> well as the Owner/Super Admin, and still closed to Staff. The gates below were
+> renamed to `claimsAccessProcedure` / `requireClaimsAccess`; the role rule
+> lives in `shared/claimsAccess.ts`.
 
 P4-P23 restricted Claims to the Super Admin and replaced the session-table
 financial columns. It deliberately **did not** change how uploads persist.

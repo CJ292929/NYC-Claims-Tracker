@@ -44,7 +44,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   authenticateRequest.mockResolvedValue({
     id: 1, openId: 'sample-user', email: 'sample@example.com', name: 'Sample User',
-    // P4-P23: claim extraction is Super Admin only — the owner OAuth admin.
+    // P4-P25: claim extraction requires Claims access — the owner OAuth admin qualifies.
     loginMethod: 'manus', role: 'admin', createdAt: new Date(), updatedAt: new Date(),
     lastSignedIn: new Date(),
   } as any);

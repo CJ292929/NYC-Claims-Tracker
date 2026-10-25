@@ -1,11 +1,11 @@
 /**
- * server/claimsRedaction.ts — P4-P23
+ * server/claimsRedaction.ts — P4-P23, P4-P25
  *
- * Claims data is Super Admin only (see server/_core/superAdmin.ts). The
- * claims.* router is gated wholesale, but a few SHARED responses that Admin
- * and Staff legitimately need (patients, visit/session rows, record history,
- * the Activity Log) also carry claim or claim-financial fields. These pure
- * helpers strip those fields for every non-Super-Admin caller so a direct
+ * Claims data requires Claims access (see shared/claimsAccess.ts). The
+ * claims.* router is gated wholesale, but a few SHARED responses that Staff
+ * legitimately need (patients, visit/session rows, record history, the
+ * Activity Log) also carry claim or claim-financial fields. These pure
+ * helpers strip those fields for every caller without Claims access so a direct
  * API call can't read them either. Stored data is never modified — this is
  * response shaping only.
  */
@@ -28,14 +28,14 @@ const RESTRICTED_AUDIT_KEYS = new Set([
 export type RedactedVisitRecord = Omit<VisitRecord, VisitFinancialField> & Partial<Pick<VisitRecord, VisitFinancialField>>;
 export type RedactedPatient = Omit<Patient, "claimsStatus"> & Partial<Pick<Patient, "claimsStatus">>;
 
-export function redactVisitRecord(visit: VisitRecord, superAdmin: boolean): RedactedVisitRecord {
-  if (superAdmin) return visit;
+export function redactVisitRecord(visit: VisitRecord, claimsAllowed: boolean): RedactedVisitRecord {
+  if (claimsAllowed) return visit;
   const { totalInsuranceReimbursement: _r, totalPatientDue: _d, totalPatientPaid: _p, ...rest } = visit;
   return rest;
 }
 
-export function redactPatient(patient: Patient, superAdmin: boolean): RedactedPatient {
-  if (superAdmin) return patient;
+export function redactPatient(patient: Patient, claimsAllowed: boolean): RedactedPatient {
+  if (claimsAllowed) return patient;
   const { claimsStatus: _c, ...rest } = patient;
   return rest;
 }
@@ -64,11 +64,11 @@ function stripRestrictedKeys(data: Record<string, unknown> | null): Record<strin
 }
 
 /** Drops claim audit rows entirely and strips claim/financial keys from the
- *  rest. A row whose ONLY change was a restricted field (e.g. a Super Admin
+ *  rest. A row whose ONLY change was a restricted field (e.g. an admin
  *  editing a session's financial total) is dropped rather than shown as an
  *  empty, unexplained edit. */
-export function redactAuditRows(rows: AuditLogRow[], superAdmin: boolean): AuditLogRow[] {
-  if (superAdmin) return rows;
+export function redactAuditRows(rows: AuditLogRow[], claimsAllowed: boolean): AuditLogRow[] {
+  if (claimsAllowed) return rows;
   const out: AuditLogRow[] = [];
   for (const row of rows) {
     if (isClaimAuditRow(row)) continue;

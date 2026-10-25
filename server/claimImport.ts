@@ -2,9 +2,9 @@
  * server/claimImport.ts — P4-P24
  *
  * Preview and commit for CMS1500 and EOB / Insurance Reimbursement imports,
- * shared by the single-patient upload buttons and the two Super Admin bulk
+ * shared by the single-patient upload buttons and the two Claims-access bulk
  * uploads (claims.importPreview / claims.importCommit in routers.ts — both
- * superAdminProcedure).
+ * claimsAccessProcedure).
  *
  * Preview never writes. Commit re-derives the patient decision and the
  * authorization period server-side, then writes each line through one

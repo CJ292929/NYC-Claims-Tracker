@@ -7,7 +7,7 @@
  *     Upload" buttons on a patient's authorization period (contextPatient +
  *     contextAuthPeriod set; only that patient can be written);
  *   - bulk: "Bulk CMS1500 Upload" / "Bulk Insurance Reimbursement Upload"
- *     (Super Admin only), many files, many patients per file.
+ *     (Claims-access roles only), many files, many patients per file.
  *
  * Every file is extracted (at most 2 at a time), previewed, reviewed, and
  * saved on its own: one failed file never clears another's preview, and a
