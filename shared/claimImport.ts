@@ -120,6 +120,13 @@ export interface ImportDocument<L extends ImportLine = ImportLine> {
   extractionMethod: string;
   groups: ImportGroup<L>[];
   warnings: string[];
+  /**
+   * P4-P27: set when the file was read by a fallback method (AI instead of a
+   * known template, whole-PDF vision instead of page images, the legacy
+   * extractor) — the reviewer is told to check every value. Display only;
+   * never sent back to the server.
+   */
+  extractionFallback?: string | null;
 }
 
 // ─── Authorization period ────────────────────────────────────────────────────

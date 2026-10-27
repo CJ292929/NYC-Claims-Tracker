@@ -12,6 +12,9 @@
  *     templates (source="csv"). Same review and save rules; the CSV text is
  *     re-parsed by the server on every preview and save
  *     (server/claimCsvImport.ts), one review group per claim in the file.
+ *   - P4-P27: Bulk Upload → CMS1500 → "Upload CMS1500 PDFs" and Insurance
+ *     Reimbursement → "Upload EOB PDFs" open this dialog in bulk document
+ *     mode with the picked PDFs (the primary path; CSV is the alternative).
  *
  * Every file is extracted (at most 2 at a time), previewed, reviewed, and
  * saved on its own: one failed file never clears another's preview, and a
@@ -34,15 +37,18 @@ import {
   buildCsvCommitInputs,
   buildCsvPreviewInput,
   buildPreviewInput,
+  fileIdentity,
   initialDecision,
   isLineDone,
   runWithConcurrency,
+  summarizeFiles,
   summarizeResults,
   type Cms1500Decision,
   type CommitResult,
   type CsvRowError,
   type EobDecision,
   type FileReviewState,
+  type FileStage,
   type LineDecision,
   type LineEdits,
   type PreviewGroup,
@@ -57,7 +63,7 @@ import { downloadClaimCsvTemplate } from "./ClaimCsvTemplatePanel";
 
 type Kind = "cms1500" | "eob";
 
-type Stage = "queued" | "extracting" | "checking" | "review" | "failed";
+type Stage = FileStage;
 
 interface FileEntry {
   id: string;
@@ -150,6 +156,9 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
   const sessionRef = useRef(0);
   const previewGuards = useRef(new Map<string, RequestGuard>());
   const saveGuards = useRef(new Map<string, SingleFlightGuard>());
+  // P4-P27: one extraction per file at a time; a superseded response is dropped.
+  const extractGuards = useRef(new Map<string, RequestGuard>());
+  const extracting = useRef(new Set<string>());
   const saveAllGuard = useRef(createSingleFlightGuard());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -165,7 +174,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
   const title = csv
     ? `${CLAIM_CSV_TEMPLATES[kind].title} CSV Upload`
     : mode === "bulk"
-      ? kind === "cms1500" ? "Bulk CMS1500 Upload" : "Bulk Insurance Reimbursement Upload"
+      ? kind === "cms1500" ? "Upload CMS1500 PDFs" : "Upload EOB PDFs"
       : kind === "cms1500" ? "CMS1500 Upload" : "Insurance Reimbursement Upload";
 
   const update = (id: string, fn: (e: FileEntry) => FileEntry) => {
@@ -179,6 +188,8 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
     sessionRef.current += 1;
     previewGuards.current.clear();
     saveGuards.current.clear();
+    extractGuards.current.clear();
+    extracting.current.clear();
     const fresh = (initialFiles ?? []).map(f => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, file: f, stage: "queued" as Stage }));
     entriesRef.current = fresh;
     setEntries(fresh);
@@ -188,7 +199,15 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
 
   const addFiles = (files: FileList | null) => {
     if (!files || files.length === 0) return;
-    const list = Array.from(files);
+    const seen = new Set(entriesRef.current.map(e => fileIdentity(e.file)));
+    const list = mode === "single" ? Array.from(files) : Array.from(files).filter(f => {
+      const k = fileIdentity(f);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    if (list.length < files.length) toast(`${files.length - list.length} file(s) were already added and were skipped.`);
+    if (list.length === 0) return;
     const added = (mode === "single" ? list.slice(0, 1) : list).map(f => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, file: f, stage: "queued" as Stage }));
     const next = mode === "single" ? added : [...entriesRef.current, ...added];
     entriesRef.current = next;
@@ -204,11 +223,26 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
   async function processOne(id: string, session: number) {
     const entry = entriesRef.current.find(e => e.id === id);
     if (!entry || !isLive(id, session)) return;
-    update(id, e => ({ ...e, stage: "extracting", error: undefined, rowErrors: undefined }));
-    if (csv) return processCsv(id, session, entry.file);
+    // A double-clicked Retry must not start a second extraction of the same file.
+    if (extracting.current.has(id)) return;
+    extracting.current.add(id);
+    const guard = extractGuards.current.get(id) ?? createRequestGuard();
+    extractGuards.current.set(id, guard);
+    const attempt = guard.start();
+    const live = () => isLive(id, session) && guard.isCurrent(attempt);
+    try {
+      await extractOne(id, session, entry.file, live);
+    } finally {
+      extracting.current.delete(id);
+    }
+  }
+
+  async function extractOne(id: string, session: number, file: File, live: () => boolean) {
+    update(id, e => ({ ...e, stage: "extracting", error: undefined, rowErrors: undefined, review: undefined, preview: undefined }));
+    if (csv) return processCsv(id, session, file, live);
     try {
       const form = new FormData();
-      form.append("file", entry.file);
+      form.append("file", file);
       form.append("uploadType", uploadType);
       const res = await fetch("/api/claims/upload-extract", { method: "POST", credentials: "include", body: form });
       const raw = await res.text();
@@ -222,22 +256,22 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
       const doc = json.importDocument as ImportDocument | undefined;
       if (!doc) throw new Error("The server did not return reviewable lines for this file.");
       if (doc.groups.every(g => g.lines.length === 0)) throw new Error(json.extractionNotes || "No service lines were found in this file.");
-      if (!isLive(id, session)) return;
+      if (!live()) return;
       const review: FileReviewState = { doc, patientChoice: {}, patientConfirmed: {}, decisions: {}, edits: {}, results: {} };
       update(id, e => ({ ...e, stage: "checking", review }));
       await runPreview(id, session, review, true);
     } catch (err: any) {
-      if (isLive(id, session)) update(id, e => ({ ...e, stage: "failed", error: err?.message ?? "Failed to read this file." }));
+      if (live()) update(id, e => ({ ...e, stage: "failed", error: err?.message ?? "Failed to read this file." }));
     }
   }
 
   /** P4-P26: the first CSV preview is also the parse — the server reads the file. */
-  async function processCsv(id: string, session: number, file: File) {
+  async function processCsv(id: string, session: number, file: File, live: () => boolean) {
     try {
       if (file.size > CLAIM_CSV_MAX_BYTES) throw new Error(`The file is larger than ${CLAIM_CSV_MAX_BYTES / 1_000_000} MB. Split it into smaller files.`);
       const csvText = await file.text();
       const result = await csvPreview.mutateAsync({ kind, fileName: file.name, csvText, patientChoices: {} });
-      if (!isLive(id, session)) return;
+      if (!live()) return;
       if (result.templateError) throw new Error(result.templateError);
       if (!result.document || !result.preview || result.document.groups.length === 0) {
         update(id, e => ({ ...e, csvText, rowErrors: result.rowErrors, stage: "failed", error: "No claim in this file can be imported until the problems below are fixed." }));
@@ -247,7 +281,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
       update(id, e => ({ ...e, csvText, rowErrors: result.rowErrors, stage: "checking", review }));
       applyPreview(id, result.preview as PreviewResult);
     } catch (err: any) {
-      if (isLive(id, session)) update(id, e => ({ ...e, stage: "failed", error: err?.message ?? "Failed to read this file." }));
+      if (live()) update(id, e => ({ ...e, stage: "failed", error: err?.message ?? "Failed to read this file." }));
     }
   }
 
@@ -397,6 +431,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
 
   const busy = entries.some(e => e.stage === "extracting" || e.stage === "checking" || e.saving);
   const anySaving = entries.some(e => e.saving);
+  const fileSummary = summarizeFiles(entries);
 
   return (
     <Dialog open={open} onOpenChange={o => { if (!o && anySaving) return; onOpenChange(o); }}>
@@ -425,10 +460,16 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
             data-testid="claim-import-file-input"
           />
           <Button variant="outline" size="sm" disabled={anySaving || (mode === "single" && busy)} onClick={() => fileInputRef.current?.click()}>
-            <FileUp className="w-4 h-4 mr-1" /> {mode === "bulk" ? "Add files" : entries.length > 0 ? "Choose a different file" : "Choose file"}
+            <FileUp className="w-4 h-4 mr-1" /> {mode === "bulk" ? (csv ? "Add files" : "Add more PDFs") : entries.length > 0 ? "Choose a different file" : "Choose file"}
           </Button>
           {mode === "bulk" && entries.length > 0 && (
-            <span className="text-xs text-muted-foreground">{entries.length} file{entries.length !== 1 ? "s" : ""} · up to {MAX_PARALLEL_EXTRACTIONS} read at a time</span>
+            <span className="text-xs text-muted-foreground" data-testid="claim-import-progress" aria-live="polite">
+              {fileSummary.read} of {fileSummary.total} file{fileSummary.total !== 1 ? "s" : ""} read
+              {fileSummary.reading > 0 ? ` (up to ${MAX_PARALLEL_EXTRACTIONS} at a time)` : ""}
+              {fileSummary.needsReview > 0 ? ` · ${fileSummary.needsReview} to review` : ""}
+              {fileSummary.saved > 0 ? ` · ${fileSummary.saved} saved` : ""}
+              {fileSummary.failed > 0 ? ` · ${fileSummary.failed} failed` : ""}
+            </span>
           )}
           {csv && (
             <Button variant="ghost" size="sm" className="sm:ml-auto" onClick={() => downloadClaimCsvTemplate(kind)}>
@@ -441,7 +482,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
           <p className="text-sm text-muted-foreground py-6 text-center">
             {csv
               ? `Add one or more files made from ${CLAIM_CSV_TEMPLATES[kind].fileName}. Each claim in a file is reviewed on its own.`
-              : mode === "bulk" ? "Add one or more files. Each file can contain several pages and several patients." : "Choose a file to start."}
+              : mode === "bulk" ? "Add one or more PDFs. Each PDF can have several pages and several patients; scanned PDFs are read with OCR." : "Choose a file to start."}
           </p>
         )}
 
@@ -550,6 +591,12 @@ function FileCard(props: {
             ))}
           </ul>
         </div>
+      )}
+
+      {review?.doc.extractionFallback && (
+        <p className="mx-3 mt-2 flex gap-1 rounded-md border border-amber-400 bg-amber-100 p-2 text-xs font-medium text-amber-950" role="alert" data-testid="claim-import-fallback">
+          <AlertTriangle className="w-4 h-4 shrink-0" /> {review.doc.extractionFallback}
+        </p>
       )}
 
       {review && review.doc.warnings.length > 0 && (
