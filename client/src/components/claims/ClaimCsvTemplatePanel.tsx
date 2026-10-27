@@ -43,7 +43,7 @@ export function ClaimCsvTemplatePanel({ kind, onFile }: { kind: ClaimCsvKind; on
   return (
     <div className="space-y-3" data-testid={`claim-csv-panel-${kind}`}>
       <p className="text-xs text-muted-foreground">{t.notes[0]}</p>
-      <div className="flex flex-col gap-2 sm:flex-row">
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
         <input
           ref={inputRef}
           id={inputId}
@@ -56,10 +56,10 @@ export function ClaimCsvTemplatePanel({ kind, onFile }: { kind: ClaimCsvKind; on
             if (file) onFile(file);
           }}
         />
-        <Button className="flex-1 bg-brand-blue hover:bg-brand-blue-dark text-white" onClick={() => inputRef.current?.click()}>
+        <Button className="h-auto min-h-9 min-w-0 shrink flex-1 basis-56 whitespace-normal py-2 bg-brand-blue hover:bg-brand-blue-dark text-white" onClick={() => inputRef.current?.click()}>
           <Upload className="w-4 h-4 mr-1.5" /> Upload {t.title} CSV
         </Button>
-        <Button variant="outline" className="flex-1" onClick={() => downloadClaimCsvTemplate(kind)}>
+        <Button variant="outline" className="h-auto min-h-9 min-w-0 shrink flex-1 basis-56 whitespace-normal py-2" onClick={() => downloadClaimCsvTemplate(kind)}>
           <Download className="w-4 h-4 mr-1.5" /> Download CSV Template
         </Button>
       </div>

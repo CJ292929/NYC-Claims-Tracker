@@ -1460,7 +1460,7 @@ export default function Dashboard() {
         if (!open) setCsvImportResult(null);
       }}
     >
-      <DialogContent className={`bg-white max-h-[90vh] overflow-y-auto ${canAccessClaims ? 'w-[calc(100vw-1rem)] sm:max-w-xl' : 'sm:max-w-md'}`}>
+      <DialogContent className={`bg-white max-h-[90vh] overflow-y-auto overflow-x-hidden ${canAccessClaims ? 'w-[calc(100vw-1rem)] sm:max-w-xl' : 'sm:max-w-md'}`}>
         <DialogHeader>
           <DialogTitle className="text-brand-blue">{canAccessClaims ? 'Bulk Upload' : 'Bulk Upload Patient Data'}</DialogTitle>
           <DialogDescription>
