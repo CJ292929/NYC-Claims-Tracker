@@ -282,3 +282,39 @@ export async function runWithConcurrency<T, R>(items: T[], limit: number, worker
   await Promise.all(lanes);
   return results;
 }
+
+// ─── P4-P27: PDF-first bulk uploads ─────────────────────────────────────────
+
+export type FileStage = "queued" | "extracting" | "checking" | "review" | "failed";
+
+/**
+ * Per-dialog progress across files: how many were read, are waiting, failed,
+ * and — once reviewed — whether every line is saved or some still need review.
+ * A file counts as "saved" only when it has lines and every one is done.
+ */
+export function summarizeFiles(entries: Array<{ stage: FileStage; review?: Pick<FileReviewState, "doc" | "results"> }>) {
+  let reading = 0, failed = 0, saved = 0, needsReview = 0;
+  for (const e of entries) {
+    if (e.stage === "queued" || e.stage === "extracting" || e.stage === "checking") reading++;
+    else if (e.stage === "failed") failed++;
+    else if (e.review) {
+      const s = summarizeResults(e.review);
+      if (s.total > 0 && s.pending === 0) saved++;
+      else needsReview++;
+    }
+  }
+  return { total: entries.length, read: entries.length - reading, reading, failed, saved, needsReview };
+}
+
+/** Identity used to skip the same file being added twice to one dialog. */
+export function fileIdentity(f: { name: string; size: number; lastModified: number }): string {
+  return `${f.name}\u0000${f.size}\u0000${f.lastModified}`;
+}
+
+/** Splits a picked set into PDFs and everything else (by type or extension). */
+export function splitPdfFiles<F extends { name: string; type: string }>(files: F[]): { pdfs: F[]; rejected: F[] } {
+  const pdfs: F[] = [];
+  const rejected: F[] = [];
+  for (const f of files) (f.type === "application/pdf" || /\.pdf$/i.test(f.name) ? pdfs : rejected).push(f);
+  return { pdfs, rejected };
+}

@@ -44,7 +44,7 @@ import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
 import { ClaimImportDialog } from '@/components/claims/ClaimImportDialog';
-import { ClaimCsvTemplatePanel } from '@/components/claims/ClaimCsvTemplatePanel';
+import { ClaimBulkUploadPanel } from '@/components/claims/ClaimBulkUploadPanel';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { detectCsvTemplateFromText, wrongTemplateMessage } from '@shared/claimCsvTemplates';
 import { sumKnownMoney } from '@shared/claimImport';
@@ -1465,7 +1465,7 @@ export default function Dashboard() {
           <DialogTitle className="text-brand-blue">{canAccessClaims ? 'Bulk Upload' : 'Bulk Upload Patient Data'}</DialogTitle>
           <DialogDescription>
             {canAccessClaims
-              ? 'Choose what the CSV file contains. Each option has its own template.'
+              ? 'Patient Data imports the patient CSV. CMS1500 and Insurance Reimbursement read your PDFs directly; a CSV template is optional.'
               : 'Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions'}
           </DialogDescription>
         </DialogHeader>
@@ -1480,9 +1480,13 @@ export default function Dashboard() {
             <TabsContent value="patients" className="mt-4">{patientCsvUploadBody}</TabsContent>
             {(['cms1500', 'eob'] as const).map(kind => (
               <TabsContent key={kind} value={kind} className="mt-4">
-                <ClaimCsvTemplatePanel
+                <ClaimBulkUploadPanel
                   kind={kind}
-                  onFile={file => {
+                  onPdfs={files => {
+                    setShowUploadDialog(false);
+                    setClaimImport({ kind, mode: 'bulk', source: 'document', patient: null, authPeriod: null, files });
+                  }}
+                  onCsv={file => {
                     setShowUploadDialog(false);
                     setClaimImport({ kind, mode: 'bulk', source: 'csv', patient: null, authPeriod: null, files: [file] });
                   }}

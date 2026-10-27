@@ -4795,9 +4795,29 @@ function buildImportDocument(params) {
     pageCount: params.pageCount,
     extractionMethod: params.extractionMethod,
     groups: params.groups,
-    warnings: params.warnings ?? []
+    warnings: params.warnings ?? [],
+    extractionFallback: params.extractionFallback ?? null
   };
 }
+async function getPdfPagesWithoutText(buffer) {
+  try {
+    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+    const missing = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const content = await (await pdf.getPage(i)).getTextContent();
+      const text = content.items.map((item) => "str" in item ? item.str : "").join("");
+      if (text.replace(/\s+/g, "").length < 20) missing.push(i);
+    }
+    return missing;
+  } catch {
+    return null;
+  }
+}
+function isMixedTextAndScanned(textless, pageCount) {
+  return !!textless && !!pageCount && textless.length > 0 && textless.length < pageCount;
+}
+var LEGACY_TEXT_LIMIT = 2e4;
 function extractXlsxText(buffer) {
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const allRows = [];
@@ -4818,7 +4838,7 @@ function extractCsvText(buffer) {
   return JSON.stringify(result.data, null, 2);
 }
 async function mapToClaimColumns(extractedText) {
-  const trimmedText = extractedText.slice(0, 2e4);
+  const trimmedText = extractedText.slice(0, LEGACY_TEXT_LIMIT);
   const prompt = `You are a medical billing assistant. You will be given text extracted from a PDF, CSV, or Excel file that contains insurance claim information.
 
 ${COLUMN_DESCRIPTIONS}
@@ -4945,6 +4965,7 @@ function registerClaimUploadRoute(app2) {
           const isPdf = !isXlsx && !isCsv;
           const pageCount = isPdf ? await getPdfPageCount(buffer) : null;
           let cms1500Text = extractedText;
+          let cms1500TextFallback = false;
           if (isPdf) {
             try {
               cms1500Text = extractPdfTextLayout(buffer);
@@ -4954,10 +4975,13 @@ function registerClaimUploadRoute(app2) {
                 cms1500Text = await extractPdfTextLayoutJS(buffer);
               } catch (jsLayoutError) {
                 console.error("[ClaimUpload] JS layout extraction also failed for CMS1500, falling back to flat text:", jsLayoutError);
+                cms1500TextFallback = true;
               }
             }
           }
-          if (hasTextLayer(cms1500Text || extractedText)) {
+          const textlessPages = isPdf ? await getPdfPagesWithoutText(buffer) : null;
+          const mixedPages = isMixedTextAndScanned(textlessPages, pageCount);
+          if (!mixedPages && hasTextLayer(cms1500Text || extractedText)) {
             console.log("[ClaimUpload] Stage 4/7 \u2014 Regex template parsing (CMS1500)...");
             const patientGroups = parseCMS1500(cms1500Text);
             const flatClaims = patientGroups.flatMap((g) => g.claims);
@@ -4986,7 +5010,15 @@ function registerClaimUploadRoute(app2) {
                 extractedLength: extractedText.length,
                 templateUsed: "CMS1500",
                 uploadType: "cms1500",
-                importDocument: buildImportDocument({ kind: "cms1500", sha256, fileName: originalname, pageCount, extractionMethod: "CMS1500 template (text layer)", groups })
+                importDocument: buildImportDocument({
+                  kind: "cms1500",
+                  sha256,
+                  fileName: originalname,
+                  pageCount,
+                  extractionMethod: "CMS1500 template (text layer)",
+                  groups,
+                  extractionFallback: cms1500TextFallback ? "The form layout could not be read, so plain page text was used (fallback). Columns can shift \u2014 check dates, CPT codes, modifiers and units against the form." : null
+                })
               });
               return;
             }
@@ -5000,7 +5032,7 @@ function registerClaimUploadRoute(app2) {
             return;
           }
           if (pageCount > MAX_SCANNED_PAGES) {
-            res.status(422).json({ error: `This scan has ${pageCount} pages. Split it into files of at most ${MAX_SCANNED_PAGES} pages and upload them together with Bulk CMS1500 Upload.` });
+            res.status(422).json({ error: `This scan has ${pageCount} pages. Split it into files of at most ${MAX_SCANNED_PAGES} pages and upload them together under Bulk Upload \u2192 CMS1500 \u2192 Upload CMS1500 PDFs.` });
             return;
           }
           try {
@@ -5012,6 +5044,10 @@ function registerClaimUploadRoute(app2) {
             if (lineCount === 0) {
               res.status(422).json({ error: "No CMS1500 service lines could be read from this file." });
               return;
+            }
+            const warnings = [...assembled.warnings];
+            if (mixedPages) {
+              warnings.unshift(`Page(s) ${textlessPages.join(", ")} of ${pageCount} are scanned images inside a text PDF, so every page was read with document OCR instead of the text template.`);
             }
             res.json({
               claims: [],
@@ -5026,7 +5062,8 @@ function registerClaimUploadRoute(app2) {
                 pageCount,
                 extractionMethod: `CMS1500 page vision, ${method === "rendered_pages" ? "each page read twice" : "whole-PDF fallback"} (${pages.length}/${pageCount} pages read)`,
                 groups: assembled.groups,
-                warnings: assembled.warnings
+                warnings,
+                extractionFallback: method === "whole_pdf" ? "The pages could not be rendered as images, so the whole PDF was sent to the document reader at once (fallback). Check every line against the form before saving." : null
               })
             });
           } catch (visionError) {
@@ -5036,7 +5073,10 @@ function registerClaimUploadRoute(app2) {
           return;
         }
         const eobPageCount = !isXlsx && !isCsv ? await getPdfPageCount(buffer) : null;
-        const eobDocument = (groups, extractionMethod) => buildImportDocument({ kind: "eob", sha256, fileName: originalname, pageCount: eobPageCount, extractionMethod, groups: eobGroupsFromClaims(groups) });
+        const eobTextless = !isXlsx && !isCsv ? await getPdfPagesWithoutText(buffer) : null;
+        const eobMixed = isMixedTextAndScanned(eobTextless, eobPageCount);
+        const eobMixedWarning = eobMixed ? [`Page(s) ${eobTextless.join(", ")} of ${eobPageCount} are scanned images inside a text PDF, so the whole file was read with AI document vision instead of a text template.`] : [];
+        const eobDocument = (groups, extractionMethod, extra = {}) => buildImportDocument({ kind: "eob", sha256, fileName: originalname, pageCount: eobPageCount, extractionMethod, groups: eobGroupsFromClaims(groups), ...extra });
         let reimbursementText = extractedText;
         if (!isXlsx && !isCsv) {
           try {
@@ -5054,7 +5094,7 @@ function registerClaimUploadRoute(app2) {
         console.log("[ClaimUpload] Stage 4/7 \u2014 Template detection (reimbursement)...");
         let templateResult;
         try {
-          templateResult = tryTemplateExtraction(reimbursementText, originalname);
+          templateResult = eobMixed ? null : tryTemplateExtraction(reimbursementText, originalname);
         } catch (err) {
           if (err instanceof PatientBoundaryError) {
             console.error("[ClaimUpload] Patient boundary extraction failure:", err.message);
@@ -5111,7 +5151,11 @@ function registerClaimUploadRoute(app2) {
           return;
         }
         try {
-          const reimbursementSource = reimbursementText.trim() ? { kind: "text", text: reimbursementText } : { kind: "pdf", buffer, filename: originalname };
+          const reimbursementSource = reimbursementText.trim() && !eobMixed ? { kind: "text", text: reimbursementText } : { kind: "pdf", buffer, filename: originalname };
+          const aiExtra = {
+            warnings: eobMixedWarning,
+            extractionFallback: reimbursementSource.kind === "pdf" ? "No text layer could be used, so the whole PDF was read by AI document vision (fallback) instead of a known EOB template. Check every amount, and that every page's lines appear below, before saving." : "No known EOB template matched this file, so its lines were read by AI (fallback). Check every amount before saving."
+          };
           console.log(`[ClaimUpload] Stage 5/7 \u2014 AI text parsing (no template matched, using AI via ${reimbursementSource.kind}${reimbursementSource.kind === "pdf" ? " \u2014 Stage 5b/7 vision fallback" : ""})...`);
           const aiResult = await extractClaimsWithAI(reimbursementSource, "reimbursement");
           if (aiResult.claims.length > 0) {
@@ -5133,7 +5177,7 @@ function registerClaimUploadRoute(app2) {
               uploadType: "reimbursement",
               confidence: aiResult.confidence,
               extractionNotes: aiResult.extractionNotes,
-              importDocument: eobDocument(groupFlatClaimsByPatient(aiResult.claims), `AI (${aiResult.detectedInsurer || "Unknown"})`)
+              importDocument: eobDocument(groupFlatClaimsByPatient(aiResult.claims), `AI (${aiResult.detectedInsurer || "Unknown"})`, aiExtra)
             });
             return;
           }
@@ -5146,7 +5190,7 @@ function registerClaimUploadRoute(app2) {
             uploadType: "reimbursement",
             confidence: aiResult.confidence,
             extractionNotes: aiResult.extractionNotes ?? "No service line data was found for this patient in the document.",
-            importDocument: eobDocument([], `AI (${aiResult.detectedInsurer || "Unknown"})`)
+            importDocument: eobDocument([], `AI (${aiResult.detectedInsurer || "Unknown"})`, aiExtra)
           });
           return;
         } catch (aiError) {
@@ -5170,7 +5214,13 @@ function registerClaimUploadRoute(app2) {
           // The legacy extractor has no per-claim patient attribution, so its
           // lines form one group with no name: a reviewer must confirm the
           // patient explicitly before anything from it can be saved.
-          importDocument: eobDocument([{ patientName: null, claims }], "AI Extraction (Legacy)")
+          importDocument: eobDocument([{ patientName: null, claims }], "AI Extraction (Legacy)", {
+            warnings: [
+              ...eobMixed ? [`Page(s) ${eobTextless.join(", ")} of ${eobPageCount} are scanned images and were NOT read by this fallback. Upload the file again when the document reader is available, or enter those lines manually.`] : [],
+              ...extractedText.length > LEGACY_TEXT_LIMIT ? [`This file is long: only the first ${LEGACY_TEXT_LIMIT.toLocaleString("en-US")} of ${extractedText.length.toLocaleString("en-US")} characters were read by this fallback. Lines further into the file may be missing \u2014 split the file and upload the parts.`] : []
+            ],
+            extractionFallback: "The AI document reader failed, so a basic legacy extractor was used (fallback). It cannot tell patients apart \u2014 confirm the patient and check every line and amount before saving."
+          })
         });
       } catch (err) {
         console.error("[ClaimUpload] Error:", err);

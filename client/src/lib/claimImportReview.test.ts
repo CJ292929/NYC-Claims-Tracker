@@ -13,7 +13,10 @@ import {
   buildPreviewInput,
   decisionReady,
   initialDecision,
+  fileIdentity,
   runWithConcurrency,
+  splitPdfFiles,
+  summarizeFiles,
   summarizeResults,
   type FileReviewState,
 } from "./claimImportReview";
@@ -209,5 +212,45 @@ describe("P4-P26 CSV requests", () => {
     const state = withGroups(1, 1);
     state.decisions = {};
     expect(buildCsvCommitInputs({ source, state })).toEqual([]);
+  });
+});
+
+describe("P4-P27 PDF-first bulk uploads", () => {
+  it("summarizes files: read, reading, failed, fully saved, and still to review", () => {
+    const savedState = cmsState([cmsLine("a"), cmsLine("b")], { results: { a: { status: "saved" }, b: { status: "unchanged" } } as any });
+    const partState = cmsState([cmsLine("c"), cmsLine("d")], { results: { c: { status: "saved" }, d: { status: "failed" } } as any });
+    const s = summarizeFiles([
+      { stage: "queued" },
+      { stage: "extracting" },
+      { stage: "checking", review: cmsState([cmsLine("x")]) },
+      { stage: "failed" },
+      { stage: "review", review: savedState },
+      { stage: "review", review: partState },
+      { stage: "review", review: cmsState([cmsLine("e")]) },
+    ]);
+    expect(s).toEqual({ total: 7, read: 4, reading: 3, failed: 1, saved: 1, needsReview: 2 });
+  });
+
+  it("a failed file does not hide another file's saved outcome", () => {
+    const savedState = cmsState([cmsLine("a")], { results: { a: { status: "saved" } } as any });
+    expect(summarizeFiles([{ stage: "failed" }, { stage: "review", review: savedState }])).toMatchObject({ failed: 1, saved: 1, needsReview: 0 });
+  });
+
+  it("identifies the same file picked twice, not two different files with the same name", () => {
+    const a = { name: "cms.pdf", size: 10, lastModified: 1 };
+    expect(fileIdentity(a)).toBe(fileIdentity({ ...a }));
+    expect(fileIdentity(a)).not.toBe(fileIdentity({ ...a, size: 11 }));
+  });
+
+  it("keeps PDFs by type or extension and rejects everything else", () => {
+    const { pdfs, rejected } = splitPdfFiles([
+      { name: "a.pdf", type: "application/pdf" },
+      { name: "B.PDF", type: "" },
+      { name: "scan", type: "application/pdf" },
+      { name: "remit.csv", type: "text/csv" },
+      { name: "photo.jpg", type: "image/jpeg" },
+    ]);
+    expect(pdfs.map(f => f.name)).toEqual(["a.pdf", "B.PDF", "scan"]);
+    expect(rejected.map(f => f.name)).toEqual(["remit.csv", "photo.jpg"]);
   });
 });
