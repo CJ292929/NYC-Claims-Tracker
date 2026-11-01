@@ -23,6 +23,26 @@ import {
 
 const SHA = "a".repeat(64);
 
+describe("P4-P28: lines that wait for an explicit decision", () => {
+  const eob = (over: Record<string, unknown>) => ({ sourceLineKey: "g:1", kind: "eob", candidates: [], ...over }) as any;
+
+  it("a dismissed line starts with no decision, whatever its match says", () => {
+    for (const line of [eob({ status: "matched", targetClaimId: "c1", dismissed: true }), eob({ status: "cms1500_required", dismissed: true }), eob({ status: "already_saved", targetClaimId: "c1", dismissed: true })]) {
+      expect(initialDecision({ kind: "eob", line, mode: "bulk", contextAuthPeriod: null })).toBeNull();
+    }
+  });
+
+  it("the same lines without the flag keep their normal start", () => {
+    expect(initialDecision({ kind: "eob", line: eob({ status: "matched", targetClaimId: "c1" }), mode: "bulk", contextAuthPeriod: null })).toEqual({ action: "apply", claimRecordId: "c1" });
+    expect(initialDecision({ kind: "eob", line: eob({ status: "cms1500_required" }), mode: "bulk", contextAuthPeriod: null })).toEqual({ action: "hold" });
+  });
+
+  it("an export line in identity review starts with no decision, so a default save skips it", () => {
+    const line = { sourceLineKey: "g:1", kind: "cms1500", status: "identity_review", candidates: [], associableIds: [], period: { status: "resolved", authPeriod: 1, basis: "file" } } as any;
+    expect(initialDecision({ kind: "cms1500", line, mode: "bulk", contextAuthPeriod: null })).toBeNull();
+  });
+});
+
 function cmsLine(key: string, over: Partial<Cms1500ImportLine> = {}): Cms1500ImportLine {
   return {
     sourceLineKey: key, page: 1, slot: 1, dateOfService: "2026-03-02", placeOfService: "12", cptCodes: "97110", modifier: "GP",
@@ -62,7 +82,10 @@ describe("initialDecision", () => {
   it("applies an EOB line only to its single matched target; selection and replacement wait for the reviewer", () => {
     expect(initialDecision({ kind: "eob", mode: "bulk", contextAuthPeriod: null, line: { ...preview({ status: "matched", targetClaimId: "t1" }), kind: "eob" } }))
       .toEqual({ action: "apply", claimRecordId: "t1" });
-    for (const status of ["needs_selection", "needs_confirmation", "cms1500_required", "invalid"]) {
+    // P4-P28: a line with no CMS1500 yet is kept pending by Save.
+    expect(initialDecision({ kind: "eob", mode: "bulk", contextAuthPeriod: null, line: { ...preview({ status: "cms1500_required" }), kind: "eob" } }))
+      .toEqual({ action: "hold" });
+    for (const status of ["needs_selection", "needs_confirmation", "invalid"]) {
       expect(initialDecision({ kind: "eob", mode: "bulk", contextAuthPeriod: null, line: { ...preview({ status, targetClaimId: "t1" }), kind: "eob" } })).toBeNull();
     }
   });
@@ -185,14 +208,25 @@ describe("P4-P26 CSV requests", () => {
     expect(batch).toEqual({
       ...source,
       groups: [{
-        groupKey: "g0", patientId: "11111111-1111-4111-8111-111111111111", patientConfirmed: true,
+        groupKey: "g0", patientId: "11111111-1111-4111-8111-111111111111", patientConfirmed: true, createPatient: null,
         lines: [
           { sourceLineKey: "g0:csv.0", decision: { action: "create", authPeriod: 1, periodSource: "resolved" } },
           { sourceLineKey: "g0:csv.1", decision: { action: "create", authPeriod: 1, periodSource: "resolved" } },
         ],
       }],
     });
-    expect(buildCsvPreviewInput({ source, state })).toEqual({ ...source, patientChoices: { g0: "11111111-1111-4111-8111-111111111111" } });
+    expect(buildCsvPreviewInput({ source, state })).toEqual({ ...source, patientChoices: { g0: "11111111-1111-4111-8111-111111111111" }, patientCreates: {}, lineEdits: {} });
+  });
+
+  it("P4-P28: sends a new patient request and a reviewer's values for flagged fields, for preview and save alike", () => {
+    const state = withGroups(1, 1);
+    state.patientCreate = { g0: { name: "NEW, PERSON" } };
+    state.edits = { "g0:csv.0": { cptCodes: "97110" } };
+    expect(buildCsvCommitInputs({ source, state })[0].groups[0]).toMatchObject({
+      createPatient: { name: "NEW, PERSON" },
+      lines: [{ sourceLineKey: "g0:csv.0", edits: { cptCodes: "97110" } }],
+    });
+    expect(buildCsvPreviewInput({ source, state })).toMatchObject({ patientCreates: { g0: { name: "NEW, PERSON" } }, lineEdits: { "g0:csv.0": { cptCodes: "97110" } } });
   });
 
   it("splits large files into bounded requests without splitting a claim, and never resends done lines", () => {

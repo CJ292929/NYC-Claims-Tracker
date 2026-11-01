@@ -11,7 +11,7 @@ import { normalizeUsername, escapeLikePattern } from "./_core/username";
 import type { User, Patient, VisitRecord, ClinicUser, InsertVisitRecord, InsurerCatalogEntry } from "../drizzle/schema";
 import { determineActivePeriod, deriveAuthPeriodMetrics, getPeriodMetrics } from "@shared/authPeriodMetrics";
 import { deriveAuthorizationUrgency } from "@shared/authUrgency";
-import type { ExistingClaimLine } from "@shared/claimImport";
+import type { DismissedEobLine, ExistingClaimLine, SavedDocumentLine } from "@shared/claimImport";
 import type { ActorContext } from "./actorIdentity";
 
 // ─── Row adapters (Supabase snake_case → app camelCase) ───────────────────────
@@ -384,7 +384,12 @@ export async function listActivityLog(filters: {
   if (filters.excludeClaims) {
     // entity_type is NULL on legacy rows, and NULL <> 'claim_record' is NULL
     // (not true) in SQL — so NULL must be allowed explicitly.
-    query = query.or("entity_type.is.null,entity_type.neq.claim_record").not("action", "ilike", "CLAIM%");
+    // Same sets as isClaimAuditRow in server/claimsRedaction.ts.
+    query = query
+      .or("entity_type.is.null,entity_type.not.in.(claim_record,pending_eob_line)")
+      .not("action", "ilike", "CLAIM%")
+      .not("action", "ilike", "EOB_LINE%")
+      .not("action", "ilike", "PATIENT_EXTERNAL_ID%");
   }
 
   if (filters.actorId) query = query.eq("actor_id", filters.actorId);
@@ -1523,7 +1528,11 @@ export async function listPatientClaimLinesOnDates(patientId: string, dates: str
     console.error("[Supabase] listPatientClaimLinesOnDates:", error);
     throw error;
   }
-  return (data ?? []).map((r: any) => ({
+  return (data ?? []).map(toExistingClaimLine);
+}
+
+function toExistingClaimLine(r: any): ExistingClaimLine {
+  return {
     id: r.id,
     authPeriod: r.auth_period,
     dateOfService: r.date_of_service,
@@ -1540,7 +1549,20 @@ export async function listPatientClaimLinesOnDates(patientId: string, dates: str
     cms1500LineKey: r.cms1500_line_key ?? null,
     eobDocumentId: r.eob_document_id ?? null,
     eobLineKey: r.eob_line_key ?? null,
-  }));
+  };
+}
+
+/** Every claim row saved from one CMS1500 document, on any date and for any patient. */
+export async function listClaimLinesForDocument(documentId: string): Promise<SavedDocumentLine[]> {
+  const { data, error } = await supabase
+    .from("claims_records")
+    .select(`patient_id, ${EXISTING_LINE_COLUMNS}`)
+    .eq("cms1500_document_id", documentId);
+  if (error) {
+    console.error("[Supabase] listClaimLinesForDocument:", error);
+    throw error;
+  }
+  return (data ?? []).map((r: any) => ({ ...toExistingClaimLine(r), patientId: r.patient_id }));
 }
 
 /** The patient's visit rows reduced to (period, date) — input to resolveAuthPeriod. */
@@ -1574,7 +1596,7 @@ export async function findClaimImportDocumentId(kind: "cms1500" | "eob", sha256:
 export type ClaimImportRpcReason =
   | "not_found" | "patient_mismatch" | "needs_selection" | "cms1500_required" | "already_reconciled"
   | "source_line_already_saved" | "already_has_cms1500" | "incompatible" | "invalid_input" | "existing_financials"
-  | "period_required";
+  | "period_required" | "patient_changed" | "external_id_taken" | "pending_not_needed" | "line_dismissed";
 
 const IMPORT_RPC_REASONS: Record<string, ClaimImportRpcReason> = {
   P0010: "not_found",
@@ -1588,6 +1610,10 @@ const IMPORT_RPC_REASONS: Record<string, ClaimImportRpcReason> = {
   P0027: "invalid_input",
   P0028: "existing_financials",
   P0029: "period_required",
+  P0030: "patient_changed",
+  P0031: "external_id_taken",
+  P0032: "pending_not_needed",
+  P0033: "line_dismissed",
 };
 
 /** A rule the database refused the line on — a review item, not a crash. */
@@ -1672,6 +1698,257 @@ export async function applyEobLine(params: {
   });
   if (error) throwImportRpcError("applyEobLine", error as { code?: string; message?: string });
   return toWriteResult(data);
+}
+
+// ─── Import patient identity and pending EOB lines (P4-P28) ─────────────────
+
+export interface PatientExternalIdRow {
+  patientId: string;
+  sourceSystem: string;
+  externalId: string;
+  birthDate: string | null;
+}
+
+export async function listPatientExternalIds(): Promise<PatientExternalIdRow[]> {
+  const { data, error } = await supabase
+    .from("patient_external_ids")
+    .select("patient_id, source_system, external_id, birth_date");
+  if (error) {
+    console.error("[Supabase] listPatientExternalIds:", error);
+    throw error;
+  }
+  return (data ?? []).map((r: any) => ({ patientId: r.patient_id, sourceSystem: r.source_system, externalId: r.external_id, birthDate: r.birth_date ?? null }));
+}
+
+export async function linkPatientExternalId(params: {
+  patientId: string;
+  sourceSystem: string;
+  externalId: string;
+  birthDate: string | null;
+  actor: ActorContext;
+  importBatchId: string;
+}): Promise<void> {
+  const { error } = await supabase.rpc("link_patient_external_id_with_audit", {
+    p_patient_id: params.patientId,
+    p_source_system: params.sourceSystem,
+    p_external_id: params.externalId,
+    p_birth_date: params.birthDate,
+    p_actor_id: params.actor.actorId,
+    p_actor_type: params.actor.actorType,
+    p_actor_display: params.actor.actorDisplay,
+    p_import_batch_id: params.importBatchId,
+  });
+  if (error) throwImportRpcError("linkPatientExternalId", error as { code?: string; message?: string });
+}
+
+export type NewPatientImportResult =
+  | { status: "patient_exists"; patientId: string }
+  | { status: "created"; patientId: string; lines: Array<{ lineKey: string; status: string; claimId: string | null; authPeriod: number | null }> };
+
+/** One transaction: the patient, its mappings, its audit rows and every line. See the P4-P28 migration. */
+export async function commitImportWithNewPatient(params: {
+  kind: "cms1500" | "eob";
+  patientName: string;
+  sourceSystem: string | null;
+  externalId: string | null;
+  birthDate: string | null;
+  creationKey: string;
+  allowSameName: boolean;
+  source: ClaimImportSource;
+  siblingLineKeys: string[];
+  lines: Array<Record<string, unknown>>;
+  actor: ActorContext;
+  importBatchId: string;
+}): Promise<NewPatientImportResult> {
+  const { data, error } = await supabase.rpc("commit_import_with_new_patient", {
+    p_kind: params.kind,
+    p_patient_name: params.patientName,
+    p_source_system: params.sourceSystem,
+    p_external_id: params.externalId,
+    p_birth_date: params.birthDate,
+    p_creation_key: params.creationKey,
+    p_allow_same_name: params.allowSameName,
+    p_content_sha256: params.source.sha256,
+    p_file_name: params.source.fileName,
+    p_page_count: params.source.pageCount,
+    p_sibling_line_keys: params.siblingLineKeys,
+    p_lines: params.lines,
+    p_actor_id: params.actor.actorId,
+    p_actor_type: params.actor.actorType,
+    p_actor_display: params.actor.actorDisplay,
+    p_import_batch_id: params.importBatchId,
+  });
+  if (error) throwImportRpcError("commitImportWithNewPatient", error as { code?: string; message?: string });
+  const r = data as any;
+  if (r.status === "patient_exists") return { status: "patient_exists", patientId: r.patient_id };
+  return {
+    status: "created",
+    patientId: r.patient_id,
+    lines: (r.lines ?? []).map((l: any) => ({ lineKey: l.line_key, status: l.status, claimId: l.claim_id ?? null, authPeriod: l.auth_period ?? null })),
+  };
+}
+
+export async function holdEobLine(params: {
+  patientId: string;
+  source: ClaimImportSource;
+  lineKey: string;
+  match: Record<string, unknown>;
+  data: Record<string, unknown>;
+  target: Record<string, unknown> | null;
+  actor: ActorContext;
+  importBatchId: string;
+}): Promise<{ status: "created" | "updated" | "unchanged"; pendingId: string }> {
+  const { data, error } = await supabase.rpc("hold_eob_line_with_audit", {
+    p_patient_id: params.patientId,
+    p_content_sha256: params.source.sha256,
+    p_file_name: params.source.fileName,
+    p_page_count: params.source.pageCount,
+    p_line_key: params.lineKey,
+    p_match: params.match,
+    p_data: params.data,
+    p_target: params.target,
+    p_actor_id: params.actor.actorId,
+    p_actor_type: params.actor.actorType,
+    p_actor_display: params.actor.actorDisplay,
+    p_import_batch_id: params.importBatchId,
+  });
+  if (error) throwImportRpcError("holdEobLine", error as { code?: string; message?: string });
+  const r = data as any;
+  return { status: r.status, pendingId: r.pending_id };
+}
+
+/** Source line keys of this document that are waiting for a CMS1500. */
+export async function listHeldEobLineKeys(documentId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("pending_eob_lines")
+    .select("line_key")
+    .eq("document_id", documentId)
+    .eq("status", "pending");
+  if (error) {
+    console.error("[Supabase] listHeldEobLineKeys:", error);
+    throw error;
+  }
+  return (data ?? []).map((r: any) => r.line_key);
+}
+
+export interface PendingEobRow {
+  id: string;
+  patientId: string;
+  patientName: string;
+  documentId: string;
+  fileName: string | null;
+  lineKey: string;
+  dateOfService: string;
+  cptCodes: string;
+  modifier: string | null;
+  unitsBilled: number | null;
+  data: Record<string, unknown>;
+  target: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export const PENDING_EOB_LIST_LIMIT = 500;
+
+export async function listPendingEobLines(): Promise<PendingEobRow[]> {
+  const { data, error } = await supabase
+    .from("pending_eob_lines")
+    .select("id, patient_id, document_id, line_key, date_of_service, cpt_codes, modifier, units_billed, data, target, created_at, patients(name), claim_import_documents(file_name)")
+    .eq("status", "pending")
+    .order("created_at", { ascending: true })
+    .limit(PENDING_EOB_LIST_LIMIT);
+  if (error) {
+    console.error("[Supabase] listPendingEobLines:", error);
+    throw error;
+  }
+  return (data ?? []).map((r: any) => ({
+    id: r.id,
+    patientId: r.patient_id,
+    patientName: r.patients?.name ?? "",
+    documentId: r.document_id,
+    fileName: r.claim_import_documents?.file_name ?? null,
+    lineKey: r.line_key,
+    dateOfService: r.date_of_service,
+    cptCodes: r.cpt_codes,
+    modifier: r.modifier,
+    unitsBilled: r.units_billed,
+    data: r.data ?? {},
+    target: r.target ?? null,
+    createdAt: r.created_at,
+  }));
+}
+
+export async function applyPendingEobLine(params: {
+  pendingId: string;
+  targetClaimId: string;
+  confirmReplace: boolean;
+  actor: ActorContext;
+  importBatchId: string;
+}): Promise<ClaimImportWriteResult> {
+  const { data, error } = await supabase.rpc("apply_pending_eob_line_with_audit", {
+    p_pending_id: params.pendingId,
+    p_target_claim_id: params.targetClaimId,
+    p_confirm_replace: params.confirmReplace,
+    p_actor_id: params.actor.actorId,
+    p_actor_type: params.actor.actorType,
+    p_actor_display: params.actor.actorDisplay,
+    p_import_batch_id: params.importBatchId,
+  });
+  if (error) throwImportRpcError("applyPendingEobLine", error as { code?: string; message?: string });
+  return toWriteResult(data);
+}
+
+export async function dismissPendingEobLine(pendingId: string, actor: ActorContext): Promise<void> {
+  const { error } = await supabase.rpc("dismiss_pending_eob_line_with_audit", {
+    p_pending_id: pendingId,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
+  if (error) throwImportRpcError("dismissPendingEobLine", error as { code?: string; message?: string });
+}
+
+/** Lines a reviewer dismissed for this patient, on any date and from any document. */
+export async function listDismissedEobLines(patientId: string): Promise<DismissedEobLine[]> {
+  const { data, error } = await supabase
+    .from("pending_eob_lines")
+    .select("id, document_id, line_key, date_of_service, cpt_codes, modifier, units_billed, data")
+    .eq("patient_id", patientId)
+    .eq("status", "dismissed");
+  if (error) {
+    console.error("[Supabase] listDismissedEobLines:", error);
+    throw error;
+  }
+  return (data ?? []).map((r: any) => ({
+    id: r.id,
+    documentId: r.document_id,
+    lineKey: r.line_key,
+    dateOfService: r.date_of_service,
+    cptCodes: r.cpt_codes,
+    modifier: r.modifier,
+    unitsBilled: r.units_billed,
+    data: r.data ?? {},
+  }));
+}
+
+export async function reopenDismissedEobLine(pendingId: string, actor: ActorContext, importBatchId: string): Promise<void> {
+  const { error } = await supabase.rpc("reopen_dismissed_eob_line_with_audit", {
+    p_pending_id: pendingId,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_import_batch_id: importBatchId,
+  });
+  if (error) throwImportRpcError("reopenDismissedEobLine", error as { code?: string; message?: string });
+}
+
+/** Periods this patient has claim lines in. A patient created by an import can have lines and no visits yet. */
+export async function listPatientClaimPeriods(patientId: string): Promise<number[]> {
+  const { data, error } = await supabase.from("claims_records").select("auth_period").eq("patient_id", patientId);
+  if (error) {
+    console.error("[Supabase] listPatientClaimPeriods:", error);
+    throw error;
+  }
+  return Array.from(new Set((data ?? []).map((r: any) => r.auth_period as number))).sort((a, b) => a - b);
 }
 
 // ─── Insurer catalog (P4-P7) ────────────────────────────────────────────────

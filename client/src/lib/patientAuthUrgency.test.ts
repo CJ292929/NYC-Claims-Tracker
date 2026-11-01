@@ -150,8 +150,9 @@ describe('derivePatientAlertPresentation: multi-period authStatus lookup', () =>
 });
 
 describe('derivePatientAlertPresentation: no visits', () => {
-  it('empty visits => authStatus null, urgency derived from remaining alone', () => {
+  it('P4-P28: empty visits => no urgent alert, matching getAuthAlertSummaries, and says why', () => {
     const result = derivePatientAlertPresentation([], 0, null, NOW);
-    expect(result.urgency).toBe('exhausted');
+    expect(result.urgency).toBe('ok');
+    expect(result.label).toBe('No Authorization On File');
   });
 });

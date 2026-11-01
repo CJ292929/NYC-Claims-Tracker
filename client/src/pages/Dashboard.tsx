@@ -17,7 +17,6 @@ import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { insurerMatchValues } from '@shared/insuranceCatalog';
-import { parseCsvText, parseCsvRow, normalizePatientName, emptyCsvImportSummary, type CsvImportSummary } from '@/lib/csvImport';
 import { historicalInsurerNames, isStaleInsurerSelection, matchesPatientFilters } from '@/lib/patientFilters';
 import { routeToNavSection, navSectionToRoute } from '@/lib/navSection';
 import { canAccessClaims as canAccessClaimsAuthGate, canManageStaff as canManageStaffAuthGate } from '@/lib/authGate';
@@ -46,7 +45,6 @@ import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
 import { ClaimImportDialog } from '@/components/claims/ClaimImportDialog';
 import { ClaimBulkUploadPanel } from '@/components/claims/ClaimBulkUploadPanel';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { detectCsvTemplateFromText, wrongTemplateMessage } from '@shared/claimCsvTemplates';
 import { sumKnownMoney } from '@shared/claimImport';
 import { formatCalendarDate } from '@/lib/date';
 import type { AuthUrgency } from '@shared/authUrgency';
@@ -383,8 +381,6 @@ export default function Dashboard() {
   const [newPatientAuthDate, setNewPatientAuthDate] = useState('');
   const [newPatientAuthValidUntil, setNewPatientAuthValidUntil] = useState('');
   const [showUploadDialog, setShowUploadDialog] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [csvImportResult, setCsvImportResult] = useState<CsvImportSummary | null>(null);
   const [showLogSessionDialog, setShowLogSessionDialog] = useState(false);
   const [sessionDate, setSessionDate] = useState(new Date().toISOString().split('T')[0]);
   /** Delete confirmation dialog */
@@ -565,9 +561,16 @@ export default function Dashboard() {
   );
 
   // Pre-compute periods for claims queries
+  // P4-P28: a patient created by an import can have claim lines and no visits
+  // yet, so the Claims view also lists the periods those lines are in.
+  const { data: claimPeriods = [] } = trpc.claims.periodsForPatient.useQuery(
+    { patientId: activePatient?.id ?? '' },
+    { enabled: canAccessClaims && !!activePatient }
+  );
   const periods = useMemo(() => {
-    return Array.from(new Set(visits.map(v => v.authPeriod ?? 1))).sort((a, b) => b - a);
-  }, [visits]);
+    return Array.from(new Set([...visits.map(v => v.authPeriod ?? 1), ...claimPeriods])).sort((a, b) => b - a);
+  }, [visits, claimPeriods]);
+  const claimViewPeriods = periods;
 
   // Pre-fetch claims for up to 5 periods
   const claimsQuery1 = trpc.claims.getByPatientAndPeriod.useQuery(
@@ -819,7 +822,6 @@ export default function Dashboard() {
       utils.visits.completedPatientIds.invalidate();
       toast.success('Patients imported successfully!');
       setShowUploadDialog(false);
-      setUploadProgress(0);
     },
     onError: (e) => toast.error(`Import failed: ${e.message}`),
   });
@@ -888,7 +890,7 @@ export default function Dashboard() {
    *  change) rather than becoming a fake page. */
   const handleNavigate = (section: NavSection) => {
     if (section === 'bulk-upload') {
-      setShowUploadDialog(true);
+      if (canAccessClaims) setShowUploadDialog(true);
       return;
     }
     const route = navSectionToRoute(section);
@@ -1240,6 +1242,10 @@ export default function Dashboard() {
     utils.claims.getByPatientAndPeriod.invalidate();
     utils.claims.getFollowUpClaims.invalidate();
     utils.claims.getStatusCounts.invalidate();
+    // P4-P28: a save can add patients and pending reimbursement lines.
+    utils.claims.periodsForPatient.invalidate();
+    utils.claims.pendingEobList.invalidate();
+    utils.patients.list.invalidate();
   };
 
   const claimImportDialog = claimImport && canAccessClaims ? (
@@ -1276,228 +1282,49 @@ export default function Dashboard() {
     </DropdownMenu>
   ) : null;
 
-  // ── CSV Upload ─────────────────────────────────────────────────────────────
-
-  const handleBulkUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setCsvImportResult(null);
-
-    let text: string;
-    try {
-      text = await file.text();
-    } catch {
-      toast.error('Error reading file. Please check the format.');
-      return;
-    }
-
-    // P4-P26: a claims CSV template is never read as patient data.
-    const wrongTemplate = wrongTemplateMessage('patient', detectCsvTemplateFromText(text));
-    if (wrongTemplate) {
-      toast.error(canAccessClaims ? wrongTemplate : 'This file is a claims template, not the Patient Data template. Nothing was imported.');
-      event.target.value = '';
-      return;
-    }
-
-    const { data, errors: parseErrors } = parseCsvText(text);
-    if (data.length === 0) {
-      toast.error('No data found in file');
-      event.target.value = '';
-      return;
-    }
-
-    const summary: CsvImportSummary = emptyCsvImportSummary();
-    // Rows are parsed with `header: true`, so CSV row N (1 = header) is data[N-2].
-    for (const e of parseErrors) {
-      if (e.row !== undefined) summary.skipReasons.push(`Row ${e.row + 2}: ${e.message}`);
-    }
-
-    // Seeded from existing patients and updated as new ones are created, so
-    // repeated names within the SAME file are also treated as updates
-    // rather than creating multiple duplicate profiles.
-    const nameToId = new Map<string, string>();
-    for (const p of patients) nameToId.set(normalizePatientName(p.name), p.id);
-
-    for (let i = 0; i < data.length; i++) {
-      const rowNumber = i + 2;
-      const { row, skipReason } = parseCsvRow(data[i], rowNumber);
-      if (!row) {
-        summary.skippedCount++;
-        if (skipReason) summary.skipReasons.push(skipReason);
-        setUploadProgress(Math.round(((i + 1) / data.length) * 100));
-        continue;
-      }
-
-      try {
-        const key = normalizePatientName(row.name);
-        const existingId = nameToId.get(key);
-        let patientId: string;
-        if (existingId) {
-          await updatePatient.mutateAsync({
-            id: existingId,
-            name: row.name,
-            insurance: row.insurance,
-            authDate: row.authDate,
-          });
-          patientId = existingId;
-          summary.updatedCount++;
-        } else {
-          const created = await createPatient.mutateAsync({
-            name: row.name,
-            insurance: row.insurance,
-            authDate: row.authDate,
-          });
-          patientId = created.id;
-          nameToId.set(key, patientId);
-          summary.createdCount++;
-        }
-
-        await bulkCreateVisits.mutateAsync({
-          patientId,
-          records: [{
-            sessionsAuthorized: row.authorized,
-            sessionsRemaining: row.remaining,
-            sessionNumber: row.sessionNumber,
-            dateOfService: row.dateOfService,
-            newAuth: row.newAuth,
-            dateAshSubmitted: row.dateAshSubmitted,
-            authStatus: 'none',
-          }],
-        });
-      } catch (err) {
-        summary.skippedCount++;
-        const message = err instanceof Error ? err.message : 'Unknown error';
-        summary.skipReasons.push(`Row ${rowNumber}: ${message}`);
-      }
-      setUploadProgress(Math.round(((i + 1) / data.length) * 100));
-    }
-
-    setCsvImportResult(summary);
-    if (summary.createdCount > 0 || summary.updatedCount > 0) {
-      toast.success(`Created ${summary.createdCount}, updated ${summary.updatedCount} patient${summary.createdCount + summary.updatedCount === 1 ? '' : 's'}.`);
-    }
-    if (summary.skippedCount > 0) {
-      toast.error(`${summary.skippedCount} row${summary.skippedCount === 1 ? '' : 's'} skipped — see details below.`);
-    }
-    setUploadProgress(0);
-    event.target.value = '';
-    utils.patients.list.invalidate();
-  };
-
-  const handleDownloadTemplate = () => {
-    const headers = ['Patient Name', 'Insurance', 'Authorized Sessions', 'Authorization Date', 'Date of Service', 'Session Number', 'Sessions Remaining', 'New Authorization?', 'Date Authorization Submitted'];
-    const rows = [
-      ['John Doe', 'Aetna', '12', '2026-04-21', '2026-04-01', '1', '11', 'NO', ''],
-      ['Jane Smith', 'NYCE PPO Plan', '15', '2026-03-10', '2026-03-15', '1', '14', 'NO', ''],
-    ];
-    const csv = [headers.join(','), ...rows.map(r => r.map(c => `"${c}"`).join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'clinic_patient_template.csv';
-    document.body.appendChild(a); a.click();
-    document.body.removeChild(a); URL.revokeObjectURL(url);
-    toast.success('Template downloaded!');
-  };
-
   // ── Shared dialogs ─────────────────────────────────────────────────────────
   // Rendered on every route branch below (not just the branch that shows
   // their trigger button) so an action reachable from the sidebar — or from
   // a control on a different route branch, like the Active/Discharged
   // switch — always has somewhere to actually appear.
 
-  // Patient Data CSV upload — unchanged; shown alone for Staff, as the first tab otherwise.
-  const patientCsvUploadBody = (
-        <div className="space-y-4">
-          <div className="border-2 border-dashed border-brand-cream-dark rounded-lg p-6 text-center hover:border-brand-gold transition-colors">
-            <input type="file" accept=".csv" onChange={handleBulkUpload} className="hidden" id="file-upload" />
-            <label htmlFor="file-upload" className="cursor-pointer block">
-              <Upload className="w-8 h-8 text-brand-gold mx-auto mb-2" />
-              <p className="text-brand-blue font-semibold">Click to upload CSV</p>
-            </label>
-          </div>
-          {uploadProgress > 0 && uploadProgress < 100 && (
-            <div className="w-full bg-brand-cream-dark rounded-full h-2">
-              <div className="bg-brand-gold h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
-            </div>
-          )}
-          {csvImportResult && (
-            <div className="bg-brand-cream border border-brand-cream-dark rounded-lg p-3 text-xs space-y-2">
-              <p className="font-semibold text-brand-blue">
-                Import complete: {csvImportResult.createdCount} created, {csvImportResult.updatedCount} updated, {csvImportResult.skippedCount} skipped
-              </p>
-              {csvImportResult.skipReasons.length > 0 && (
-                <ul className="list-disc list-inside space-y-0.5 max-h-32 overflow-y-auto text-red-700">
-                  {csvImportResult.skipReasons.map((reason, idx) => (
-                    <li key={idx}>{reason}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
-            <div className="flex items-center justify-between mb-2">
-              <p className="font-semibold">CSV Format:</p>
-              <Button
-                size="sm"
-                onClick={handleDownloadTemplate}
-                className="h-auto gap-1.5 bg-brand-blue hover:bg-brand-blue-dark text-white text-xs font-semibold px-3 py-1.5"
-              >
-                <Download className="w-3.5 h-3.5" />
-                Download Template
-              </Button>
-            </div>
-            <p className="font-mono">Patient Name, Insurance, Authorized Sessions, …</p>
-          </div>
-        </div>
-  );
-
-  const bulkUploadDialog = (
-    <Dialog
-      open={showUploadDialog}
-      onOpenChange={(open) => {
-        setShowUploadDialog(open);
-        if (!open) setCsvImportResult(null);
-      }}
-    >
-      <DialogContent className={`bg-white max-h-[90vh] overflow-y-auto overflow-x-hidden ${canAccessClaims ? 'w-[calc(100vw-1rem)] sm:max-w-xl' : 'sm:max-w-md'}`}>
+  // P4-P26 / P4-P28: Bulk Upload is CMS1500 and Insurance Reimbursement only, for
+  // Clinic Admin / Owner. Staff have neither the dialog nor a way to open it, and
+  // the server gates every procedure behind it independently.
+  const bulkUploadDialog = canAccessClaims ? (
+    <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
+      <DialogContent className="w-[calc(100vw-1rem)] max-h-[90vh] overflow-y-auto overflow-x-hidden bg-white sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle className="text-brand-blue">{canAccessClaims ? 'Bulk Upload' : 'Bulk Upload Patient Data'}</DialogTitle>
+          <DialogTitle className="text-brand-blue">Bulk Upload</DialogTitle>
           <DialogDescription>
-            {canAccessClaims
-              ? 'Patient Data imports the patient CSV. CMS1500 and Insurance Reimbursement read your PDFs directly; a CSV template is optional.'
-              : 'Upload a CSV file. Required columns: Patient Name, Insurance, Authorized Sessions'}
+            Upload PDFs or import a CSV. You review every line and patient before anything is saved. Patients who are not on the dashboard yet are added when you save.
           </DialogDescription>
         </DialogHeader>
-        {canAccessClaims ? (
-          // P4-P26: Clinic Admin / Owner only — Staff never see the claims options.
-          <Tabs defaultValue="patients" className="w-full">
-            <TabsList className="grid h-auto w-full grid-cols-3">
-              <TabsTrigger value="patients" className="whitespace-normal text-xs sm:text-sm">Patient Data</TabsTrigger>
-              <TabsTrigger value="cms1500" className="whitespace-normal text-xs sm:text-sm" data-testid="bulk-upload-tab-cms1500">CMS1500</TabsTrigger>
-              <TabsTrigger value="eob" className="whitespace-normal text-xs sm:text-sm" data-testid="bulk-upload-tab-eob">Insurance Reimbursement</TabsTrigger>
-            </TabsList>
-            <TabsContent value="patients" className="mt-4">{patientCsvUploadBody}</TabsContent>
-            {(['cms1500', 'eob'] as const).map(kind => (
-              <TabsContent key={kind} value={kind} className="mt-4">
-                <ClaimBulkUploadPanel
-                  kind={kind}
-                  onPdfs={files => {
-                    setShowUploadDialog(false);
-                    setClaimImport({ kind, mode: 'bulk', source: 'document', patient: null, authPeriod: null, files });
-                  }}
-                  onCsv={file => {
-                    setShowUploadDialog(false);
-                    setClaimImport({ kind, mode: 'bulk', source: 'csv', patient: null, authPeriod: null, files: [file] });
-                  }}
-                />
-              </TabsContent>
-            ))}
-          </Tabs>
-        ) : patientCsvUploadBody}
+        <Tabs defaultValue="cms1500" className="w-full">
+          <TabsList className="grid h-auto w-full grid-cols-2">
+            <TabsTrigger value="cms1500" className="whitespace-normal text-xs sm:text-sm" data-testid="bulk-upload-tab-cms1500">CMS1500</TabsTrigger>
+            <TabsTrigger value="eob" className="whitespace-normal text-xs sm:text-sm" data-testid="bulk-upload-tab-eob">Insurance Reimbursement</TabsTrigger>
+          </TabsList>
+          {(['cms1500', 'eob'] as const).map(kind => (
+            <TabsContent key={kind} value={kind} className="mt-4">
+              <ClaimBulkUploadPanel
+                kind={kind}
+                onPdfs={files => {
+                  setShowUploadDialog(false);
+                  setClaimImport({ kind, mode: 'bulk', source: 'document', patient: null, authPeriod: null, files });
+                }}
+                onCsv={file => {
+                  setShowUploadDialog(false);
+                  setClaimImport({ kind, mode: 'bulk', source: 'csv', patient: null, authPeriod: null, files: [file] });
+                }}
+                onAppliedPending={invalidateClaims}
+              />
+            </TabsContent>
+          ))}
+        </Tabs>
       </DialogContent>
     </Dialog>
-  );
+  ) : null;
 
 
   const patientActionDialogs = (
@@ -1926,14 +1753,17 @@ export default function Dashboard() {
               <Loader2 className="w-6 h-6 animate-spin mr-2 text-brand-gold" />
               Loading visits…
             </div>
-          ) : visits.length === 0 ? (
+          ) : visits.length === 0 && (activeSection !== 'claims' || periods.length === 0) ? (
             <Card className="border-brand-cream-dark shadow-md">
               <CardContent className="py-12 text-center text-muted-foreground">No visit records yet. Log a session to get started.</CardContent>
             </Card>
           ) : (
             <>
               {(() => {
-                const periods = Array.from(new Set(visits.map(v => v.authPeriod ?? 1))).sort((a, b) => b - a); // newest first
+                // newest first; the visit cards list visit periods only, the Claims view any period with claim lines
+                const periods = activeSection === 'claims'
+                  ? claimViewPeriods
+                  : Array.from(new Set(visits.map(v => v.authPeriod ?? 1))).sort((a, b) => b - a);
                 // Active period = oldest with remaining sessions (from activeMetrics)
                 const activePeriod = activeMetrics.activePeriod;
                 return periods.map((period, periodIndex) => {
@@ -3746,7 +3576,7 @@ export default function Dashboard() {
           {/* Bulk Upload — dialog itself is rendered globally (bulkUploadDialog
               below) so it also opens from the sidebar action on every route;
               this button just opens it without navigating. */}
-          {bulkUploadTrigger}
+          {canAccessClaims && bulkUploadTrigger}
           {claimsBulkUploadActions}
           {addPatientAction}
         </>

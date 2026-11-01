@@ -21,10 +21,12 @@
  * done deterministically in assembleCms1500Pages(), which is unit-tested
  * against synthetic page fixtures.
  */
+import { createRequire } from "node:module";
+import path from "node:path";
 import { invokeLLM } from "./_core/llm";
 import { ENV } from "./_core/env";
 import { assignCms1500LineKeys, groupKeyFor } from "./claimImportKeys";
-import { formatModifiers, type Cms1500ImportLine, type ImportGroup } from "@shared/claimImport";
+import { CMS1500_BOX26_SOURCE_SYSTEM, formatModifiers, type Cms1500ImportLine, type ImportGroup, type ImportPatientIdentity } from "@shared/claimImport";
 import { fuzzyNameMatch } from "@shared/nameMatch";
 
 // ─── Page transcription shape (what the model returns) ──────────────────────
@@ -235,6 +237,22 @@ async function requestRenderedPage(bands: Buffer[], pageNumber: number, pageCoun
   return page ? { ...page, pageNumber } : null;
 }
 
+/**
+ * pdfjs's bundled font data, as a file path it can read. Without it, any page
+ * text using a non-embedded standard font (printed form labels, filled form
+ * values) renders blank: the image sent to the reader silently loses that text.
+ * Packaged for the deployed function by includeFiles in vercel.json.
+ */
+export function standardFontDataUrl(): string | undefined {
+  try {
+    const pkg = createRequire(import.meta.url).resolve("pdfjs-dist/package.json");
+    return `${path.join(path.dirname(pkg), "standard_fonts").replace(/\\/g, "/")}/`;
+  } catch {
+    console.warn("[CMS1500 Vision] pdfjs standard font data not found; printed text may be missing from rendered pages");
+    return undefined;
+  }
+}
+
 const RENDER_SCALE = 3; // ~216 dpi for a letter-size page
 /** Overlapping bands (fractions of page height) — header/Box 21, Box 21-24, Box 24-33. */
 const BANDS: Array<[number, number]> = [[0, 0.4], [0.33, 0.73], [0.6, 1]];
@@ -317,7 +335,7 @@ async function readRenderedPage(bands: Buffer[], pageNumber: number, pageCount: 
 export async function renderPdfPages(buffer: Buffer): Promise<Buffer[][] | null> {
   try {
     const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+    const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buffer), standardFontDataUrl: standardFontDataUrl() }).promise;
     const factory = (doc as unknown as { canvasFactory?: { create(w: number, h: number): { canvas: any; context: any } } }).canvasFactory;
     if (!factory) return null;
     const out: Buffer[][] = [];
@@ -351,18 +369,20 @@ export async function renderPdfPages(buffer: Buffer): Promise<Buffer[][] | null>
 export async function extractCms1500PagesWithVision(
   buffer: Buffer,
   filename: string,
-  pageCount: number
+  pageCount: number,
+  /** P4-P28: pages to read; the rest were already read from form fields. Default: every page. */
+  onlyPages: number[] = range(pageCount)
 ): Promise<{ pages: VisionPage[]; missingPages: number[]; method: "rendered_pages" | "whole_pdf" }> {
   const byPage = new Map<number, VisionPage>();
   const rendered = await renderPdfPages(buffer);
   if (rendered && rendered.length === pageCount) {
-    const results = await Promise.allSettled(rendered.map((bands, i) => readRenderedPage(bands, i + 1, pageCount)));
+    const results = await Promise.allSettled(onlyPages.map(n => readRenderedPage(rendered[n - 1], n, pageCount)));
     results.forEach((r, i) => {
-      if (r.status === "fulfilled" && r.value) byPage.set(i + 1, r.value);
-      else if (r.status === "rejected") console.warn(`[CMS1500 Vision] Page ${i + 1} failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
+      if (r.status === "fulfilled" && r.value) byPage.set(onlyPages[i], r.value);
+      else if (r.status === "rejected") console.warn(`[CMS1500 Vision] Page ${onlyPages[i]} failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
     });
     if (byPage.size === 0) throw new Error("No page of the scan could be read");
-    for (const n of range(pageCount).filter(p => !byPage.has(p))) {
+    for (const n of onlyPages.filter(p => !byPage.has(p))) {
       try {
         const page = await readRenderedPage(rendered[n - 1], n, pageCount);
         if (page) byPage.set(n, page);
@@ -370,23 +390,23 @@ export async function extractCms1500PagesWithVision(
         console.warn(`[CMS1500 Vision] Page ${n} retry failed:`, err instanceof Error ? err.message : err);
       }
     }
-    const missingPages = range(pageCount).filter(n => !byPage.has(n));
+    const missingPages = onlyPages.filter(n => !byPage.has(n));
     return { pages: Array.from(byPage.values()).sort((a, b) => a.pageNumber - b.pageNumber), missingPages, method: "rendered_pages" };
   }
 
   const accept = (pages: VisionPage[]) => {
     for (const p of pages) {
-      if (Number.isInteger(p.pageNumber) && p.pageNumber >= 1 && p.pageNumber <= pageCount && !byPage.has(p.pageNumber)) {
+      if (Number.isInteger(p.pageNumber) && onlyPages.includes(p.pageNumber) && !byPage.has(p.pageNumber)) {
         byPage.set(p.pageNumber, p);
       }
     }
   };
-  accept(await requestPages(buffer, filename, pageCount, null));
-  let missing = range(pageCount).filter(n => !byPage.has(n));
+  accept(await requestPages(buffer, filename, pageCount, onlyPages.length === pageCount ? null : onlyPages));
+  let missing = onlyPages.filter(n => !byPage.has(n));
   if (missing.length > 0) {
     console.warn(`[CMS1500 Vision] First pass returned ${byPage.size}/${pageCount} pages; re-requesting page(s) ${missing.join(", ")}`);
     accept(await requestPages(buffer, filename, pageCount, missing));
-    missing = range(pageCount).filter(n => !byPage.has(n));
+    missing = onlyPages.filter(n => !byPage.has(n));
   }
   return { pages: Array.from(byPage.values()).sort((a, b) => a.pageNumber - b.pageNumber), missingPages: missing, method: "whole_pdf" };
 }
@@ -464,9 +484,27 @@ function samePatientClaim(a: ReturnType<typeof pageIdentity>, b: ReturnType<type
   return sharedStrong > 0;
 }
 
+/** Box 3 as evidence: a two-digit year is not trusted (06 10 38 must not become 2038), nor a future date. */
+export function parseFormBirthDate(raw: string | null | undefined): string | null {
+  const iso = parseFormDate(raw);
+  if (!iso) return null;
+  const digits = (clean(raw) ?? "").replace(/[^0-9]/g, " ").trim().split(/\s+/);
+  const year = digits.length === 3 ? digits[2] : digits[0].slice(4);
+  if (year.length !== 4) return null;
+  return iso > new Date().toISOString().slice(0, 10) ? null : iso;
+}
+
 export interface AssembledCms1500 {
   groups: ImportGroup<Cms1500ImportLine>[];
   warnings: string[];
+}
+
+/** Box 26 / Box 3 as identity evidence. A form can print a per-claim account number, so Box 26 is never decisive alone. */
+function patientIdentityFor(pages: VisionPage[]): ImportPatientIdentity | null {
+  const externalId = pages.map(p => clean(p.patientAccountNumber)).find(Boolean) ?? null;
+  const birthDate = pages.map(p => parseFormBirthDate(p.patientDob)).find(Boolean) ?? null;
+  if (!externalId && !birthDate) return null;
+  return { sourceSystem: CMS1500_BOX26_SOURCE_SYSTEM, externalId, strength: "account", birthDate };
 }
 
 /**
@@ -624,6 +662,7 @@ export function assembleCms1500Pages(pages: VisionPage[], pageCount: number, mis
       lines: assignCms1500LineKeys(groupKey, lines),
       warnings: groupWarnings,
       unresolvedClaimTotals: [],
+      patientIdentity: patientIdentityFor(b.pages),
     };
   });
 

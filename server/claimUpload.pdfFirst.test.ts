@@ -11,6 +11,10 @@
  *   - the legacy extractor's text cut-off is reported, never silent;
  *   - a multi-patient EOB comes back as one group per patient.
  *
+ * P4-P28: a fillable CMS-1500 is read from its form fields, for real, with no
+ * AI call; a flat multi-patient PDF is split by patient; and upload limits are
+ * explicit errors.
+ *
  * The AI provider is mocked (extractCms1500PagesWithVision,
  * extractClaimsWithAI, invokeLLM): these tests prove routing and reporting,
  * not real OCR quality. No real patient data.
@@ -39,6 +43,7 @@ import { parseCMS1500, tryTemplateExtraction } from "./insuranceTemplates";
 import { extractCms1500PagesWithVision } from "./cms1500Vision";
 import { registerClaimUploadRoute } from "./claimUpload";
 import { syntheticScannedPages } from "./fixtures/cms1500ScannedSynthetic";
+import { formHeader, formRow, syntheticFormPdf } from "./fixtures/cms1500FormPdfSynthetic";
 
 const execSyncMock = vi.mocked(execSync);
 const parseMock = vi.mocked(parseCMS1500);
@@ -107,6 +112,95 @@ async function upload(bytes: Buffer, uploadType: "cms1500" | "reimbursement", na
 const eobClaim = (patientName: string, cpt: string) => ({
   patientName, dateOfService: "2026-03-02", cptCodes: cpt, modifier: "GP", unitsBilled: 1,
   chargeAmount: 175, insuranceReimbursement: 90, patientAmountDue: 20, patientAmountPaid: null, claimStatus: "approved",
+});
+
+describe("P4-P28: fillable CMS1500 PDFs", () => {
+  const date = ["02", "02", "26"] as [string, string, string];
+
+  it("is read from form fields with no AI call and no fallback warning", async () => {
+    const pdf = syntheticFormPdf([{
+      ...formHeader("TESTPATIENT, ALEX", "A100", { t_charge: "350.00" }),
+      ...formRow(1, { date, cpt: "97110", mods: ["GP", "59"], pointer: "AB", charge: "175.00" }),
+      ...formRow(2, { date, cpt: "97530", mods: ["GP"], pointer: "B", charge: "175.00" }),
+    }]);
+    const { status, body } = await upload(pdf, "cms1500");
+    expect(status).toBe(200);
+    expect(visionMock).not.toHaveBeenCalled();
+    expect(parseMock).not.toHaveBeenCalled();
+    expect(llmMock).not.toHaveBeenCalled();
+    expect(aiMock).not.toHaveBeenCalled();
+    const doc = body.importDocument;
+    expect(doc.extractionMethod).toBe("CMS1500 form fields (1/1 pages)");
+    expect(doc.extractionFallback).toBeNull();
+    expect(doc.groups[0].patientName).toBe("TESTPATIENT, ALEX");
+    expect(doc.groups[0].lines.map((l: any) => [l.cptCodes, l.modifier, l.diagnosisCodes])).toEqual([["97110", "GP, 59", "M54.50, M25.561"], ["97530", "GP", "M25.561"]]);
+    expect(doc.groups[0].patientIdentity).toMatchObject({ externalId: "A100", strength: "account" });
+  }, 20000);
+
+  it("sends only the pages without form values to page vision", async () => {
+    const pdf = syntheticFormPdf([{ ...formHeader("TESTPATIENT, ALEX", "A100"), ...formRow(1, { date, cpt: "97110" }) }, {}]);
+    const scanPage = { ...syntheticScannedPages()[0], pageNumber: 2 };
+    visionMock.mockResolvedValue({ pages: [scanPage], missingPages: [], method: "rendered_pages" });
+    const { status, body } = await upload(pdf, "cms1500");
+    expect(status).toBe(200);
+    expect(visionMock.mock.calls[0][3]).toEqual([2]);
+    expect(body.importDocument.extractionMethod).toMatch(/form fields \(1\/2 pages\), page vision for 1\/1/);
+    expect(body.importDocument.groups.flatMap((g: any) => g.pages)).toEqual(expect.arrayContaining([1, 2]));
+  }, 20000);
+
+  it("reports a page vision could not read instead of dropping it", async () => {
+    const pdf = syntheticFormPdf([{ ...formHeader("TESTPATIENT, ALEX", "A100"), ...formRow(1, { date, cpt: "97110" }) }, {}]);
+    visionMock.mockRejectedValue(new Error("provider down"));
+    const { status, body } = await upload(pdf, "cms1500");
+    expect(status).toBe(200);
+    expect(body.importDocument.warnings.join(" ")).toMatch(/Page\(s\) 2 of 2 could not be read/);
+    expect(body.importDocument.groups[0].lines).toHaveLength(1);
+  }, 20000);
+
+  it("a fillable form with an empty Box 24 is an error, not an empty success", async () => {
+    const { status, body } = await upload(syntheticFormPdf([formHeader("TESTPATIENT, ALEX", "A100")]), "cms1500");
+    expect(status).toBe(422);
+    expect(body.error).toMatch(/no service lines filled in/);
+  }, 20000);
+});
+
+describe("P4-P28: flat text CMS1500 PDFs", () => {
+  it("parses page by page, so two patients in one file stay two groups", async () => {
+    const claim = (cpt: string) => ({ dateOfService: "2026-03-02", cptCodes: cpt, unitsBilled: 1, modifier: "GP", placeOfService: "12", diagnosisCodes: "M54.50", cptLines: [{ cptCodes: cpt, unitsBilled: 1, modifier: "GP", diagnosisCodes: "M54.50" }] } as any);
+    parseMock
+      .mockReturnValueOnce([{ patientName: "TESTPATIENT, ALEX", claims: [claim("97110")] }])
+      .mockReturnValueOnce([{ patientName: "OTHERPERSON, SAM", claims: [claim("97530")] }])
+      .mockReturnValueOnce([{ patientName: "TESTPATIENT, ALEX", claims: [claim("97112")] }]);
+    const { status, body } = await upload(syntheticPdf([TEXT_PAGE, TEXT_PAGE, TEXT_PAGE]), "cms1500");
+    expect(status).toBe(200);
+    expect(parseMock).toHaveBeenCalledTimes(3);
+    expect(body.importDocument.groups.map((g: any) => [g.patientName, g.lines.map((l: any) => l.cptCodes)])).toEqual([
+      ["TESTPATIENT, ALEX", ["97110", "97112"]],
+      ["OTHERPERSON, SAM", ["97530"]],
+    ]);
+  }, 20000);
+
+  it("a misread units cell becomes a flagged blank instead of failing the whole file", async () => {
+    parseMock.mockReturnValue([{ patientName: "TESTPATIENT, ALEX", claims: [{ dateOfService: "2026-03-02", cptCodes: "97110", unitsBilled: 0, modifier: "GP", placeOfService: "12", diagnosisCodes: "M54.50", cptLines: [{ cptCodes: "97110", unitsBilled: 0, modifier: "GP", diagnosisCodes: "M54.50" }] } as any] }]);
+    const { body } = await upload(syntheticPdf([TEXT_PAGE]), "cms1500");
+    expect(body.importDocument.groups[0].lines[0]).toMatchObject({ unitsBilled: null, unreadable: ["unitsBilled"] });
+  }, 20000);
+});
+
+describe("P4-P28: upload limits", () => {
+  it("a file over the limit is refused with what to do, not truncated", async () => {
+    const big = Buffer.alloc(4_500_000, 32);
+    const { status, body } = await upload(big, "cms1500");
+    expect(status).toBe(413);
+    expect(body.error).toMatch(/larger than 4\.4 MB.*Nothing was read or saved.*Split/);
+  }, 20000);
+
+  it("the invoice export sent to the PDF route is pointed at Import CSV", async () => {
+    const csv = Buffer.from("Invoice #,Service Date(s),Patient,Description\nX,2026-01-01,A B,1x 97110 - E\n");
+    const { status, body } = await upload(csv, "reimbursement", "export.csv", "text/csv");
+    expect(status).toBe(422);
+    expect(body.error).toMatch(/CMS1500 invoice export.*Import CSV/);
+  }, 20000);
 });
 
 describe("CMS1500 PDFs", () => {

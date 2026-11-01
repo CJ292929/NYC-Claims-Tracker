@@ -31,6 +31,7 @@ import {
   approveAndCreateNewBatch,
   getCompletedPatients,
   getClaimsByPatientAndPeriod,
+  listPatientClaimPeriods,
   createClaimRecord,
   updateClaimRecord,
   deleteClaimRecordWithAudit,
@@ -64,6 +65,7 @@ import {
 } from "./db";
 import { commitClaimImport, importCommitInput, importPreviewInput, previewClaimImport } from "./claimImport";
 import { commitClaimCsvImport, csvImportCommitInput, csvImportPreviewInput, CsvTemplateError, previewClaimCsvImport } from "./claimCsvImport";
+import { applyPendingEob, dismissPendingEob, listPendingEob, pendingEobApplyInput, pendingEobDismissInput } from "./pendingEob";
 import type { ClinicUser } from "../drizzle/schema";
 import { sdk } from "./_core/sdk";
 import { getActorContext } from "./actorIdentity";
@@ -1101,6 +1103,23 @@ export const appRouter = router({
      * extracted line of every patient group in one uploaded file (see
      * server/claimImport.ts and shared/claimImport.ts for the rules).
      */
+    // P4-P28: reviewed EOB lines waiting for their CMS1500 (server/pendingEob.ts).
+    pendingEobList: claimsAccessProcedure.query(() => listPendingEob()),
+    pendingEobApply: claimsAccessProcedure
+      .input(pendingEobApplyInput)
+      .mutation(({ input, ctx }) => applyPendingEob(input, getActorContext(ctx.user))),
+    pendingEobDismiss: claimsAccessProcedure
+      .input(pendingEobDismissInput)
+      .mutation(async ({ input, ctx }) => {
+        await dismissPendingEob(input, getActorContext(ctx.user));
+        return { success: true } as const;
+      }),
+
+    // P4-P28: a patient created by an import can have claim lines and no visits yet.
+    periodsForPatient: claimsAccessProcedure
+      .input(z.object({ patientId: z.string().uuid() }))
+      .query(({ input }) => listPatientClaimPeriods(input.patientId)),
+
     importPreview: claimsAccessProcedure
       .input(importPreviewInput)
       .mutation(async ({ input }) => {
@@ -1283,7 +1302,7 @@ export const appRouter = router({
     list: adminOrOwnerProcedure
       .input(z.object({
         actorId: z.string().uuid().optional(),
-        entityType: z.enum(['patient', 'visit_record', 'claim_record', 'insurer_catalog', 'clinic_user']).optional(),
+        entityType: z.enum(['patient', 'visit_record', 'claim_record', 'pending_eob_line', 'insurer_catalog', 'clinic_user']).optional(),
         action: z.string().optional(),
         dateFrom: z.string().nullable().optional(), // ISO date string "YYYY-MM-DD"
         dateTo: z.string().nullable().optional(),
@@ -1294,7 +1313,7 @@ export const appRouter = router({
         // P4-P25: every caller this gate admits has Claims access today;
         // the Claims filter/redaction stays as defense in depth.
         const claimsAllowed = canAccessClaims(ctx.user);
-        if (!claimsAllowed && input.entityType === "claim_record") {
+        if (!claimsAllowed && (input.entityType === "claim_record" || input.entityType === "pending_eob_line")) {
           throw new TRPCError({ code: "FORBIDDEN", message: CLAIMS_ACCESS_DENIED_ERR_MSG });
         }
         const result = await listActivityLog({

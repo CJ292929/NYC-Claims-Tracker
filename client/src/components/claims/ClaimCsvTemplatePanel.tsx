@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   CLAIM_CSV_TEMPLATES,
+  CMS1500_EXPORT_REQUIRED,
   CSV_DATE_FORMATS,
   CSV_MONEY_FORMAT,
   buildClaimCsvTemplate,
@@ -42,7 +43,11 @@ export function ClaimCsvTemplatePanel({ kind, onFile }: { kind: ClaimCsvKind; on
 
   return (
     <div className="space-y-3" data-testid={`claim-csv-panel-${kind}`}>
-      <p className="text-xs text-muted-foreground">{t.notes[0]}</p>
+      <p className="text-xs text-muted-foreground">
+        {kind === "cms1500"
+          ? "Use the billing system's invoice export as it is, or this app's CMS1500 CSV template. You review every line and patient before anything is saved. Import this before the Insurance Reimbursement CSV."
+          : t.notes[0]}
+      </p>
       <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
         <input
           ref={inputRef}
@@ -57,13 +62,18 @@ export function ClaimCsvTemplatePanel({ kind, onFile }: { kind: ClaimCsvKind; on
           }}
         />
         <Button className="h-auto min-h-9 min-w-0 shrink flex-1 basis-56 whitespace-normal py-2 bg-brand-blue hover:bg-brand-blue-dark text-white" onClick={() => inputRef.current?.click()}>
-          <Upload className="w-4 h-4 mr-1.5" /> Upload {t.title} CSV
+          <Upload className="w-4 h-4 mr-1.5" /> Import CSV
         </Button>
         <Button variant="outline" className="h-auto min-h-9 min-w-0 shrink flex-1 basis-56 whitespace-normal py-2" onClick={() => downloadClaimCsvTemplate(kind)}>
           <Download className="w-4 h-4 mr-1.5" /> Download CSV Template
         </Button>
       </div>
       <p className="break-all text-[11px] text-muted-foreground">Template file: <span className="font-mono">{t.fileName}</span></p>
+      {kind === "cms1500" && (
+        <p className="text-[11px] text-muted-foreground">
+          Invoice export needs: {CMS1500_EXPORT_REQUIRED.join(", ")}. patient_guid and Birth Date are used to match patients; Total and Balance are never imported as payments.
+        </p>
+      )}
 
       <details className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900">
         <summary className="cursor-pointer font-semibold">Template fields and formats</summary>
