@@ -27,13 +27,19 @@ import { classifyPatientMatch, fuzzyNameMatch } from "@shared/nameMatch";
 import {
   CLAIM_IMPORT_KEY_RE,
   CLAIM_IMPORT_STATUSES,
+  BIRTH_EVIDENCE_SOURCE_SYSTEM,
   CMS1500_BOX26_SOURCE_SYSTEM,
+  EOB_LINE_DISMISSED,
   SHA256_RE,
   UPLOAD_CMS1500_FIRST,
   allowedEobTargets,
+  changedSavedLines,
   classifyCms1500Line,
   classifyEobLine,
   classifyEobLineForTarget,
+  classifyExportLine,
+  exportLineIdentityProblem,
+  findDismissedEobLine,
   resolveAuthPeriod,
   resolveAuthPeriodWithFilePeriod,
   type Cms1500LineClassification,
@@ -42,6 +48,7 @@ import {
   type ExistingClaimLine,
   type ImportPatientIdentity,
   type PeriodResolution,
+  type SavedDocumentLine,
 } from "@shared/claimImport";
 import {
   applyEobLine,
@@ -52,10 +59,13 @@ import {
   getAllPatients,
   holdEobLine,
   linkPatientExternalId,
+  listClaimLinesForDocument,
+  listDismissedEobLines,
   listHeldEobLineKeys,
   listPatientClaimLinesOnDates,
   listPatientExternalIds,
   listPatientVisitPeriodDates,
+  reopenDismissedEobLine,
   type PatientExternalIdRow,
 } from "./db";
 import type { ActorContext } from "./actorIdentity";
@@ -161,6 +171,8 @@ export const eobDecision = z.object({
   action: z.enum(["apply", "skip", "hold"]),
   claimRecordId: z.string().uuid().nullable().optional(),
   confirmReplace: z.boolean().optional(),
+  /** P4-P28: the reviewer knows this line was dismissed earlier and is bringing it back. */
+  reopenDismissed: z.boolean().optional(),
 });
 
 export const importCommitInput = z.discriminatedUnion("kind", [
@@ -217,6 +229,8 @@ export interface ClaimImportHints {
   externalIds?: PatientExternalIdRow[];
   /** P4-P28: the file's own group-level identity evidence for CSV claims; never from a client request. */
   fileIdentity?: ImportPatientIdentity | null;
+  /** P4-P28: invoice export. A line key alone does not prove the same service, so a disagreement with what is saved is reviewed, not written. */
+  strictLineIdentity?: boolean;
 }
 
 function linePeriod(visits: Array<{ authPeriod: number; dateOfService: string | null }>, key: string, dateOfService: string | null, hints: ClaimImportHints): PeriodResolution {
@@ -260,6 +274,8 @@ export interface GroupPatientResolution {
   linkExternalId?: { sourceSystem: string; externalId: string; birthDate: string | null } | null;
   /** P4-P28: groups with the same key are one person; a review choice applies to all of them. */
   clusterKey?: string;
+  /** P4-P28: the file's birth date, recorded on save when this patient has none on record yet. */
+  fileBirthDate?: string | null;
 }
 
 /**
@@ -338,10 +354,24 @@ function nameClusterKey(name: string | null): string {
  *      that patient, a conflicting birth date, or an unreadable name all wait
  *      for confirmation.
  *   3. No match at all: a new patient, created only on a confirmed save.
- * Birth dates exist only as import evidence in patient_external_ids, so a check
- * against a birth date only happens once a file has supplied one.
+ *
+ * Birth dates: patients has no date of birth, so the only thing a file's birth
+ * date can be compared with is the one an earlier import left on
+ * patient_external_ids. The first one for a patient is the baseline, and it is
+ * never replaced. Where it comes from decides how far it is trusted:
+ *   - a linked "patient" id that also agrees on the name: accepted and recorded;
+ *   - a name match alone (or a form account number): a person confirms it once,
+ *     because nothing else says this file's birth date is this patient's.
+ * With a baseline, a different birth date is always a question for a person.
+ * Without any birth date in the file, there is nothing to check and no baseline
+ * is created. This cannot catch a wrong person until the first file with a
+ * birth date has been confirmed.
  */
-export function resolveImportPatient(params: {
+export function resolveImportPatient(params: Parameters<typeof resolvePatientFromEvidence>[0]): GroupPatientResolution {
+  return { ...resolvePatientFromEvidence(params), fileBirthDate: params.identity?.birthDate ?? null };
+}
+
+function resolvePatientFromEvidence(params: {
   patientName: string | null;
   identity: ImportPatientIdentity | null | undefined;
   requestedPatientId: string | null | undefined;
@@ -357,6 +387,10 @@ export function resolveImportPatient(params: {
   const birthConflict = (patientId: string) =>
     !!identity?.birthDate && externalIds.some(e => e.patientId === patientId && e.birthDate && e.birthDate !== identity!.birthDate);
   const BIRTH_REASON = "The birth date in this file differs from the one recorded for this patient by an earlier import.";
+  const noBirthBaseline = (patient: { id: string; name: string }) =>
+    !!identity?.birthDate && !externalIds.some(e => e.patientId === patient.id && e.birthDate);
+  const noBaselineReason = (patient: { name: string }) =>
+    `${patient.name} has no birth date on record yet. Confirm that ${identity!.birthDate} is this patient's; later imports are checked against it.`;
 
   const mapped = identity?.externalId
     ? externalIds.find(e => e.sourceSystem === identity!.sourceSystem && e.externalId === identity!.externalId)
@@ -368,6 +402,7 @@ export function resolveImportPatient(params: {
   } else if (mappedPatient) {
     const clusterKey = `id:${identity!.sourceSystem}:${identity!.externalId}`;
     if (birthConflict(mappedPatient.id)) reasons.push(BIRTH_REASON);
+    else if (identity!.strength === "account" && noBirthBaseline(mappedPatient)) reasons.push(noBaselineReason(mappedPatient));
     if (patientName && !fuzzyNameMatch(patientName, mappedPatient.name)) reasons.push(`This file's patient ID belongs to ${mappedPatient.name}, but the file says ${patientName}.`);
     if (reasons.length === 0) {
       return { status: "matched", patientId: mappedPatient.id, patientName: mappedPatient.name, candidates: [], allowedIds: [mappedPatient.id], requiresConfirmation: false, identityStatus: "existing", identityReasons: [], canCreate: false, creatingName: null, linkExternalId: null, clusterKey };
@@ -389,6 +424,7 @@ export function resolveImportPatient(params: {
     const allowed = allPatients.map(p => p.id);
     const id = pick(allowed);
     if (!id) { const c = creating("unreadable"); if (c) return c; }
+    if (id && birthConflict(id)) reasons.push(BIRTH_REASON);
     return { status: "unreadable", patientId: id, patientName: nameOf(id), candidates: [], allowedIds: allowed, requiresConfirmation: true, identityStatus: "needs_confirmation", identityReasons: [...reasons, "The patient's name could not be read from the file."], canCreate: true, creatingName: null, linkExternalId: link(id), clusterKey };
   }
 
@@ -398,8 +434,9 @@ export function resolveImportPatient(params: {
   const confirmed = sameTokens.length > 1 ? null : classified.confirmed;
   const candidates = sameTokens.length > 1 ? sameTokens : classified.candidates;
   if (confirmed) {
-    if (birthConflict(confirmed.id)) reasons.push(BIRTH_REASON);
     const strongId = identity?.strength === "patient" && identity.externalId;
+    if (birthConflict(confirmed.id)) reasons.push(BIRTH_REASON);
+    else if (!strongId && noBirthBaseline(confirmed)) reasons.push(noBaselineReason(confirmed));
     if (strongId) {
       const other = externalIds.find(e => e.patientId === confirmed.id && e.sourceSystem === identity!.sourceSystem);
       reasons.push(other
@@ -415,6 +452,8 @@ export function resolveImportPatient(params: {
   }
   if (candidates.length > 0) {
     if (createRequest?.distinctConfirmed) { const c = creating("candidates"); if (c) return c; }
+    const differing = candidates.filter(c => birthConflict(c.id));
+    if (differing.length > 0) reasons.push(`The birth date in this file differs from the one recorded for ${differing.map(c => c.name).join(", ")}.`);
     const allowed = candidates.map(c => c.id);
     const id = pick(allowed);
     return {
@@ -474,6 +513,7 @@ export async function previewClaimImport(input: ImportPreviewInput, hints: Claim
   const documentId = await findClaimImportDocumentId(input.kind, input.document.sha256);
   const externalIds = contextPatient ? [] : hints.externalIds ?? await listPatientExternalIds();
   const heldKeys = input.kind === "eob" && documentId ? new Set(await listHeldEobLineKeys(documentId)) : new Set<string>();
+  const savedInDocument = hints.strictLineIdentity && documentId ? await listClaimLinesForDocument(documentId) : [];
 
   const groups: PreviewGroup[] = [];
   for (const group of input.groups) {
@@ -485,7 +525,10 @@ export async function previewClaimImport(input: ImportPreviewInput, hints: Claim
       if (input.kind === "cms1500") {
         const g = group as Cms1500PreviewGroup;
         const siblings = g.lines.map(l => l.sourceLineKey);
-        lines = g.lines.map(l => ({ sourceLineKey: l.sourceLineKey, kind: "cms1500" as const, ...classifyCms1500Line({ line: l, documentId, siblingLineKeys: siblings, existing: [], period: linePeriod([], l.sourceLineKey, l.dateOfService, hints) }) }));
+        lines = g.lines.map(l => {
+          const c = classifyCms1500Line({ line: l, documentId, siblingLineKeys: siblings, existing: [], period: linePeriod([], l.sourceLineKey, l.dateOfService, hints) });
+          return { sourceLineKey: l.sourceLineKey, kind: "cms1500" as const, ...(hints.strictLineIdentity ? classifyExportLine({ classification: c, line: l, patientId: null, siblingLineKeys: siblings, savedInDocument }) : c) };
+        });
       } else {
         lines = (group as EobPreviewGroup).lines.map(l => ({ sourceLineKey: l.sourceLineKey, kind: "eob" as const, ...classifyEob(l, documentId, [], hints) }));
       }
@@ -517,16 +560,25 @@ export async function previewClaimImport(input: ImportPreviewInput, hints: Claim
       periodOptions = periodOptionsFor(visits);
       const g = group as Cms1500PreviewGroup;
       const siblings = g.lines.map(l => l.sourceLineKey);
-      lines = g.lines.map(l => ({
-        sourceLineKey: l.sourceLineKey,
-        kind: "cms1500" as const,
-        ...classifyCms1500Line({ line: l, documentId, siblingLineKeys: siblings, existing, period: linePeriod(visits, l.sourceLineKey, l.dateOfService, hints) }),
-      }));
+      lines = g.lines.map(l => {
+        const c = classifyCms1500Line({ line: l, documentId, siblingLineKeys: siblings, existing, period: linePeriod(visits, l.sourceLineKey, l.dateOfService, hints) });
+        return {
+          sourceLineKey: l.sourceLineKey,
+          kind: "cms1500" as const,
+          ...(hints.strictLineIdentity ? classifyExportLine({ classification: c, line: l, patientId: patient.patientId, siblingLineKeys: siblings, savedInDocument }) : c),
+        };
+      });
     } else {
+      const dismissed = await listDismissedEobLines(patient.patientId);
       lines = (group as EobPreviewGroup).lines.map(l => {
         const c = classifyEob(l, documentId, existing, hints);
-        // Saved as pending by an earlier upload of this file and still waiting.
-        return { sourceLineKey: l.sourceLineKey, kind: "eob" as const, ...c, ...(c.status === "cms1500_required" && heldKeys.has(l.sourceLineKey) ? { held: true } : {}) };
+        const dismissedLine = c.status !== "already_saved" && findDismissedEobLine(l, documentId, dismissed);
+        return {
+          sourceLineKey: l.sourceLineKey, kind: "eob" as const, ...c,
+          // Saved as pending by an earlier upload of this file and still waiting.
+          ...(c.status === "cms1500_required" && heldKeys.has(l.sourceLineKey) ? { held: true } : {}),
+          ...(dismissedLine ? { dismissed: true, reason: c.reason ? `${EOB_LINE_DISMISSED} ${c.reason}` : EOB_LINE_DISMISSED } : {}),
+        };
       });
     }
     groups.push({ groupKey: group.groupKey, patient, lines, periodOptions });
@@ -576,6 +628,7 @@ const REVIEW_MESSAGES: Record<string, string> = {
   patient_changed: "A patient with this name was added after this review opened. Check the patient and save again.",
   external_id_taken: "This file's patient ID is already linked to a different patient. Check the patient and save again.",
   pending_not_needed: "This line no longer needs to wait: a saved claim line already carries it.",
+  line_dismissed: EOB_LINE_DISMISSED,
 };
 
 function reviewResult(sourceLineKey: string, reason: string, message?: string): CommitLineResult {
@@ -667,9 +720,15 @@ async function commitNewPatientGroup(params: {
 
   if (input.kind === "cms1500") {
     const g = group as Cms1500CommitGroup;
+    // A saved row of a patient this request's roster has not seen is a concurrent
+    // import of this same group: the RPC below converges on that patient.
+    const documentId = hints.strictLineIdentity ? await findClaimImportDocumentId("cms1500", input.document.sha256) : null;
+    const foreign = documentId ? (await listClaimLinesForDocument(documentId)).filter(r => allPatients.some(p => p.id === r.patientId)) : [];
     for (const line of g.lines) {
       const d = line.decision;
       if (d.action === "skip") { results.push({ sourceLineKey: line.sourceLineKey, status: "skipped" }); continue; }
+      const problem = exportLineIdentityProblem({ line, patientId: null, siblingLineKeys: g.allLineKeys, savedInDocument: foreign });
+      if (problem) { results.push(reviewResult(line.sourceLineKey, "line_identity_review", problem)); continue; }
       if (!line.dateOfService || !line.cptCodes) { results.push(reviewResult(line.sourceLineKey, "invalid_input")); continue; }
       if (line.unreadable.length > 0 && !d.acknowledgeFlags) {
         results.push(reviewResult(line.sourceLineKey, "flags_unacknowledged", "This line has unreadable values left blank. Review and acknowledge them before saving."));
@@ -791,10 +850,18 @@ export async function commitClaimImport(input: ImportCommitInput, actor: ActorCo
 
     // P4-P28: the reviewed link goes first: every line below then runs knowing
     // this id belongs to this patient. Only when at least one line will be written.
-    if (patient.linkExternalId && group.lines.some(l => l.decision.action !== "skip")) {
+    if (group.lines.some(l => l.decision.action !== "skip")) {
       try {
-        await linkPatientExternalId({ patientId, ...patient.linkExternalId, actor, importBatchId });
-        externalIds.push({ patientId, ...patient.linkExternalId });
+        if (patient.linkExternalId) {
+          await linkPatientExternalId({ patientId, ...patient.linkExternalId, actor, importBatchId });
+          externalIds.push({ patientId, ...patient.linkExternalId });
+        }
+        // The patient's first birth date is the baseline later files are checked against.
+        if (patient.fileBirthDate && !externalIds.some(e => e.patientId === patientId && e.birthDate)) {
+          const evidence = { sourceSystem: BIRTH_EVIDENCE_SOURCE_SYSTEM, externalId: patientId, birthDate: patient.fileBirthDate };
+          await linkPatientExternalId({ patientId, ...evidence, actor, importBatchId });
+          externalIds.push({ patientId, ...evidence });
+        }
       } catch (err) {
         results.push({
           groupKey: group.groupKey, patientId: null, patientOutcome: null,
@@ -811,9 +878,22 @@ export async function commitClaimImport(input: ImportCommitInput, actor: ActorCo
       const allowedPeriods = periodOptionsFor(visits);
       const g = group as Cms1500CommitGroup;
       const siblings = Array.from(new Set([...g.allLineKeys, ...g.lines.map(l => l.sourceLineKey)]));
+      let savedInDocument: SavedDocumentLine[] = [];
+      if (hints.strictLineIdentity) {
+        const documentId = await findClaimImportDocumentId("cms1500", input.document.sha256);
+        if (documentId) savedInDocument = await listClaimLinesForDocument(documentId);
+      }
       for (const line of g.lines) {
         const d = line.decision;
         if (d.action === "skip") { lineResults.push({ sourceLineKey: line.sourceLineKey, status: "skipped" }); continue; }
+        if (hints.strictLineIdentity) {
+          const problem = exportLineIdentityProblem({ line, patientId, siblingLineKeys: siblings, savedInDocument });
+          if (problem) { lineResults.push(reviewResult(line.sourceLineKey, "line_identity_review", problem)); continue; }
+          if (d.action === "create" && changedSavedLines(line, siblings, savedInDocument).length > 0) {
+            lineResults.push(reviewResult(line.sourceLineKey, "needs_selection", "A saved line of this invoice with this CPT is no longer in the file, so this may be that line changed. Save this one only if it is a separate service line."));
+            continue;
+          }
+        }
         if (!line.dateOfService || !line.cptCodes) { lineResults.push(reviewResult(line.sourceLineKey, "invalid_input")); continue; }
         if (line.unreadable.length > 0 && !d.acknowledgeFlags) {
           lineResults.push(reviewResult(line.sourceLineKey, "flags_unacknowledged", "This line has unreadable values left blank. Review and acknowledge them before saving."));
@@ -872,11 +952,20 @@ export async function commitClaimImport(input: ImportCommitInput, actor: ActorCo
       const hinted = g.lines.some(l => hints.eobTargets?.[l.sourceLineKey]);
       const holding = g.lines.some(l => l.decision.action === "hold");
       const existing = hinted || holding ? await listPatientClaimLinesOnDates(patientId, g.lines.map(l => l.dateOfService ?? "")) : [];
-      const documentId = hinted || holding ? await findClaimImportDocumentId("eob", input.document.sha256) : null;
+      const documentId = await findClaimImportDocumentId("eob", input.document.sha256);
+      const dismissed = await listDismissedEobLines(patientId);
+      /** The line this one repeats, when only an explicit reopen may bring it back. */
+      const dismissedLineFor = (line: (typeof g.lines)[number]) => findDismissedEobLine(line, documentId, dismissed);
+      const reopen = async (line: (typeof g.lines)[number]) => {
+        const hit = dismissedLineFor(line);
+        // A different document's line stays dismissed; this save is its own, reviewed, new line.
+        if (hit && hit.documentId === documentId && hit.lineKey === line.sourceLineKey) await reopenDismissedEobLine(hit.id, actor, importBatchId);
+      };
       for (const line of g.lines) {
         const d = line.decision;
         if (d.action === "skip") { lineResults.push({ sourceLineKey: line.sourceLineKey, status: "skipped" }); continue; }
         if (!line.dateOfService || !line.cptCodes) { lineResults.push(reviewResult(line.sourceLineKey, "invalid_input")); continue; }
+        if (dismissedLineFor(line) && !d.reopenDismissed) { lineResults.push(reviewResult(line.sourceLineKey, "line_dismissed")); continue; }
         if (d.action === "hold") {
           // A line that can be applied now is not kept pending by a stale review.
           const c = classifyEob(line, documentId, existing, hints);
@@ -885,6 +974,7 @@ export async function commitClaimImport(input: ImportCommitInput, actor: ActorCo
             continue;
           }
           try {
+            await reopen(line);
             const held = await holdEobLine({ patientId, source, lineKey: line.sourceLineKey, ...holdPayload(line), target: holdTarget(line.sourceLineKey, hints), actor, importBatchId });
             lineResults.push({ sourceLineKey: line.sourceLineKey, status: "held", message: UPLOAD_CMS1500_FIRST, reason: held.status });
           } catch (err) {
@@ -906,17 +996,20 @@ export async function commitClaimImport(input: ImportCommitInput, actor: ActorCo
             continue;
           }
         }
-        lineResults.push(await writeLine(line.sourceLineKey, () => applyEobLine({
-          patientId,
-          source,
-          lineKey: line.sourceLineKey,
-          targetClaimId: d.claimRecordId!,
-          match: { date_of_service: line.dateOfService!, cpt_codes: line.cptCodes! },
-          confirmReplace: d.confirmReplace === true,
-          data: eobFinancials(line),
-          actor,
-          importBatchId,
-        })));
+        lineResults.push(await writeLine(line.sourceLineKey, async () => {
+          await reopen(line);
+          return applyEobLine({
+            patientId,
+            source,
+            lineKey: line.sourceLineKey,
+            targetClaimId: d.claimRecordId!,
+            match: { date_of_service: line.dateOfService!, cpt_codes: line.cptCodes! },
+            confirmReplace: d.confirmReplace === true,
+            data: eobFinancials(line),
+            actor,
+            importBatchId,
+          });
+        }));
       }
     }
     results.push({ groupKey: group.groupKey, patientId, patientOutcome, lines: lineResults });

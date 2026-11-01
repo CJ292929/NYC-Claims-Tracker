@@ -420,12 +420,12 @@ describeDb("Patient creation and pending EOB through the real app + PostgREST + 
     });
 
     it("a stale 'new patient' review is refused when that name now exists", async () => {
-      const p = await csvPreview("cms1500", exportCsv(exportRow({ invoice: "SYN1-C01", guid: "" })));
+      const p = await csvPreview("cms1500", exportCsv(exportRow({ invoice: "SYN1-C01", guid: "", birthDate: "" })));
       const s = reviewStateFrom(p);
       choosePeriod(p, s);
       await q("INSERT INTO patients (name) VALUES ('TESTPATIENT, ALEX')");
       // The roster is re-read at save, so this becomes an existing patient, not a duplicate.
-      const csv = exportCsv(exportRow({ invoice: "SYN1-C01", guid: "" }));
+      const csv = exportCsv(exportRow({ invoice: "SYN1-C01", guid: "", birthDate: "" }));
       const { groups } = await csvSave("cms1500", csv, s);
       expect(groups[0].patientOutcome).toBe("existing");
       expect((await counts()).patients).toBe(1);
@@ -524,7 +524,7 @@ describeDb("Patient creation and pending EOB through the real app + PostgREST + 
   // ── Pending EOB ─────────────────────────────────────────────────────────
 
   describe("EOB before its CMS1500", () => {
-    const CMS = exportCsv(exportRow({ invoice: "SYN1-C01", guid: "" }));
+    const CMS = exportCsv(exportRow({ invoice: "SYN1-C01", guid: "", birthDate: "" }));
     const EOB = eobCsv("TESTPATIENT, ALEX", [{ line: "1" }]);
 
     async function saveEobForNewPatient() {
@@ -654,16 +654,134 @@ describeDb("Patient creation and pending EOB through the real app + PostgREST + 
       }
     });
 
-    it("a dismissed line closes with an audit row, and a new reviewed save reopens it instead of claiming it is pending", async () => {
-      await saveEobForNewPatient();
-      const { items } = await caller(OWNER).claims.pendingEobList();
-      await caller(OWNER).claims.pendingEobDismiss({ pendingId: items[0].id });
-      expect((await caller(OWNER).claims.pendingEobList()).items).toEqual([]);
-      expect((await q("SELECT count(*)::int AS n FROM audit_logs WHERE action = 'EOB_LINE_PENDING_DISMISS'"))[0].n).toBe(1);
-      const p = await csvPreview("eob", EOB);
-      await csvSave("eob", EOB, reviewStateFrom(p));
-      expect((await q("SELECT status, resolved_at FROM pending_eob_lines"))[0]).toEqual({ status: "pending", resolved_at: null });
-      expect((await caller(OWNER).claims.pendingEobList()).items).toHaveLength(1);
+    describe("a dismissed line stays dismissed", () => {
+      const dismissOnly = async () => {
+        await saveEobForNewPatient();
+        const { items } = await caller(OWNER).claims.pendingEobList();
+        await caller(OWNER).claims.pendingEobDismiss({ pendingId: items[0].id });
+        return items[0].id;
+      };
+      const saveCms = async () => {
+        const pCms = await csvPreview("cms1500", CMS);
+        const sCms = reviewStateFrom(pCms);
+        choosePeriod(pCms, sCms);
+        await csvSave("cms1500", CMS, sCms);
+      };
+      const paidRows = async () => (await q("SELECT count(*)::int AS n FROM claims_records WHERE insurance_reimbursement IS NOT NULL OR eob_document_id IS NOT NULL"))[0].n;
+      const pendingStatus = async () => (await q("SELECT status FROM pending_eob_lines"))[0].status;
+
+      it("closes with an audit row and leaves the pending list", async () => {
+        await dismissOnly();
+        expect((await caller(OWNER).claims.pendingEobList()).items).toEqual([]);
+        expect((await q("SELECT count(*)::int AS n FROM audit_logs WHERE action = 'EOB_LINE_PENDING_DISMISS'"))[0].n).toBe(1);
+      });
+
+      it("reimporting before the CMS1500 exists: starts with no decision, and the default save reopens nothing", async () => {
+        await dismissOnly();
+        const p = await csvPreview("eob", EOB);
+        const line = p.preview!.groups[0].lines[0] as any;
+        expect(line.dismissed).toBe(true);
+        expect(line.reason).toMatch(/dismissed/i);
+        const state = reviewStateFrom(p);
+        expect(state.decisions[line.sourceLineKey]).toBeNull();
+        expect((await csvSave("eob", EOB, state)).lines).toEqual([]);
+        expect(await pendingStatus()).toBe("dismissed");
+        expect((await caller(OWNER).claims.pendingEobList()).items).toEqual([]);
+      });
+
+      it("reimporting after the CMS1500 exists: matched, but no payment by default", async () => {
+        await dismissOnly();
+        await saveCms();
+        const p = await csvPreview("eob", EOB);
+        const line = p.preview!.groups[0].lines[0] as any;
+        expect(line.status).toBe("matched");
+        expect(line.dismissed).toBe(true);
+        const state = reviewStateFrom(p);
+        expect(state.decisions[line.sourceLineKey]).toBeNull();
+        expect((await csvSave("eob", EOB, state)).lines).toEqual([]);
+        expect(await paidRows()).toBe(0);
+        expect(await pendingStatus()).toBe("dismissed");
+      });
+
+      it("a hand-built apply or hold without the reopen flag is refused by the server", async () => {
+        await dismissOnly();
+        const held = reviewStateFrom(await csvPreview("eob", EOB));
+        const key = Object.keys(held.decisions)[0];
+        held.decisions[key] = { action: "hold" };
+        expect((await csvSave("eob", EOB, held)).lines[0]).toMatchObject({ status: "review_required", reason: "line_dismissed" });
+        await saveCms();
+        const p = await csvPreview("eob", EOB);
+        const state = reviewStateFrom(p);
+        state.decisions[key] = { action: "apply", claimRecordId: (p.preview!.groups[0].lines[0] as any).targetClaimId };
+        expect((await csvSave("eob", EOB, state)).lines[0]).toMatchObject({ status: "review_required", reason: "line_dismissed" });
+        expect(await paidRows()).toBe(0);
+      });
+
+      it("the database refuses too: apply and hold RPCs called directly cannot land a dismissed line", async () => {
+        await dismissOnly();
+        await saveCms();
+        const [row] = await q("SELECT p.patient_id, p.line_key, d.content_sha256 FROM pending_eob_lines p JOIN claim_import_documents d ON d.id = p.document_id");
+        const [{ id: claim }] = await q("SELECT id FROM claims_records WHERE cpt_codes = '97112'");
+        await expect(q(
+          "SELECT public.apply_eob_line_with_audit($1, $2, 'x.csv', NULL, $3, $4, jsonb_build_object('date_of_service','2026-02-02','cpt_codes','97112'), true, '{\"insurance_reimbursement\": 80}'::jsonb, NULL, 'owner', 'x', NULL)",
+          [row.patient_id, row.content_sha256, row.line_key, claim],
+        )).rejects.toMatchObject({ code: "P0033" });
+        await expect(q(
+          "SELECT public.hold_eob_line_with_audit($1, $2, 'x.csv', NULL, $3, jsonb_build_object('date_of_service','2026-02-02','cpt_codes','97112'), '{}'::jsonb, NULL, NULL, 'owner', 'x', NULL)",
+          [row.patient_id, row.content_sha256, row.line_key],
+        )).rejects.toMatchObject({ code: "P0033" });
+        expect(await paidRows()).toBe(0);
+        expect(await pendingStatus()).toBe("dismissed");
+      });
+
+      it("the same line under a new document identity (a re-issued file) is still caught by its content", async () => {
+        await dismissOnly();
+        await saveCms();
+        const reissued = eobCsv("TESTPATIENT, ALEX", [{ id: "ERA-REISSUED", line: "1", cpt: "97112" }]);
+        const p = await csvPreview("eob", reissued);
+        const line = p.preview!.groups[0].lines[0] as any;
+        expect(line.dismissed).toBe(true);
+        const state = reviewStateFrom(p);
+        expect(state.decisions[line.sourceLineKey]).toBeNull();
+        state.decisions[line.sourceLineKey] = { action: "apply", claimRecordId: line.targetClaimId };
+        expect((await csvSave("eob", reissued, state)).lines[0]).toMatchObject({ status: "review_required", reason: "line_dismissed" });
+        expect(await paidRows()).toBe(0);
+        // Different amounts are a different line, so a corrected remittance is not swallowed.
+        const corrected = eobCsv("TESTPATIENT, ALEX", [{ id: "ERA-CORRECTED", line: "1", cpt: "97112", paid: "95.00" }]);
+        expect(((await csvPreview("eob", corrected)).preview!.groups[0].lines[0] as any).dismissed).toBeUndefined();
+      });
+
+      it("only an explicit reopen brings it back, with its own audit row", async () => {
+        await dismissOnly();
+        await saveCms();
+        const p = await csvPreview("eob", EOB);
+        const line = p.preview!.groups[0].lines[0] as any;
+        const state = reviewStateFrom(p);
+        state.decisions[line.sourceLineKey] = { action: "apply", claimRecordId: line.targetClaimId, reopenDismissed: true };
+        expect((await csvSave("eob", EOB, state)).lines[0].status).toBe("saved");
+        expect(await paidRows()).toBe(1);
+        expect(await pendingStatus()).toBe("applied");
+        expect((await q("SELECT count(*)::int AS n FROM audit_logs WHERE action = 'EOB_LINE_PENDING_REOPEN'"))[0].n).toBe(1);
+      });
+
+      it("an explicit reopen with no CMS1500 yet waits on the pending list again", async () => {
+        await dismissOnly();
+        const p = await csvPreview("eob", EOB);
+        const state = reviewStateFrom(p);
+        state.decisions[p.preview!.groups[0].lines[0].sourceLineKey] = { action: "hold", reopenDismissed: true };
+        expect((await csvSave("eob", EOB, state)).lines[0].status).toBe("held");
+        expect(await pendingStatus()).toBe("pending");
+        expect((await caller(OWNER).claims.pendingEobList()).items).toHaveLength(1);
+      });
+
+      it("a stale apply from the pending list is refused after dismissal", async () => {
+        const id = await dismissOnly();
+        await saveCms();
+        const [{ id: claim }] = await q("SELECT id FROM claims_records WHERE cpt_codes = '97112'");
+        const r = await caller(OWNER).claims.pendingEobApply({ items: [{ pendingId: id, claimRecordId: claim }] });
+        expect(r.results[0].status).toBe("review_required");
+        expect(await paidRows()).toBe(0);
+      });
     });
 
     it("deleting the claim row a pending line was applied to lets the EOB wait again", async () => {
@@ -823,6 +941,204 @@ describeDb("Patient creation and pending EOB through the real app + PostgREST + 
       }
       const [{ ok }] = await q("SELECT has_function_privilege('anon', 'public.commit_import_with_new_patient(text, text, text, text, date, text, boolean, text, text, integer, text[], jsonb, uuid, text, text, uuid)', 'EXECUTE') AS ok");
       expect(ok).toBe(false);
+      const [{ reopen }] = await q("SELECT has_function_privilege('authenticated', 'public.reopen_dismissed_eob_line_with_audit(uuid, uuid, text, text, uuid)', 'EXECUTE') AS reopen");
+      expect(reopen).toBe(false);
+    });
+  });
+
+  // ── Invoice export: does a re-imported line really correspond to the saved one? ──
+
+  describe("line correspondence on re-import", () => {
+    const description = (...blocks: Array<[string, string]>) =>
+      ["Synthetic Plan", ...blocks.flatMap(([cpt, dx]) => [`1x ${cpt} - Service ($175.00)`, dx]), "Coinsurance: $350.00"].join("\n");
+    const A: [string, string] = ["97530", "M54.50"];
+    const B: [string, string] = ["97530", "R29.6"];
+    const csv = (o: { blocks: Array<[string, string]>; serviceDate?: string; patient?: string; guid?: string }) =>
+      exportCsv(exportRow({ invoice: "SYN-LINES", description: description(...o.blocks), serviceDate: o.serviceDate, patient: o.patient, guid: o.guid }));
+    const rows = async () => q("SELECT id, cms1500_line_key, cpt_codes, diagnosis_codes, to_char(date_of_service, 'YYYY-MM-DD') AS dos FROM claims_records ORDER BY id");
+    const firstImport = async (file: string) => {
+      await importNewPatientCsv(file);
+      return rows();
+    };
+    const reapplies = async () => (await q("SELECT count(*)::int AS n FROM audit_logs WHERE action = 'CLAIM_RECORD_CMS1500_REAPPLY'"))[0].n;
+
+    it("reordered blocks with different diagnoses keep each block on its own row", async () => {
+      const before = await firstImport(csv({ blocks: [A, B] }));
+      const file = csv({ blocks: [B, A] });
+      const p = await csvPreview("cms1500", file);
+      expect(p.preview!.groups[0].lines.map(l => l.status)).toEqual(["already_saved", "already_saved"]);
+      const { lines } = await csvSave("cms1500", file, reviewStateFrom(p));
+      expect(lines.map(l => l.status)).toEqual(["unchanged", "unchanged"]);
+      expect(await rows()).toEqual(before);
+      expect(await reapplies()).toBe(0);
+    });
+
+    it("a subset of different blocks maps to the right row and changes nothing", async () => {
+      const before = await firstImport(csv({ blocks: [A, B] }));
+      const file = csv({ blocks: [B] });
+      const p = await csvPreview("cms1500", file);
+      const { lines } = await csvSave("cms1500", file, reviewStateFrom(p));
+      expect(lines.map(l => l.status)).toEqual(["unchanged"]);
+      expect(await rows()).toEqual(before);
+      expect(await reapplies()).toBe(0);
+    });
+
+    it("a changed block cannot silently overwrite or sit beside the saved one: a reviewer chooses", async () => {
+      const before = await firstImport(csv({ blocks: [A, B] }));
+      const file = csv({ blocks: [A, ["97530", "M62.81"]] });
+      const p = await csvPreview("cms1500", file);
+      const changed = p.preview!.groups[0].lines[1] as any;
+      expect(changed.status).toBe("needs_selection");
+      const state = reviewStateFrom(p);
+      expect(state.decisions[changed.sourceLineKey]).toBeNull();
+      await csvSave("cms1500", file, state);
+      expect(await rows()).toEqual(before);
+    });
+
+    it("a subset of identical repeats says which row it means by nothing, so it is reviewed", async () => {
+      const same: [string, string] = ["97530", "M54.50"];
+      const before = await firstImport(csv({ blocks: [same, same] }));
+      const file = csv({ blocks: [same] });
+      const p = await csvPreview("cms1500", file);
+      const line = p.preview!.groups[0].lines[0] as any;
+      expect(line.status).toBe("identity_review");
+      expect(line.reason).toMatch(/2 identical/);
+      const state = reviewStateFrom(p);
+      expect(state.decisions[line.sourceLineKey]).toBeNull();
+      state.decisions[line.sourceLineKey] = { action: "create" };
+      expect((await csvSave("cms1500", file, state)).lines[0]).toMatchObject({ status: "review_required", reason: "line_identity_review" });
+      expect(await rows()).toEqual(before);
+    });
+
+    it("identical repeats on different dates: a subset cannot move one onto the other's date", async () => {
+      const same: [string, string] = ["97530", "M54.50"];
+      const multi = csv({ blocks: [same, same], serviceDate: '"2026-02-02, 2026-02-04"' });
+      const p1 = await csvPreview("cms1500", multi);
+      const s1 = reviewStateFrom(p1);
+      const keys = p1.preview!.groups[0].lines.map(l => l.sourceLineKey);
+      s1.edits[keys[0]] = { dateOfService: "2026-02-02" };
+      s1.edits[keys[1]] = { dateOfService: "2026-02-04" };
+      for (const k of keys) s1.decisions[k] = { action: "create", authPeriod: 1, periodSource: "selected" };
+      expect((await csvSave("cms1500", multi, s1)).lines.map(l => l.status)).toEqual(["saved", "saved"]);
+      const before = await rows();
+
+      const later = csv({ blocks: [same], serviceDate: "2026-02-04" });
+      const p = await csvPreview("cms1500", later);
+      const line = p.preview!.groups[0].lines[0] as any;
+      expect(line.status).toBe("identity_review");
+      const state = reviewStateFrom(p);
+      expect(state.decisions[line.sourceLineKey]).toBeNull();
+      state.decisions[line.sourceLineKey] = { action: "create_distinct", authPeriod: 1, periodSource: "selected" };
+      expect((await csvSave("cms1500", later, state)).lines[0]).toMatchObject({ status: "review_required", reason: "line_identity_review" });
+      expect(await rows()).toEqual(before);
+      expect(await reapplies()).toBe(0);
+    });
+
+    it("a changed service date on a saved line is reviewed, never moved", async () => {
+      const before = await firstImport(csv({ blocks: [A] }));
+      const file = csv({ blocks: [A], serviceDate: "2026-02-09" });
+      const p = await csvPreview("cms1500", file);
+      const line = p.preview!.groups[0].lines[0] as any;
+      expect(line.status).toBe("identity_review");
+      expect(line.reason).toMatch(/2026-02-02/);
+      await csvSave("cms1500", file, reviewStateFrom(p));
+      expect(await rows()).toEqual(before);
+    });
+
+    it("a saved line whose diagnosis was changed by hand is not overwritten by the file", async () => {
+      await firstImport(csv({ blocks: [A] }));
+      await q("UPDATE claims_records SET diagnosis_codes = 'Z99.9'");
+      const before = await rows();
+      const file = csv({ blocks: [A] });
+      const p = await csvPreview("cms1500", file);
+      expect((p.preview!.groups[0].lines[0] as any).status).toBe("identity_review");
+      await csvSave("cms1500", file, reviewStateFrom(p));
+      expect(await rows()).toEqual(before);
+    });
+
+    it("an invoice re-exported under a different patient is reviewed, and creates nobody", async () => {
+      const before = await firstImport(csv({ blocks: [A] }));
+      const file = csv({ blocks: [["97530", "M62.81"]], patient: "Sam Otherperson", guid: "S2002-1" });
+      const p = await csvPreview("cms1500", file);
+      const line = p.preview!.groups[0].lines[0] as any;
+      expect(line.status).toBe("identity_review");
+      const state = reviewStateFrom(p);
+      state.decisions[line.sourceLineKey] = { action: "create", authPeriod: 1, periodSource: "selected" };
+      expect((await csvSave("cms1500", file, state)).lines[0].status).toBe("review_required");
+      expect(await rows()).toEqual(before);
+      expect((await counts()).patients).toBe(1);
+    });
+  });
+
+  // ── Birth date as identity evidence ─────────────────────────────────────
+
+  describe("birth date evidence", () => {
+    const invoice = (id: string, birthDate: string, guid = "") => exportCsv(exportRow({ invoice: id, guid, birthDate, patient: "Alex Testpatient" }));
+    const patient = async () => (await q("INSERT INTO patients (name) VALUES ('TESTPATIENT, ALEX') RETURNING id"))[0].id as string;
+    /** As the dialog does: choosing a patient re-previews, and the lines get their decisions from that. */
+    const save = async (file: string, confirm = false) => {
+      let p = await csvPreview("cms1500", file);
+      const patientChoice: Record<string, string> = {};
+      const patientConfirmed: Record<string, boolean> = {};
+      if (confirm) {
+        for (const g of p.preview!.groups) {
+          patientChoice[g.groupKey] = g.patient.allowedIds[0];
+          patientConfirmed[g.groupKey] = true;
+        }
+        p = await csvPreview("cms1500", file, { patientChoice });
+      }
+      const state = reviewStateFrom(p);
+      Object.assign(state.patientChoice, patientChoice);
+      Object.assign(state.patientConfirmed, patientConfirmed);
+      choosePeriod(p, state);
+      return { p, ...(await csvSave("cms1500", file, state)) };
+    };
+
+    it("a name-only match with a first birth date is confirmed once, recorded, then checked for good", async () => {
+      const id = await patient();
+      const first = await csvPreview("cms1500", invoice("D1", "1950-03-14"));
+      expect(first.preview!.groups[0].patient.identityStatus).toBe("needs_confirmation");
+      expect(first.preview!.groups[0].patient.identityReasons!.join(" ")).toMatch(/no birth date on record/);
+
+      await save(invoice("D1", "1950-03-14"), true);
+      const rows = await q("SELECT source_system, to_char(birth_date, 'YYYY-MM-DD') AS birth_date FROM patient_external_ids WHERE patient_id = $1", [id]);
+      expect(rows).toEqual([{ source_system: "import_birth_evidence", birth_date: "1950-03-14" }]);
+      // patients itself still has no birth date.
+      expect(Object.keys((await q("SELECT * FROM patients"))[0]).some(k => /birth|dob/i.test(k))).toBe(false);
+
+      const same = await csvPreview("cms1500", invoice("D2", "1950-03-14"));
+      expect(same.preview!.groups[0].patient).toMatchObject({ identityStatus: "existing", patientId: id });
+
+      const other = await csvPreview("cms1500", invoice("D3", "1961-07-01"));
+      expect(other.preview!.groups[0].patient.identityStatus).toBe("needs_confirmation");
+      expect(other.preview!.groups[0].patient.identityReasons!.join(" ")).toMatch(/differs/);
+    });
+
+    it("a mapping saved without a birth date gets its baseline from the next file that has one", async () => {
+      const id = await patient();
+      await q("INSERT INTO patient_external_ids (patient_id, source_system, external_id, birth_date) VALUES ($1, 'billing_invoice_export', 'G1', NULL)", [id]);
+      const { lines } = await save(invoice("D4", "1950-03-14", "G1"));
+      expect(lines.every(l => l.status === "saved")).toBe(true);
+      const other = await csvPreview("cms1500", invoice("D5", "1961-07-01", "G1"));
+      expect(other.preview!.groups[0].patient.identityStatus).toBe("needs_confirmation");
+    });
+
+    it("a confirmed save with a different birth date does not rewrite the baseline", async () => {
+      const id = await patient();
+      await save(invoice("D6", "1950-03-14"), true);
+      await save(invoice("D7", "1961-07-01"), true);
+      const dates = await q("SELECT to_char(birth_date, 'YYYY-MM-DD') AS d FROM patient_external_ids WHERE patient_id = $1", [id]);
+      expect(dates).toEqual([{ d: "1950-03-14" }]);
+      expect((await csvPreview("cms1500", invoice("D8", "1961-07-01"))).preview!.groups[0].patient.identityStatus).toBe("needs_confirmation");
+    });
+
+    it("a file with no birth date neither asks nor records anything", async () => {
+      await patient();
+      const file = exportCsv(exportRow({ invoice: "D9", guid: "", birthDate: "" }));
+      const p = await csvPreview("cms1500", file);
+      expect(p.preview!.groups[0].patient.identityStatus).toBe("existing");
+      await save(file);
+      expect((await counts()).mappings).toBe(0);
     });
   });
 });

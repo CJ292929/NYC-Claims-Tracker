@@ -37,7 +37,7 @@ export type Cms1500Decision = {
   periodSource?: "resolved" | "selected" | "context" | null;
   acknowledgeFlags?: boolean;
 };
-export type EobDecision = { action: "apply" | "skip" | "hold"; claimRecordId?: string | null; confirmReplace?: boolean };
+export type EobDecision = { action: "apply" | "skip" | "hold"; claimRecordId?: string | null; confirmReplace?: boolean; reopenDismissed?: boolean };
 export type LineDecision = Cms1500Decision | EobDecision;
 
 export type ReviewMode = "single" | "bulk";
@@ -51,6 +51,8 @@ export function initialDecision(params: {
 }): LineDecision | null {
   const { kind, line, mode, contextAuthPeriod } = params;
   if (kind === "eob") {
+    // P4-P28: a reviewer dismissed this line earlier. Only an explicit reopen brings it back.
+    if ("dismissed" in line && line.dismissed === true) return null;
     if ((line.status === "matched" || line.status === "already_saved") && "targetClaimId" in line && line.targetClaimId) {
       return { action: "apply", claimRecordId: line.targetClaimId };
     }

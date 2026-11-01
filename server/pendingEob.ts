@@ -134,6 +134,7 @@ const APPLY_MESSAGES: Record<string, string> = {
   patient_mismatch: "That claim line belongs to a different patient.",
   not_found: "This line or its claim line no longer exists.",
   pending_not_needed: "This line was already resolved.",
+  line_dismissed: "This line was dismissed, so it was not applied.",
 };
 
 export async function applyPendingEob(input: z.infer<typeof pendingEobApplyInput>, actor: ActorContext): Promise<{ importBatchId: string; results: PendingEobApplyResult[] }> {

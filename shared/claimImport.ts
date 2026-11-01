@@ -49,13 +49,18 @@ export const CLAIM_UPLOAD_MAX_LABEL = "4.4 MB";
 /** External id namespace for CMS-1500 Box 26. */
 export const CMS1500_BOX26_SOURCE_SYSTEM = "cms1500_box26";
 
+/** Mapping row holding a patient's first birth date when no external id could carry it. external_id is the patient id. */
+export const BIRTH_EVIDENCE_SOURCE_SYSTEM = "import_birth_evidence";
+
 /**
  * What a file says about who a group is, besides the name.
  *   strength "patient": a source system's stable patient id. Decisive once a
  *     reviewer has linked it: later imports match by id alone.
  *   strength "account": a form's account number, which may be per claim. Only
  *     supports a name match; it never overrides a different name.
- * birthDate is evidence only and is never written to the patient.
+ * birthDate is evidence only and is never written to the patient. It is kept on
+ * patient_external_ids, the first one per patient as the baseline later files
+ * are compared with (see resolveImportPatient).
  */
 export interface ImportPatientIdentity {
   sourceSystem: string;
@@ -277,7 +282,7 @@ function sameDateCpt(row: ExistingClaimLine, dos: string, cpt: string): boolean 
 
 // ─── CMS1500 line classification ─────────────────────────────────────────────
 
-export type Cms1500LineStatus = "ready_new" | "already_saved" | "needs_selection" | "period_required" | "invalid";
+export type Cms1500LineStatus = "ready_new" | "already_saved" | "needs_selection" | "period_required" | "identity_review" | "invalid";
 
 export interface Cms1500LineClassification {
   status: Cms1500LineStatus;
@@ -330,6 +335,81 @@ export function classifyCms1500Line(params: {
     return { status: "period_required", candidates: [], associableIds: [], period, reason: period.note ?? "Choose the authorization period for this date of service." };
   }
   return { status: "ready_new", candidates: [], associableIds: [], period };
+}
+
+// ─── P4-P28: invoice export lines against what is already saved ──────────────
+
+/** A saved claim row of one import document, with the patient it belongs to. */
+export type SavedDocumentLine = ExistingClaimLine & { patientId: string };
+
+type ExportLineValues = Pick<Cms1500ImportLine, "sourceLineKey" | "dateOfService" | "cptCodes" | "modifier" | "unitsBilled" | "diagnosisCodes">;
+
+const NOTHING_CHANGES = "Re-importing never changes a saved line. Correct the saved line directly, or skip this one.";
+
+/**
+ * Why an export line cannot be trusted to be the saved line carrying its key.
+ * An export's document identity is its invoice number and its content can
+ * change between downloads, so unlike a PDF (same bytes, same document) a
+ * matching key does not prove a matching service. Only a blank in the file is
+ * not a difference: a reviewer may have filled it in on the first save.
+ */
+export function exportLineIdentityProblem(params: {
+  line: ExportLineValues;
+  patientId: string | null;
+  siblingLineKeys: string[];
+  savedInDocument: SavedDocumentLine[];
+}): string | null {
+  const { line, patientId, siblingLineKeys, savedInDocument } = params;
+  if (savedInDocument.some(r => r.patientId !== patientId)) {
+    return `This invoice was already saved for a different patient. ${NOTHING_CHANGES}`;
+  }
+  const saved = savedInDocument.find(r => r.cms1500LineKey === line.sourceLineKey);
+  if (!saved) return null;
+
+  const differs = (label: string, incoming: string | number | null, have: string | number | null) =>
+    incoming != null && String(incoming).trim() !== String(have ?? "").trim() ? `${label}: the file says ${incoming}, the saved line has ${have ?? "nothing"}` : null;
+  const diffs = [
+    differs("date of service", line.dateOfService, saved.dateOfService),
+    differs("CPT", line.cptCodes, saved.cptCodes),
+    normalizeModifierSet(line.modifier) && normalizeModifierSet(line.modifier) !== normalizeModifierSet(saved.modifier) ? differs("modifiers", line.modifier, saved.modifier) : null,
+    differs("units", line.unitsBilled, saved.unitsBilled),
+    differs("diagnosis codes", line.diagnosisCodes, saved.diagnosisCodes),
+  ].filter(Boolean);
+  if (diffs.length > 0) return `This may not be the saved line (${diffs.join("; ")}). ${NOTHING_CHANGES}`;
+
+  // Identical repeats share a key stem. Fewer in the file than saved means nothing says which ones it is listing.
+  const stem = line.sourceLineKey.replace(/\.\d+$/, ".");
+  const savedRepeats = savedInDocument.filter(r => r.cms1500LineKey?.startsWith(stem)).length;
+  const fileRepeats = new Set(siblingLineKeys.filter(k => k.startsWith(stem))).size;
+  if (savedRepeats > fileRepeats) {
+    return `${savedRepeats} identical lines are saved from this invoice, but this file lists ${fileRepeats}, so it cannot tell which one this is. ${NOTHING_CHANGES}`;
+  }
+  return null;
+}
+
+/**
+ * The classification an export line finally gets. A line with no saved row can
+ * still be a saved line that changed: a saved line of the same CPT from this
+ * invoice that the file no longer lists makes a new row a person's decision.
+ */
+export function classifyExportLine(params: Parameters<typeof exportLineIdentityProblem>[0] & { classification: Cms1500LineClassification }): Cms1500LineClassification {
+  const { classification: c, line, siblingLineKeys, savedInDocument } = params;
+  const problem = exportLineIdentityProblem(params);
+  if (problem) return { ...c, status: "identity_review", candidates: [], associableIds: [], reason: problem };
+  if (c.status === "ready_new" || c.status === "period_required") {
+    const orphans = changedSavedLines(line, siblingLineKeys, savedInDocument);
+    if (orphans.length > 0) {
+      return { ...c, status: "needs_selection", candidates: orphans, associableIds: [], reason: "A saved line of this invoice with this CPT is no longer in the file, so this may be that line changed. Save this one only if it is a separate service line." };
+    }
+  }
+  return c;
+}
+
+export function changedSavedLines(line: Pick<ExportLineValues, "sourceLineKey" | "cptCodes">, siblingLineKeys: string[], savedInDocument: SavedDocumentLine[]): SavedDocumentLine[] {
+  if (savedInDocument.some(r => r.cms1500LineKey === line.sourceLineKey)) return [];
+  const inFile = new Set(siblingLineKeys);
+  const cpt = (line.cptCodes ?? "").trim();
+  return savedInDocument.filter(r => (r.cptCodes ?? "").trim() === cpt && !(r.cms1500LineKey && inFile.has(r.cms1500LineKey)));
 }
 
 // ─── EOB line classification ────────────────────────────────────────────────
@@ -459,6 +539,48 @@ export function classifyEobLineForTarget(params: Parameters<typeof classifyEobLi
     return { ...result, reason: `${result.reason} (No CMS1500 line on this date and CPT in period ${period}.)` };
   }
   return result;
+}
+
+// ─── P4-P28: a reviewer dismissed this line earlier ─────────────────────────
+
+export interface DismissedEobLine {
+  id: string;
+  documentId: string;
+  lineKey: string;
+  dateOfService: string;
+  cptCodes: string;
+  modifier: string | null;
+  unitsBilled: number | null;
+  data: Record<string, unknown>;
+}
+
+export const EOB_LINE_DISMISSED = "A reviewer dismissed this line earlier. It stays dismissed unless you reopen it.";
+
+const sameMoney = (a: unknown, b: number | null) =>
+  (a === null || a === undefined ? null : Number(a)) === null ? b === null : b !== null && Math.abs(Number(a) - b) <= 0.004;
+
+/**
+ * The dismissed line this EOB line repeats: the same source line, or, because a
+ * re-issued file has a new document identity, the same service with the same
+ * amounts. Different amounts are a different line (a corrected remittance).
+ */
+export function findDismissedEobLine(
+  line: Pick<EobImportLine, "sourceLineKey" | "dateOfService" | "cptCodes" | "modifier" | "unitsBilled" | (typeof MONEY_KEYS)[number]>,
+  documentId: string | null,
+  dismissed: DismissedEobLine[]
+): DismissedEobLine | null {
+  const sameLine = documentId ? dismissed.find(d => d.documentId === documentId && d.lineKey === line.sourceLineKey) : undefined;
+  if (sameLine) return sameLine;
+  return dismissed.find(d =>
+    d.dateOfService === line.dateOfService
+    && d.cptCodes === (line.cptCodes ?? "").trim()
+    && normalizeModifierSet(d.modifier) === normalizeModifierSet(line.modifier)
+    && (d.unitsBilled ?? null) === (line.unitsBilled ?? null)
+    && sameMoney(d.data.charge_amount, line.chargeAmount)
+    && sameMoney(d.data.insurance_reimbursement, line.insuranceReimbursement)
+    && sameMoney(d.data.patient_amount_due, line.patientAmountDue)
+    && sameMoney(d.data.patient_amount_paid, line.patientAmountPaid)
+  ) ?? null;
 }
 
 /** Claim rows a reviewer may apply this line to — the commit-side check for a CSV row. */

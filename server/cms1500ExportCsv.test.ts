@@ -93,6 +93,30 @@ Coinsurance: $350.00`,
     expect(keysOf(exportCsv(shuffled, b))).toEqual(keysOf(exportCsv(a, b)));
   });
 
+  it("a block's key follows its content, not its position, when same-CPT blocks differ", () => {
+    const ids = (d: string) => parseExportDescription(d).services.map(s => [s.diagnosisCodes, s.lineId]);
+    const forward = new Map(ids("Plan\n1x 97530 - T ($1.00)\nM54.50\n1x 97530 - T ($1.00)\nR29.6") as Array<[string, string]>);
+    const reversed = new Map(ids("Plan\n1x 97530 - T ($1.00)\nR29.6\n1x 97530 - T ($1.00)\nM54.50") as Array<[string, string]>);
+    const subset = new Map(ids("Plan\n1x 97530 - T ($1.00)\nR29.6") as Array<[string, string]>);
+    expect(reversed).toEqual(forward);
+    expect(subset.get("R29.6")).toBe(forward.get("R29.6"));
+  });
+
+  it("units, modifiers and diagnosis order are part of a block's identity; a printed price is not", () => {
+    const id = (line: string, dx = "M54.50, R29.6") => parseExportDescription(`Plan\n${line}\n${dx}`).services[0].lineId;
+    const base = id("1x 97530 - T ($1.00)");
+    expect(id("2x 97530 - T ($1.00)")).not.toBe(base);
+    expect(id("1x 97530 GP - T ($1.00)")).not.toBe(base);
+    expect(id("1x 97530 - T ($1.00)", "R29.6, M54.50")).not.toBe(base);
+    expect(id("1x 97530 - T ($9.00)")).toBe(base);
+  });
+
+  it("only identical blocks are told apart by occurrence", () => {
+    const { services } = parseExportDescription("Plan\n1x 97530 - T ($1.00)\nM54.50\n1x 97530 - T ($1.00)\nM54.50");
+    expect(services.map(s => s.lineId.split(".").pop())).toEqual(["0", "1"]);
+    expect(services[0].lineId.replace(/\.\d+$/, "")).toBe(services[1].lineId.replace(/\.\d+$/, ""));
+  });
+
   it("the document identity comes from the invoice number, not the file", () => {
     const one = parseClaimCsv("cms1500", exportCsv(a)).claims[0];
     const two = parseClaimCsv("cms1500", exportCsv(b, a)).claims[1];

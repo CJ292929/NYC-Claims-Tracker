@@ -124,6 +124,7 @@ const LINE_STATUS_LABEL: Record<string, string> = {
   already_saved: "Saved earlier",
   needs_selection: "Choose",
   period_required: "Choose period",
+  identity_review: "Needs review",
   invalid: "Not readable",
   matched: "Matched",
   needs_confirmation: "Confirm",
@@ -601,6 +602,7 @@ function forCluster(
 
 function decisionStillValid(kind: Kind, decision: LineDecision, line: PreviewLine): boolean {
   if (decision.action === "skip") return true;
+  if ("dismissed" in line && line.dismissed === true && !(decision as EobDecision).reopenDismissed) return false;
   if (decision.action === "hold") return line.status === "cms1500_required";
   if (kind === "cms1500") {
     const d = decision as Cms1500Decision;
@@ -988,6 +990,17 @@ function Cms1500Action({ line, decision, periodOptions, flagged, onDecision }: {
 
   if (line.status === "already_saved") return <span className="text-muted-foreground">Will be checked against the saved line; amounts are never changed.</span>;
 
+  if (line.status === "identity_review") {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-muted-foreground">{decision?.action === "skip" ? "Skipped" : "Not saved from this file."}</span>
+        <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={() => onDecision(decision?.action === "skip" ? null : { action: "skip" })}>
+          {decision?.action === "skip" ? "Undo skip" : "Skip"}
+        </Button>
+      </div>
+    );
+  }
+
   if (line.status === "needs_selection") {
     const value = decision?.action === "associate" ? `assoc:${decision.claimRecordId}` : decision?.action ?? "";
     return (
@@ -1031,8 +1044,30 @@ function Cms1500Action({ line, decision, periodOptions, flagged, onDecision }: {
   );
 }
 
-function EobAction({ line, decision, held, onDecision }: { line: PreviewLine; decision: EobDecision | null; held: boolean; onDecision: (d: EobDecision | null) => void }) {
+function EobAction({ line, decision, held, onDecision: decide }: { line: PreviewLine; decision: EobDecision | null; held: boolean; onDecision: (d: EobDecision | null) => void }) {
+  const dismissed = "dismissed" in line && line.dismissed === true;
+  const [reopening, setReopening] = useState(decision?.reopenDismissed === true);
+  // Every decision on a line being reopened carries the reviewer's explicit reopen.
+  const onDecision = (d: EobDecision | null) => decide(d && dismissed && d.action !== "skip" ? { ...d, reopenDismissed: true } : d);
   if (line.status === "patient_required" || line.status === "invalid") return null;
+  if (dismissed && !reopening) {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-muted-foreground">{decision?.action === "skip" ? "Skipped" : "Not saved from this file."}</span>
+        <Button
+          size="sm" variant="outline" className="h-6 px-2 text-[11px]" data-testid="claim-import-reopen-dismissed"
+          onClick={() => {
+            setReopening(true);
+            if (line.status === "cms1500_required") onDecision({ action: "hold" });
+            else if (line.status === "matched" && "targetClaimId" in line && line.targetClaimId) onDecision({ action: "apply", claimRecordId: line.targetClaimId });
+            else decide(null);
+          }}
+        >
+          Reopen this line
+        </Button>
+      </div>
+    );
+  }
   if (line.status === "cms1500_required") {
     return (
       <div className="flex flex-wrap items-center gap-1">

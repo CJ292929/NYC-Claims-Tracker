@@ -55,6 +55,49 @@ describe("existing patient", () => {
   });
 });
 
+describe("birth date baseline", () => {
+  const birth = (patientId: string, birthDate: string) => mapping(patientId, patientId, birthDate, "import_birth_evidence");
+
+  it("a name-only match with a first birth date needs a person, and carries the date to record", () => {
+    const r = resolve({ patientName: "Alex Testpatient", identity: BOX26(null, "1950-03-14") });
+    expect(r).toMatchObject({ identityStatus: "needs_confirmation", requiresConfirmation: true, fileBirthDate: "1950-03-14" });
+    expect(r.identityReasons!.join(" ")).toMatch(/no birth date on record/);
+  });
+
+  it("a form account number does not vouch for a first birth date, even once mapped", () => {
+    const r = resolve({ patientName: "Alex Testpatient", identity: BOX26("99", "1950-03-14"), externalIds: [mapping(ALEX.id, "99", null, "cms1500_box26")] });
+    expect(r.identityStatus).toBe("needs_confirmation");
+    expect(r.identityReasons!.join(" ")).toMatch(/no birth date on record/);
+  });
+
+  it("a linked patient id with an agreeing name accepts a first birth date", () => {
+    const r = resolve({ patientName: "Alex Testpatient", identity: STRONG("G1", "1950-03-14"), externalIds: [mapping(ALEX.id, "G1")] });
+    expect(r).toMatchObject({ identityStatus: "existing", patientId: ALEX.id, fileBirthDate: "1950-03-14" });
+  });
+
+  it("with a baseline: the same date passes unasked, a different one is a question", () => {
+    const externalIds = [birth(ALEX.id, "1950-03-14")];
+    expect(resolve({ patientName: "Alex Testpatient", identity: BOX26(null, "1950-03-14"), externalIds }).identityStatus).toBe("existing");
+    const r = resolve({ patientName: "Alex Testpatient", identity: BOX26(null, "1961-07-01"), externalIds });
+    expect(r.identityStatus).toBe("needs_confirmation");
+    expect(r.identityReasons!.join(" ")).toMatch(/differs/);
+  });
+
+  it("a baseline from any source counts, including the group that created the patient", () => {
+    const externalIds = [mapping(ALEX.id, "cms1500:abc:g1", "1950-03-14", "claims_import_group")];
+    expect(resolve({ patientName: "Alex Testpatient", identity: BOX26(null, "1961-07-01"), externalIds }).identityStatus).toBe("needs_confirmation");
+  });
+
+  it("names which same-name record has a different birth date", () => {
+    const r = resolve({ patientName: "Alex Testpatient", allPatients: [ALEX, ALEX2], identity: BOX26(null, "1961-07-01"), externalIds: [birth(ALEX.id, "1950-03-14")] });
+    expect(r.identityReasons!.join(" ")).toContain(ALEX.name);
+  });
+
+  it("no birth date in the file: nothing to check, nothing to record", () => {
+    expect(resolve({ patientName: "Alex Testpatient" })).toMatchObject({ identityStatus: "existing", fileBirthDate: null });
+  });
+});
+
 describe("needs confirmation", () => {
   it("the first link of a stable id to a name match is a person's decision", () => {
     const r = resolve({ patientName: "Alex Testpatient", identity: STRONG("G1") });

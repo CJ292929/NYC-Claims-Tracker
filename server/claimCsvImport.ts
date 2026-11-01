@@ -34,9 +34,12 @@
  * accepted under CMS1500 too. It goes through this same path as one claim per
  * invoice, with document identity from the invoice number:
  *   document  sha256("claims-csv:v1:cms1500:EXPORT:<INVOICE #>")
- *   line key  "<groupKey>:csv.<code>.<occurrence>"
+ *   line key  "<groupKey>:csv.<code>.<content hash>.<occurrence>"
  * so a re-sorted or re-downloaded export resolves to the same lines, and two
- * identical services in one invoice stay two lines. Unlike a template row, an
+ * identical services in one invoice stay two lines. A template file states its
+ * own line ids, so an edited row is a correction of that line; an export states
+ * none, so a re-import that does not agree with the saved line is reviewed and
+ * never written (ClaimImportHints.strictLineIdentity). Unlike a template row, an
  * export line can have gaps (no code printed, several dates listed); those are
  * flagged, and the reviewer's values for exactly those fields arrive as
  * lineEdits and are validated here.
@@ -424,7 +427,7 @@ async function loadAndCheck(kind: ClaimCsvKind, csvText: string) {
 
 /** Server-only hints for one claim: the file's periods and (EOB) CMS1500 references. */
 async function hintsFor(claim: CsvClaim, roster: Roster, externalIds: PatientExternalIdRow[], cmsDocIds: Map<string, string | null>): Promise<ClaimImportHints> {
-  if (claim.kind === "cms1500") return { filePeriods: claim.periods, roster, externalIds, fileIdentity: claim.identity ?? null };
+  if (claim.kind === "cms1500") return { filePeriods: claim.periods, roster, externalIds, fileIdentity: claim.identity ?? null, strictLineIdentity: claim.lineDateOptions != null };
   const eobTargets: Record<string, EobCsvTarget> = {};
   for (const line of claim.lines) {
     const ref = claim.refs[line.sourceLineKey];

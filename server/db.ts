@@ -11,7 +11,7 @@ import { normalizeUsername, escapeLikePattern } from "./_core/username";
 import type { User, Patient, VisitRecord, ClinicUser, InsertVisitRecord, InsurerCatalogEntry } from "../drizzle/schema";
 import { determineActivePeriod, deriveAuthPeriodMetrics, getPeriodMetrics } from "@shared/authPeriodMetrics";
 import { deriveAuthorizationUrgency } from "@shared/authUrgency";
-import type { ExistingClaimLine } from "@shared/claimImport";
+import type { DismissedEobLine, ExistingClaimLine, SavedDocumentLine } from "@shared/claimImport";
 import type { ActorContext } from "./actorIdentity";
 
 // ─── Row adapters (Supabase snake_case → app camelCase) ───────────────────────
@@ -1528,7 +1528,11 @@ export async function listPatientClaimLinesOnDates(patientId: string, dates: str
     console.error("[Supabase] listPatientClaimLinesOnDates:", error);
     throw error;
   }
-  return (data ?? []).map((r: any) => ({
+  return (data ?? []).map(toExistingClaimLine);
+}
+
+function toExistingClaimLine(r: any): ExistingClaimLine {
+  return {
     id: r.id,
     authPeriod: r.auth_period,
     dateOfService: r.date_of_service,
@@ -1545,7 +1549,20 @@ export async function listPatientClaimLinesOnDates(patientId: string, dates: str
     cms1500LineKey: r.cms1500_line_key ?? null,
     eobDocumentId: r.eob_document_id ?? null,
     eobLineKey: r.eob_line_key ?? null,
-  }));
+  };
+}
+
+/** Every claim row saved from one CMS1500 document, on any date and for any patient. */
+export async function listClaimLinesForDocument(documentId: string): Promise<SavedDocumentLine[]> {
+  const { data, error } = await supabase
+    .from("claims_records")
+    .select(`patient_id, ${EXISTING_LINE_COLUMNS}`)
+    .eq("cms1500_document_id", documentId);
+  if (error) {
+    console.error("[Supabase] listClaimLinesForDocument:", error);
+    throw error;
+  }
+  return (data ?? []).map((r: any) => ({ ...toExistingClaimLine(r), patientId: r.patient_id }));
 }
 
 /** The patient's visit rows reduced to (period, date) — input to resolveAuthPeriod. */
@@ -1579,7 +1596,7 @@ export async function findClaimImportDocumentId(kind: "cms1500" | "eob", sha256:
 export type ClaimImportRpcReason =
   | "not_found" | "patient_mismatch" | "needs_selection" | "cms1500_required" | "already_reconciled"
   | "source_line_already_saved" | "already_has_cms1500" | "incompatible" | "invalid_input" | "existing_financials"
-  | "period_required" | "patient_changed" | "external_id_taken" | "pending_not_needed";
+  | "period_required" | "patient_changed" | "external_id_taken" | "pending_not_needed" | "line_dismissed";
 
 const IMPORT_RPC_REASONS: Record<string, ClaimImportRpcReason> = {
   P0010: "not_found",
@@ -1596,6 +1613,7 @@ const IMPORT_RPC_REASONS: Record<string, ClaimImportRpcReason> = {
   P0030: "patient_changed",
   P0031: "external_id_taken",
   P0032: "pending_not_needed",
+  P0033: "line_dismissed",
 };
 
 /** A rule the database refused the line on — a review item, not a crash. */
@@ -1887,6 +1905,40 @@ export async function dismissPendingEobLine(pendingId: string, actor: ActorConte
     p_actor_display: actor.actorDisplay,
   });
   if (error) throwImportRpcError("dismissPendingEobLine", error as { code?: string; message?: string });
+}
+
+/** Lines a reviewer dismissed for this patient, on any date and from any document. */
+export async function listDismissedEobLines(patientId: string): Promise<DismissedEobLine[]> {
+  const { data, error } = await supabase
+    .from("pending_eob_lines")
+    .select("id, document_id, line_key, date_of_service, cpt_codes, modifier, units_billed, data")
+    .eq("patient_id", patientId)
+    .eq("status", "dismissed");
+  if (error) {
+    console.error("[Supabase] listDismissedEobLines:", error);
+    throw error;
+  }
+  return (data ?? []).map((r: any) => ({
+    id: r.id,
+    documentId: r.document_id,
+    lineKey: r.line_key,
+    dateOfService: r.date_of_service,
+    cptCodes: r.cpt_codes,
+    modifier: r.modifier,
+    unitsBilled: r.units_billed,
+    data: r.data ?? {},
+  }));
+}
+
+export async function reopenDismissedEobLine(pendingId: string, actor: ActorContext, importBatchId: string): Promise<void> {
+  const { error } = await supabase.rpc("reopen_dismissed_eob_line_with_audit", {
+    p_pending_id: pendingId,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_import_batch_id: importBatchId,
+  });
+  if (error) throwImportRpcError("reopenDismissedEobLine", error as { code?: string; message?: string });
 }
 
 /** Periods this patient has claim lines in. A patient created by an import can have lines and no visits yet. */

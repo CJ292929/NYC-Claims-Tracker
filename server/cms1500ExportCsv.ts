@@ -29,8 +29,11 @@
  * shape; a vague block ("1x Home visit") keeps its text as a note with the CPT
  * blank and flagged for review, and an invoice listing several service dates
  * leaves each line's date for the reviewer. The file itself is never trusted
- * to have stable row order: identity comes from the invoice id and each
- * block's own code plus occurrence.
+ * to have stable row or block order: identity comes from the invoice id and
+ * each block's own content (code, modifiers, units, diagnosis codes), plus an
+ * occurrence only among blocks that are identical. A key match is still not
+ * proof of the same service, so re-imports are also compared with what is saved
+ * (exportLineIdentityProblem in shared/claimImport.ts).
  */
 import { createHash } from "node:crypto";
 import Papa from "papaparse";
@@ -39,7 +42,7 @@ import { CMS1500_EXPORT_HEADERS, CMS1500_EXPORT_REQUIRED, cleanCell, normalizeHe
 export const BILLING_EXPORT_SOURCE_SYSTEM = "billing_invoice_export";
 
 export interface ExportServiceLine {
-  /** Stable within the invoice: "<code>.<occurrence>", or "X<text hash>.<occurrence>" when no code is printed. */
+  /** Stable within the invoice: "<code or X>.<content hash>.<occurrence among identical blocks>". */
   lineId: string;
   cptCode: string | null;
   modifiers: string | null;
@@ -162,7 +165,9 @@ export function parseExportDescription(description: string): { payerLabel: strin
 
   const seen = new Map<string, number>();
   const services = blocks.map((b): ExportServiceLine => {
-    const stem = b.cpt ?? `X${createHash("sha256").update(b.rawText.toUpperCase()).digest("hex").slice(0, 10)}`;
+    // Diagnosis order is kept: the first code is the primary one. A printed price is not part of the service.
+    const content = [b.cpt ?? b.rawText.toUpperCase(), b.modifiers, b.units, b.dx.join(","), b.dxBad.join(",")].join("|");
+    const stem = `${b.cpt ?? "X"}.${createHash("sha256").update(content).digest("hex").slice(0, 10)}`;
     const n = seen.get(stem) ?? 0;
     seen.set(stem, n + 1);
     const unreadable: string[] = [];

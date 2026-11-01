@@ -8,7 +8,11 @@
 --                          external_id), so one external id can never point at
 --                          two patients. birth_date is identity evidence from
 --                          the file; patients has no date of birth column and
---                          this does not add one. Also records which import
+--                          this does not add one. A patient's first birth date
+--                          with no id to hold it gets its own row (source_system
+--                          'import_birth_evidence', external_id = patient id),
+--                          so later imports have a baseline to compare with.
+--                          Also records which import
 --                          document group created a patient
 --                          (source_system 'claims_import_group'), so retrying
 --                          the same group can never create a second patient.
@@ -26,6 +30,9 @@
 --   hold_eob_line_with_audit(...)        keeps one EOB line pending.
 --   apply_pending_eob_line_with_audit(...)  applies one pending line.
 --   dismiss_pending_eob_line_with_audit(...) reviewer closes a pending line.
+--   reopen_dismissed_eob_line_with_audit(...) reviewer's explicit way back.
+--   trg_claims_records_refuse_dismissed_eob  a dismissed line can never land on
+--                          a claim row, by any path.
 --   trg_claims_records_resolve_pending   marks a pending line applied whenever
 --                          its source line lands on a claim row by any path
 --                          (e.g. the EOB is uploaded again after the CMS1500),
@@ -40,6 +47,7 @@
 --   P0030 a patient with this name now exists (re-check the review)
 --   P0031 this external id already belongs to a different patient
 --   P0032 this EOB line is no longer waiting for a CMS1500
+--   P0033 this EOB line was dismissed by a reviewer
 --
 -- Compatibility during the migration-before-deploy window: nothing existing is
 -- altered except widening audit_logs_entity_type_check, so the currently
@@ -51,6 +59,9 @@
 -- Rollback (manual, only after the app is rolled back; pending lines are lost,
 -- so export them first):
 --   DROP TRIGGER IF EXISTS trg_claims_records_resolve_pending ON public.claims_records;
+--   DROP TRIGGER IF EXISTS trg_claims_records_refuse_dismissed_eob ON public.claims_records;
+--   DROP FUNCTION IF EXISTS public.claims_records_refuse_dismissed_eob();
+--   DROP FUNCTION IF EXISTS public.reopen_dismissed_eob_line_with_audit(uuid, uuid, text, text, uuid);
 --   DROP FUNCTION IF EXISTS public.claims_records_resolve_pending();
 --   DROP FUNCTION IF EXISTS public.dismiss_pending_eob_line_with_audit(uuid, uuid, text, text);
 --   DROP FUNCTION IF EXISTS public.apply_pending_eob_line_with_audit(uuid, uuid, boolean, uuid, text, text, uuid);
@@ -201,7 +212,7 @@ GRANT EXECUTE ON FUNCTION public.link_patient_external_id_with_audit(uuid, text,
 -- a CSV row (cms1500_sha256, line_key, label, auth_period).
 -- Refused (P0032) when a claim row already carries this source line. A retry
 -- with the same values is a no-op with no audit row; a corrected re-import
--- updates the line, and any reviewed save leaves it pending.
+-- updates the line. A dismissed line is refused (P0033).
 CREATE OR REPLACE FUNCTION public.hold_eob_line_with_audit(
   p_patient_id uuid,
   p_content_sha256 text,
@@ -260,8 +271,13 @@ BEGIN
     IF v_row.patient_id <> p_patient_id THEN
       RAISE EXCEPTION 'pending_line_patient_mismatch: saved for another patient' USING ERRCODE = 'P0011';
     END IF;
-    -- A new reviewed save reopens a line that was dismissed, or applied to a
-    -- claim row since deleted (a row still carrying it was refused above).
+    -- A reviewer closed this line: re-importing the document never reopens it.
+    -- Only reopen_dismissed_eob_line_with_audit does, on an explicit decision.
+    IF v_row.status = 'dismissed' THEN
+      RAISE EXCEPTION 'pending_line_dismissed: reopen it first' USING ERRCODE = 'P0033';
+    END IF;
+    -- A new reviewed save reopens a line applied to a claim row since deleted
+    -- (a row still carrying it was refused above).
     IF v_row.status = 'pending' AND (
       v_row.data = v_clean AND v_row.date_of_service = v_dos AND v_row.cpt_codes = v_cpt
       AND v_row.modifier IS NOT DISTINCT FROM (p_match ->> 'modifier')
@@ -518,6 +534,78 @@ $$;
 
 REVOKE ALL ON FUNCTION public.dismiss_pending_eob_line_with_audit(uuid, uuid, text, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.dismiss_pending_eob_line_with_audit(uuid, uuid, text, text) TO service_role;
+
+-- ─── reopen_dismissed_eob_line_with_audit ──────────────────────────────────
+-- The only way back for a dismissed line: a reviewer's explicit decision, with
+-- its own audit row. It only returns the line to pending; applying it still
+-- goes through apply_eob_line_with_audit.
+CREATE OR REPLACE FUNCTION public.reopen_dismissed_eob_line_with_audit(
+  p_pending_id uuid,
+  p_actor_id uuid,
+  p_actor_type text,
+  p_actor_display text,
+  p_import_batch_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  v_row public.pending_eob_lines;
+BEGIN
+  SELECT * INTO v_row FROM public.pending_eob_lines WHERE id = p_pending_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'pending_line_not_found: %', p_pending_id USING ERRCODE = 'P0010';
+  END IF;
+  IF v_row.status <> 'dismissed' THEN
+    RETURN jsonb_build_object('status', 'unchanged');
+  END IF;
+  UPDATE public.pending_eob_lines SET status = 'pending', resolved_at = NULL WHERE id = p_pending_id;
+  INSERT INTO public.audit_logs (
+    entity_type, entity_id, patient_id, actor_id, actor_type, actor_display,
+    action, before_data, after_data, import_batch_id
+  ) VALUES (
+    'pending_eob_line', v_row.id, v_row.patient_id, p_actor_id, p_actor_type, p_actor_display,
+    'EOB_LINE_PENDING_REOPEN', jsonb_build_object('status', 'dismissed'), jsonb_build_object('status', 'pending'),
+    p_import_batch_id
+  );
+  RETURN jsonb_build_object('status', 'reopened');
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.reopen_dismissed_eob_line_with_audit(uuid, uuid, text, text, uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reopen_dismissed_eob_line_with_audit(uuid, uuid, text, text, uuid) TO service_role;
+
+-- ─── a dismissed line can never land on a claim row ────────────────────────
+-- Enforced on the row itself, so every path that writes EOB provenance is
+-- covered (apply_eob_line_with_audit is shared and does not know about
+-- pending lines).
+CREATE OR REPLACE FUNCTION public.claims_records_refuse_dismissed_eob()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.pending_eob_lines
+    WHERE document_id = NEW.eob_document_id AND line_key = NEW.eob_line_key AND status = 'dismissed'
+  ) THEN
+    RAISE EXCEPTION 'pending_line_dismissed: reopen it first' USING ERRCODE = 'P0033';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.claims_records_refuse_dismissed_eob() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_claims_records_refuse_dismissed_eob ON public.claims_records;
+CREATE TRIGGER trg_claims_records_refuse_dismissed_eob
+  BEFORE UPDATE OF eob_document_id, eob_line_key ON public.claims_records
+  FOR EACH ROW
+  WHEN (NEW.eob_document_id IS NOT NULL AND (OLD.eob_document_id IS DISTINCT FROM NEW.eob_document_id OR OLD.eob_line_key IS DISTINCT FROM NEW.eob_line_key))
+  EXECUTE FUNCTION public.claims_records_refuse_dismissed_eob();
 
 -- ─── a pending line resolves when its source line lands on a claim row ─────
 CREATE OR REPLACE FUNCTION public.claims_records_resolve_pending()

@@ -23,6 +23,26 @@ import {
 
 const SHA = "a".repeat(64);
 
+describe("P4-P28: lines that wait for an explicit decision", () => {
+  const eob = (over: Record<string, unknown>) => ({ sourceLineKey: "g:1", kind: "eob", candidates: [], ...over }) as any;
+
+  it("a dismissed line starts with no decision, whatever its match says", () => {
+    for (const line of [eob({ status: "matched", targetClaimId: "c1", dismissed: true }), eob({ status: "cms1500_required", dismissed: true }), eob({ status: "already_saved", targetClaimId: "c1", dismissed: true })]) {
+      expect(initialDecision({ kind: "eob", line, mode: "bulk", contextAuthPeriod: null })).toBeNull();
+    }
+  });
+
+  it("the same lines without the flag keep their normal start", () => {
+    expect(initialDecision({ kind: "eob", line: eob({ status: "matched", targetClaimId: "c1" }), mode: "bulk", contextAuthPeriod: null })).toEqual({ action: "apply", claimRecordId: "c1" });
+    expect(initialDecision({ kind: "eob", line: eob({ status: "cms1500_required" }), mode: "bulk", contextAuthPeriod: null })).toEqual({ action: "hold" });
+  });
+
+  it("an export line in identity review starts with no decision, so a default save skips it", () => {
+    const line = { sourceLineKey: "g:1", kind: "cms1500", status: "identity_review", candidates: [], associableIds: [], period: { status: "resolved", authPeriod: 1, basis: "file" } } as any;
+    expect(initialDecision({ kind: "cms1500", line, mode: "bulk", contextAuthPeriod: null })).toBeNull();
+  });
+});
+
 function cmsLine(key: string, over: Partial<Cms1500ImportLine> = {}): Cms1500ImportLine {
   return {
     sourceLineKey: key, page: 1, slot: 1, dateOfService: "2026-03-02", placeOfService: "12", cptCodes: "97110", modifier: "GP",
