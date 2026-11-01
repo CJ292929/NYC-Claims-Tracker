@@ -430,9 +430,12 @@ describeDb("Claims CSV templates through the real app + PostgREST + Postgres", (
 
   it("unknown patient, mismatched patient_id, and a contradicting period are never guessed", async () => {
     const before = await counts();
+    // P4-P28: an unknown patient is a new patient, created only on a confirmed save.
+    // A line asks for a period unless its row states one; a preview writes nothing.
     const unknown = await preview("cms1500", fromTemplate("cms1500", "T5", "NOBODY, UNKNOWN"));
-    expect(unknown.preview!.groups[0].patient.status).toBe("unmatched");
-    expect(unknown.preview!.groups[0].lines.every(l => l.status === "patient_required")).toBe(true);
+    expect(unknown.preview!.groups[0].patient).toMatchObject({ status: "unmatched", identityStatus: "new", creatingName: "NOBODY, UNKNOWN", patientId: null });
+    expect(unknown.preview!.groups[0].lines.map(l => l.status)).toEqual(["ready_new", "ready_new", "period_required"]);
+    expect(await counts()).toEqual(before);
 
     const mismatched = fromTemplate("cms1500", "T6").replace(/"TESTPATIENT, ALEX",""/g, `"TESTPATIENT, ALEX","${PATIENT_B}"`);
     const m = await preview("cms1500", mismatched);
@@ -453,7 +456,7 @@ describeDb("Claims CSV templates through the real app + PostgREST + Postgres", (
     const before = await counts();
     expect((await preview("eob", CMS)).templateError).toBe("This is the CMS1500 CSV template, not Insurance Reimbursement. Nothing was imported. Upload it under Bulk Upload → CMS1500.");
     expect((await preview("cms1500", EOB)).templateError).toMatch(/^This is the Insurance Reimbursement CSV template, not CMS1500/);
-    expect((await preview("cms1500", '"Patient Name","Insurance","Authorized Sessions"\n"A","B","1"\n')).templateError).toMatch(/Patient Data CSV template/);
+    expect((await preview("cms1500", '"Patient Name","Insurance","Authorized Sessions"\n"A","B","1"\n')).templateError).toMatch(/looks like a patient list/);
     const g = (await preview("cms1500", CMS)).preview!.groups[0];
     await expect(owner().claims.csvImportCommit({
       kind: "eob", fileName: "x.csv", csvText: CMS,
@@ -509,7 +512,8 @@ describeDb("Claims CSV templates through the real app + PostgREST + Postgres", (
 
       const eob = fromTemplate("eob", "T10", "OTHERPERSON, SAM").replace(/2026-01-05|01\/05\/2026/g, "2026-03-11").replace(/"80\.00"/, '"77.77"');
       const e = await reviewAndSave("eob", eob);
-      expect(e.lines.map(l => l.status)).toEqual(["failed", "saved"]);
+      // P4-P28: the third line's CMS1500 failed above, so its reimbursement is kept pending.
+      expect(e.lines.map(l => l.status)).toEqual(["failed", "saved", "held"]);
       const [row] = await q(`SELECT insurance_reimbursement, eob_document_id FROM claims_records WHERE id = $1`, [r.lines[0].claimId]);
       expect(row).toEqual({ insurance_reimbursement: null, eob_document_id: null });
 

@@ -108,7 +108,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
 const ADMIN_ONLY_GROUP_LABELS = new Set(['Management']);
 
 /** Items gated to Claims-access roles (P4-P25: Owner/Super Admin, Clinic Admin) — see canAccessClaims. */
-const CLAIMS_ACCESS_SECTIONS = new Set<NavSection>(['claims']);
+const CLAIMS_ACCESS_SECTIONS = new Set<NavSection>(['claims', 'bulk-upload']);
 
 /** Group keys whose children include the given section. */
 function parentKeysContaining(activeSection: NavSection): string[] {
@@ -149,7 +149,7 @@ export function SidebarNav({
   ).map((group) => ({
     ...group,
     items: group.items.filter((item) => canAccessClaims || !CLAIMS_ACCESS_SECTIONS.has(item.key as NavSection)),
-  }));
+  })).filter((group) => group.items.length > 0);
 
   // Which parent groups (e.g. "Patients") are expanded. Initialized open for
   // whichever group contains the current section, then kept in sync as the

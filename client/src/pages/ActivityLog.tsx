@@ -26,12 +26,13 @@ import {
 import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import { formatTimestamp } from "@/lib/date";
 
-type EntityType = "patient" | "visit_record" | "claim_record" | "insurer_catalog" | "clinic_user";
+type EntityType = "patient" | "visit_record" | "claim_record" | "pending_eob_line" | "insurer_catalog" | "clinic_user";
 
 const ENTITY_LABELS: Record<EntityType, string> = {
   patient: "Patient",
   visit_record: "Visit / Authorization",
   claim_record: "Claim",
+  pending_eob_line: "Pending Reimbursement",
   insurer_catalog: "Insurer",
   clinic_user: "Staff Account",
 };
@@ -134,7 +135,7 @@ export default function ActivityLog() {
                 <SelectContent>
                   <SelectItem value="all">All types</SelectItem>
                   {/* Claim history requires Claims access (P4-P25) — the server rejects the filter otherwise. */}
-                  {Object.entries(ENTITY_LABELS).filter(([value]) => value !== "claim_record" || canAccessClaims(authUser)).map(([value, label]) => (
+                  {Object.entries(ENTITY_LABELS).filter(([value]) => (value !== "claim_record" && value !== "pending_eob_line") || canAccessClaims(authUser)).map(([value, label]) => (
                     <SelectItem key={value} value={value}>{label}</SelectItem>
                   ))}
                 </SelectContent>

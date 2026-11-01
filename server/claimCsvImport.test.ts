@@ -195,12 +195,11 @@ describe("wrong template", () => {
   });
 
   it("the patient template is refused by both claims uploads, and claims templates by the patient upload", () => {
-    expect(parseClaimCsv("cms1500", PATIENT_TEMPLATE).templateError).toMatch(/Patient Data CSV template/);
-    expect(parseClaimCsv("eob", PATIENT_TEMPLATE).templateError).toMatch(/Patient Data CSV template/);
+    expect(parseClaimCsv("cms1500", PATIENT_TEMPLATE).templateError).toMatch(/patient list/);
+    expect(parseClaimCsv("eob", PATIENT_TEMPLATE).templateError).toMatch(/patient list/);
     expect(detectCsvTemplateFromText(PATIENT_TEMPLATE)).toBe("patient");
-    expect(wrongTemplateMessage("patient", detectCsvTemplateFromText(usable("eob")))).toMatch(/Bulk Upload → Insurance Reimbursement/);
-    expect(wrongTemplateMessage("patient", detectCsvTemplateFromText(usable("cms1500")))).toMatch(/Bulk Upload → CMS1500/);
-    expect(wrongTemplateMessage("patient", detectCsvTemplateFromText(PATIENT_TEMPLATE))).toBeNull();
+    expect(wrongTemplateMessage("cms1500", detectCsvTemplateFromText(usable("eob")))).toMatch(/Bulk Upload → Insurance Reimbursement/);
+    expect(wrongTemplateMessage("eob", detectCsvTemplateFromText(usable("cms1500")))).toMatch(/Bulk Upload → CMS1500/);
   });
 
   it("unknown, duplicate or missing columns refuse the file", () => {

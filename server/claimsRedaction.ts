@@ -19,6 +19,9 @@ type VisitFinancialField = (typeof VISIT_FINANCIAL_FIELDS)[number];
 /** Claim-derived or claim-financial columns as they appear (snake_case) in
  *  audit_logs before_data/after_data for patient and visit_record rows. */
 const RESTRICTED_AUDIT_KEYS = new Set([
+  // P4-P28: which claim file created a patient.
+  "source_kind",
+  "source_file",
   "claims_status",
   "total_insurance_reimbursement",
   "total_patient_due",
@@ -40,10 +43,16 @@ export function redactPatient(patient: Patient, claimsAllowed: boolean): Redacte
   return rest;
 }
 
+/** P4-P28: pending reimbursement lines carry EOB amounts; external id links
+ *  carry billing-system identifiers. Kept in step with listActivityLog's filter. */
+export const CLAIM_AUDIT_ENTITY_TYPES = ["claim_record", "pending_eob_line"] as const;
+export const CLAIM_AUDIT_ACTION_PREFIXES = ["CLAIM", "EOB_LINE", "PATIENT_EXTERNAL_ID"] as const;
+
 /** True for any audit row that describes a claim record itself — including
  *  legacy rows written before entity_type existed (action-only). */
 export function isClaimAuditRow(row: Pick<AuditLogRow, "entityType" | "action">): boolean {
-  return row.entityType === "claim_record" || /^CLAIM/i.test(row.action);
+  return (CLAIM_AUDIT_ENTITY_TYPES as readonly (string | null)[]).includes(row.entityType)
+    || CLAIM_AUDIT_ACTION_PREFIXES.some(p => row.action.toUpperCase().startsWith(p));
 }
 
 function stripRestrictedKeys(data: Record<string, unknown> | null): Record<string, unknown> | null {

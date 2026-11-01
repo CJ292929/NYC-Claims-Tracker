@@ -65,6 +65,11 @@ export function derivePatientAlertPresentation(
   authValidUntil: number | string | Date | null | undefined,
   now?: Date,
 ): PatientAlertPresentation {
+  // P4-P28: no visit rows means no authorization was ever set up (e.g. a patient
+  // created by a claims import), not exhausted sessions. Same as getAuthAlertSummaries.
+  if (visits.length === 0) {
+    return { urgency: 'ok', authExpiryWarning: false, label: 'No Authorization On File', color: 'bg-gray-100 text-gray-700' };
+  }
   const authStatus = resolveAuthStatus(visits);
   const { urgency, authExpiryWarning } = deriveAuthorizationUrgency({
     remaining,

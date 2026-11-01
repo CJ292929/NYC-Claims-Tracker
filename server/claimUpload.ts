@@ -22,8 +22,11 @@ import { tryTemplateExtraction, parseCMS1500, PatientBoundaryError, type Extract
 import { extractClaimsWithAI, detectInsuranceType, KNOWN_INSURER_NAMES, reconcileClaimStatusWithPaymentEvidence, type ExtractionSource } from './aiClaimExtractor';
 import { cms1500GroupsFromClaims, eobGroupsFromClaims, sha256Hex } from './claimImportKeys';
 import { assembleCms1500Pages, extractCms1500PagesWithVision, MAX_SCANNED_PAGES } from './cms1500Vision';
+import { readCms1500FormPages } from './cms1500FormFields';
 import type { Cms1500ImportLine, EobImportLine, ImportDocument, ImportGroup } from '@shared/claimImport';
 import { CLAIM_CSV_TEMPLATES, detectCsvTemplateFromText } from '@shared/claimCsvTemplates';
+import { fuzzyNameMatch } from '@shared/nameMatch';
+import { CLAIM_UPLOAD_MAX_BYTES, CLAIM_UPLOAD_MAX_LABEL } from '@shared/claimImport';
 
 // requireClaimsAccess (server/_core/requireAuth.ts) runs before multer so an
 // unauthenticated request, or one without Claims access (P4-P25: Staff), never
@@ -204,7 +207,9 @@ function enforceFieldBoundary(claims: ExtractedClaim[], uploadType: 'reimburseme
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 16 * 1024 * 1024 }, // 16 MB
+  // P4-P28: the deployed function refuses larger request bodies before this
+  // code runs, so a higher limit here would only hide that failure.
+  limits: { fileSize: CLAIM_UPLOAD_MAX_BYTES },
   fileFilter: (_req, file, cb) => {
     const name = file.originalname.toLowerCase();
     const allowed = [
@@ -357,7 +362,28 @@ async function extractPdfTextLayoutJS(buffer: Buffer): Promise<string> {
     pageTexts.push(pageLines.join('\n'));
   }
 
-  return pageTexts.join('\n\n');
+  return pageTexts.join('\f');
+}
+
+/**
+ * P4-P28: a flat CMS-1500 PDF is parsed one page at a time (pages are separated
+ * by form feeds, as in pdftotext output). parseCMS1500 attributes all of its
+ * input to the first name it finds, so parsing a whole multi-patient file at
+ * once would save every patient's lines under one patient. Pages with the same
+ * name form one group; a page with no name stays its own group for review.
+ */
+function parseCms1500TextPages(text: string): ReturnType<typeof parseCMS1500> {
+  const pages = text.split('\f').filter(p => p.trim());
+  if (pages.length <= 1) return parseCMS1500(text);
+  const groups: ReturnType<typeof parseCMS1500> = [];
+  for (const page of pages) {
+    for (const g of parseCMS1500(page)) {
+      const same = g.patientName !== 'UNKNOWN' ? groups.find(x => x.patientName !== 'UNKNOWN' && fuzzyNameMatch(x.patientName, g.patientName)) : undefined;
+      if (same) same.claims.push(...g.claims);
+      else groups.push({ ...g, claims: [...g.claims] });
+    }
+  }
+  return groups;
 }
 
 /** Page count from pdfjs (works without a canvas backend); null if unreadable. */
@@ -534,6 +560,10 @@ export function registerClaimUploadRoute(app: Express) {
     (req, res, next) => {
       upload.single('file')(req, res, (err) => {
         if (err instanceof multer.MulterError) {
+          if (err.code === 'LIMIT_FILE_SIZE') {
+            res.status(413).json({ error: `This file is larger than ${CLAIM_UPLOAD_MAX_LABEL}, the upload limit. Nothing was read or saved. Split it into smaller PDFs and upload them together.` });
+            return;
+          }
           res.status(400).json({ error: `Upload error: ${err.message}` });
           return;
         }
@@ -577,6 +607,10 @@ export function registerClaimUploadRoute(app: Express) {
           const template = detectCsvTemplateFromText(buffer.toString('utf-8'));
           if (template === 'cms1500' || template === 'eob') {
             res.status(422).json({ error: `This is the ${CLAIM_CSV_TEMPLATES[template].title} CSV template. Nothing was imported. Upload it under Bulk Upload → ${CLAIM_CSV_TEMPLATES[template].title}.` });
+            return;
+          }
+          if (template === 'cms1500_export') {
+            res.status(422).json({ error: 'This is a CMS1500 invoice export. Nothing was imported. Upload it under Bulk Upload → CMS1500 → Import CSV.' });
             return;
           }
           extractedText = extractCsvText(buffer);
@@ -643,6 +677,57 @@ export function registerClaimUploadRoute(app: Express) {
         if (uploadType === 'cms1500') {
           const isPdf = !isXlsx && !isCsv;
           const pageCount = isPdf ? await getPdfPageCount(buffer) : null;
+
+          // P4-P28: a fillable CMS-1500 keeps every value in form fields; its
+          // text layer is only the printed labels, so the text parser below
+          // finds nothing and every page would go to AI. Read the fields
+          // directly (no AI); any page without filled fields, such as a scan
+          // appended to the file, still goes to page vision.
+          const formPages = isPdf ? await readCms1500FormPages(buffer) : [];
+          if (formPages.length > 0 && pageCount) {
+            const formPageNumbers = new Set(formPages.map(p => p.pageNumber));
+            const otherPages = Array.from({ length: pageCount }, (_, i) => i + 1).filter(n => !formPageNumbers.has(n));
+            if (otherPages.length > MAX_SCANNED_PAGES) {
+              res.status(422).json({ error: `This file has ${otherPages.length} scanned pages. Split it into files of at most ${MAX_SCANNED_PAGES} scanned pages and upload them together.` });
+              return;
+            }
+            let pages = formPages;
+            let missing: number[] = [];
+            let otherMethod = '';
+            if (otherPages.length > 0) {
+              try {
+                console.log(`[ClaimUpload] Stage 5/7 — CMS1500 page vision for ${otherPages.length} page(s) without form values`);
+                const read = await extractCms1500PagesWithVision(buffer, originalname, pageCount, otherPages);
+                pages = [...formPages, ...read.pages];
+                missing = read.missingPages;
+                otherMethod = `, page vision for ${read.pages.length}/${otherPages.length} other page(s)`;
+              } catch (visionError) {
+                console.error('[ClaimUpload] CMS1500 page vision failed for pages without form values:', visionError instanceof Error ? visionError.message : visionError);
+                missing = otherPages;
+              }
+            }
+            const assembled = assembleCms1500Pages(pages, pageCount, missing);
+            const lineCount = assembled.groups.reduce((n, g) => n + g.lines.length, 0);
+            if (lineCount === 0) {
+              res.status(422).json({ error: 'This fillable CMS1500 has no service lines filled in (Box 24 is empty). Nothing was saved.' });
+              return;
+            }
+            console.log(`[ClaimUpload] Stage 7/7 — Review pending: ${lineCount} CMS1500 line(s) from form fields on ${formPages.length}/${pageCount} page(s)`);
+            res.json({
+              claims: [],
+              patientGroups: null,
+              extractedLength: extractedText.length,
+              templateUsed: 'CMS1500 (fillable form fields)',
+              uploadType: 'cms1500',
+              importDocument: buildImportDocument({
+                kind: 'cms1500', sha256, fileName: originalname, pageCount,
+                extractionMethod: `CMS1500 form fields (${formPages.length}/${pageCount} pages)${otherMethod}`,
+                groups: assembled.groups, warnings: assembled.warnings,
+              }),
+            });
+            return;
+          }
+
           // For CMS1500, re-extract using pdftotext -layout for better form field capture
           let cms1500Text = extractedText;
           let cms1500TextFallback = false;
@@ -673,7 +758,7 @@ export function registerClaimUploadRoute(app: Express) {
           // Text-layer CMS1500s keep the existing regex template path.
           if (!mixedPages && hasTextLayer(cms1500Text || extractedText)) {
             console.log('[ClaimUpload] Stage 4/7 — Regex template parsing (CMS1500)...');
-            const patientGroups = parseCMS1500(cms1500Text);
+            const patientGroups = parseCms1500TextPages(cms1500Text);
             const flatClaims = patientGroups.flatMap(g => g.claims);
             if (flatClaims.some(c => c.cptLines.length > 0)) {
               if (hasMissingFields(flatClaims, CMS1500_CLAIM_FIELDS_TO_BACKFILL, CMS1500_LINE_FIELDS_TO_BACKFILL)) {

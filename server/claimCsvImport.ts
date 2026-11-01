@@ -29,6 +29,17 @@
  * apply_eob_line_with_audit (CMS1500-first, per-patient lock, atomic
  * row + audit). A claim with any invalid row is not imported at all (no
  * half-claims); the other claims in the file still are.
+ *
+ * P4-P28: the billing system's invoice export (server/cms1500ExportCsv.ts) is
+ * accepted under CMS1500 too. It goes through this same path as one claim per
+ * invoice, with document identity from the invoice number:
+ *   document  sha256("claims-csv:v1:cms1500:EXPORT:<INVOICE #>")
+ *   line key  "<groupKey>:csv.<code>.<occurrence>"
+ * so a re-sorted or re-downloaded export resolves to the same lines, and two
+ * identical services in one invoice stay two lines. Unlike a template row, an
+ * export line can have gaps (no code printed, several dates listed); those are
+ * flagged, and the reviewer's values for exactly those fields arrive as
+ * lineEdits and are validated here.
  */
 import Papa from "papaparse";
 import { z } from "zod";
@@ -36,10 +47,12 @@ import {
   CLAIM_CSV_MAX_BYTES,
   CLAIM_CSV_MAX_ROWS,
   CLAIM_CSV_TEMPLATES,
+  CMS1500_EXPORT_MAPPING,
   EXAMPLE_ID_PREFIX,
   detectCsvTemplate,
   normalizeHeader,
   parseCsvCell,
+  parseCsvDate,
   stripLeadingCommentLines,
   wrongTemplateMessage,
   type ClaimCsvKind,
@@ -51,25 +64,28 @@ import {
   type EobImportLine,
   type ImportDocument,
   type ImportGroup,
+  type ImportPatientIdentity,
   type UnresolvedClaimTotal,
 } from "@shared/claimImport";
 import { fuzzyNameMatch } from "@shared/nameMatch";
 import { randomUUID } from "crypto";
 import { groupKeyFor, sha256Hex } from "./claimImportKeys";
+import { BILLING_EXPORT_SOURCE_SYSTEM, exportIdentityConflicts, parseCms1500Export } from "./cms1500ExportCsv";
 import {
   cms1500Decision,
   commitClaimImport,
+  createPatientRequest,
   eobDecision,
   importCommitInput,
   importPreviewInput,
   previewClaimImport,
-  resolveGroupPatient,
+  resolveImportPatient,
   type ClaimImportHints,
   type CommitGroupResult,
   type CommitLineResult,
   type PreviewGroup,
 } from "./claimImport";
-import { findClaimImportDocumentId, getAllPatients } from "./db";
+import { findClaimImportDocumentId, getAllPatients, listPatientExternalIds, type PatientExternalIdRow } from "./db";
 import type { ActorContext } from "./actorIdentity";
 
 // ─── Identity ────────────────────────────────────────────────────────────────
@@ -116,6 +132,10 @@ export interface CsvClaim {
   refs: Record<string, CmsRef>;
   warnings: string[];
   unresolvedClaimTotals: UnresolvedClaimTotal[];
+  /** P4-P28: invoice export only. Evidence beyond the name, the payer text, and each line's date choices. */
+  identity?: ImportPatientIdentity | null;
+  payerLabel?: string | null;
+  lineDateOptions?: Record<string, string[]>;
 }
 
 export interface ParsedClaimCsv {
@@ -127,12 +147,67 @@ export interface ParsedClaimCsv {
   /** Claims left out because one of their rows has an error. */
   blockedClaimIds: string[];
   dataRowCount: number;
+  /** P4-P28: the file is the billing system's invoice export. */
+  isExport?: boolean;
+  /** P4-P28: file-level notes shown with the review. */
+  fileWarnings?: string[];
 }
 
 const refused = (kind: ClaimCsvKind, templateError: string): ParsedClaimCsv =>
   ({ kind, templateError, rowErrors: [], claims: [], blockedClaimIds: [], dataRowCount: 0 });
 
 const normName = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+
+/** The invoice export as the same claim shape a template file produces. */
+function parseExportFile(body: string, skippedLines: number): ParsedClaimCsv {
+  const e = parseCms1500Export(body, skippedLines, CLAIM_CSV_MAX_ROWS);
+  if (e.templateError) return refused("cms1500", e.templateError);
+  const conflicts = exportIdentityConflicts(e.invoices);
+  const claims: CsvClaim[] = e.invoices.map(inv => {
+    const claimId = `EXPORT:${inv.invoiceId}`;
+    const groupKey = csvGroupKey("cms1500", claimId);
+    const lineDateOptions: Record<string, string[]> = {};
+    const lines = inv.services.map((s): Cms1500ImportLine => {
+      const sourceLineKey = csvLineKey("cms1500", claimId, s.lineId);
+      if (inv.dateOfService == null) lineDateOptions[sourceLineKey] = inv.serviceDates;
+      return {
+        sourceLineKey, page: null, slot: null,
+        dateOfService: inv.dateOfService,
+        placeOfService: null,
+        cptCodes: s.cptCode,
+        modifier: s.modifiers,
+        unitsBilled: s.units,
+        diagnosisPointer: null,
+        diagnosisCodes: s.diagnosisCodes,
+        claimSubmittedDate: null,
+        insuranceBilled: null,
+        visitNumber: null,
+        lineChargeForValidation: null,
+        unreadable: [...(inv.dateOfService == null ? ["dateOfService"] : []), ...s.unreadable],
+        notes: s.notes,
+        sourceRow: inv.row,
+      };
+    });
+    return {
+      kind: "cms1500" as const, claimId: inv.invoiceId, sha256: csvDocumentSha256("cms1500", claimId), groupKey,
+      patientName: inv.patientName ?? "", patientId: null, rows: [inv.row], lines, periods: {}, refs: {},
+      warnings: inv.warnings, unresolvedClaimTotals: [],
+      identity: inv.externalPatientId || inv.birthDate || conflicts.has(inv.invoiceId)
+        ? { sourceSystem: BILLING_EXPORT_SOURCE_SYSTEM, externalId: inv.externalPatientId, strength: "patient", birthDate: inv.birthDate, conflict: conflicts.get(inv.invoiceId) ?? null }
+        : null,
+      payerLabel: inv.payerLabel,
+      lineDateOptions,
+    };
+  });
+  return {
+    kind: "cms1500", templateError: null, rowErrors: e.rowErrors, claims, blockedClaimIds: e.blockedInvoiceIds.map(id => `EXPORT:${id}`), dataRowCount: e.dataRowCount,
+    isExport: true,
+    fileWarnings: [
+      "This export has no modifiers or place of service, so those stay blank on every line. Amounts are not imported from it.",
+      ...(e.unknownColumns.length > 0 ? [`Columns not read: ${e.unknownColumns.join(", ")}.`] : []),
+    ],
+  };
+}
 
 export function parseClaimCsv(kind: ClaimCsvKind, text: string): ParsedClaimCsv {
   const template = CLAIM_CSV_TEMPLATES[kind];
@@ -144,8 +219,10 @@ export function parseClaimCsv(kind: ClaimCsvKind, text: string): ParsedClaimCsv 
   if (table.length === 0 || table[0].every(c => !c.trim())) return refused(kind, `The file is empty. Download ${template.fileName} and add one row per line.`);
 
   const headers = table[0].map(normalizeHeader);
-  const wrong = wrongTemplateMessage(kind, detectCsvTemplate(headers));
+  const detected = detectCsvTemplate(headers);
+  const wrong = wrongTemplateMessage(kind, detected);
   if (wrong) return refused(kind, wrong);
+  if (detected === "cms1500_export") return parseExportFile(body, skippedLines);
 
   const known = new Map(template.fields.map(f => [f.header, f]));
   const named = headers.filter(Boolean);
@@ -314,21 +391,24 @@ export function parseClaimCsv(kind: ClaimCsvKind, text: string): ParsedClaimCsv 
 
 type Roster = Array<{ id: string; name: string }>;
 
+const claimName = (claim: CsvClaim): string | null => claim.patientName || null;
+
 /** A patient_id in the file must be a real patient whose name matches patient_name. */
 function checkFilePatient(claim: CsvClaim, roster: Roster): string | null {
   if (!claim.patientId) return null;
   const p = roster.find(r => r.id === claim.patientId);
   if (!p) return `patient_id ${claim.patientId} is not a patient on the dashboard. Leave it blank to match by name.`;
   if (!fuzzyNameMatch(claim.patientName, p.name)) return `patient_id ${claim.patientId} belongs to ${p.name}, not ${claim.patientName}.`;
-  const resolved = resolveGroupPatient({ patientName: claim.patientName, requestedPatientId: claim.patientId, contextPatient: null, allPatients: roster });
+  const resolved = resolveImportPatient({ patientName: claim.patientName, identity: null, requestedPatientId: claim.patientId, createRequest: null, allPatients: roster, externalIds: [] });
   if (resolved.patientId && resolved.patientId !== claim.patientId) return `patient_name ${claim.patientName} matches a different patient than patient_id ${claim.patientId}.`;
   return null;
 }
 
 async function loadAndCheck(kind: ClaimCsvKind, csvText: string) {
   const parsed = parseClaimCsv(kind, csvText);
-  if (parsed.templateError) return { parsed, roster: [] as Roster, claims: [] as CsvClaim[] };
+  if (parsed.templateError) return { parsed, roster: [] as Roster, externalIds: [] as PatientExternalIdRow[], claims: [] as CsvClaim[] };
   const roster = (await getAllPatients()).map(p => ({ id: p.id, name: p.name }));
+  const externalIds = await listPatientExternalIds();
   const claims: CsvClaim[] = [];
   for (const c of parsed.claims) {
     const problem = checkFilePatient(c, roster);
@@ -339,12 +419,12 @@ async function loadAndCheck(kind: ClaimCsvKind, csvText: string) {
       claims.push(c);
     }
   }
-  return { parsed, roster, claims };
+  return { parsed, roster, externalIds, claims };
 }
 
 /** Server-only hints for one claim: the file's periods and (EOB) CMS1500 references. */
-async function hintsFor(claim: CsvClaim, roster: Roster, cmsDocIds: Map<string, string | null>): Promise<ClaimImportHints> {
-  if (claim.kind === "cms1500") return { filePeriods: claim.periods, roster };
+async function hintsFor(claim: CsvClaim, roster: Roster, externalIds: PatientExternalIdRow[], cmsDocIds: Map<string, string | null>): Promise<ClaimImportHints> {
+  if (claim.kind === "cms1500") return { filePeriods: claim.periods, roster, externalIds, fileIdentity: claim.identity ?? null };
   const eobTargets: Record<string, EobCsvTarget> = {};
   for (const line of claim.lines) {
     const ref = claim.refs[line.sourceLineKey];
@@ -352,12 +432,61 @@ async function hintsFor(claim: CsvClaim, roster: Roster, cmsDocIds: Map<string, 
     if (ref) {
       const sha = csvDocumentSha256("cms1500", ref.claimId);
       if (!cmsDocIds.has(sha)) cmsDocIds.set(sha, await findClaimImportDocumentId("cms1500", sha));
-      cms1500Ref = { documentId: cmsDocIds.get(sha) ?? null, lineKey: csvLineKey("cms1500", ref.claimId, ref.lineId), label: `${ref.claimId} / line ${ref.lineId}` };
+      cms1500Ref = { documentId: cmsDocIds.get(sha) ?? null, lineKey: csvLineKey("cms1500", ref.claimId, ref.lineId), label: `${ref.claimId} / line ${ref.lineId}`, sha256: sha };
     }
     // Every CSV reimbursement line gets a target entry, so commit always re-validates its chosen row.
     eobTargets[line.sourceLineKey] = { cms1500Ref, authPeriod: claim.periods[line.sourceLineKey] ?? null };
   }
-  return { eobTargets, roster };
+  return { eobTargets, roster, externalIds };
+}
+
+const csvLineEdits = z.object({
+  dateOfService: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  cptCodes: z.string().trim().max(20).nullable().optional(),
+  unitsBilled: z.number().int().min(1).max(999).nullable().optional(),
+  diagnosisCodes: z.string().trim().max(200).nullable().optional(),
+});
+type CsvLineEdits = z.infer<typeof csvLineEdits>;
+const lineEditsInput = z.record(groupKey_(), csvLineEdits);
+
+function groupKey_() {
+  return z.string().regex(CLAIM_IMPORT_KEY_RE);
+}
+
+const CPT_EDIT_RE = /^(?:\d{5}|\d{4}[A-Z]|[A-Z]\d{4})$/;
+const ICD10_EDIT_RE = /^[A-Z]\d[0-9A-Z](?:\.[0-9A-Z]{1,4})?$/;
+
+/**
+ * P4-P28: a reviewer's values for an export line's flagged fields. Only a
+ * flagged field can change, and an invalid value is ignored, so the field stays
+ * flagged. A date must be one the file itself lists when it lists any.
+ */
+export function applyCsvLineEdits(line: Cms1500ImportLine, edits: CsvLineEdits | undefined, dateOptions: string[] | undefined): Cms1500ImportLine {
+  if (!edits || line.unreadable.length === 0) return line;
+  const out: Cms1500ImportLine = { ...line, unreadable: [...line.unreadable] };
+  const clear = (field: string) => { out.unreadable = out.unreadable.filter(f => f !== field); };
+  if (line.unreadable.includes("dateOfService") && edits.dateOfService) {
+    const parsed = parseCsvDateStrict(edits.dateOfService);
+    if (parsed && (!dateOptions || dateOptions.length === 0 || dateOptions.includes(parsed))) { out.dateOfService = parsed; clear("dateOfService"); }
+  }
+  if (line.unreadable.includes("cptCodes") && edits.cptCodes) {
+    const c = edits.cptCodes.toUpperCase();
+    if (CPT_EDIT_RE.test(c)) { out.cptCodes = c; clear("cptCodes"); }
+  }
+  if (line.unreadable.includes("unitsBilled") && edits.unitsBilled != null) {
+    out.unitsBilled = edits.unitsBilled;
+    clear("unitsBilled");
+  }
+  if (line.unreadable.includes("diagnosisCodes") && edits.diagnosisCodes) {
+    const codes = edits.diagnosisCodes.toUpperCase().split(/[\s,;]+/).filter(Boolean);
+    if (codes.length > 0 && codes.length <= 12 && codes.every(c => ICD10_EDIT_RE.test(c))) { out.diagnosisCodes = codes.join(", "); clear("diagnosisCodes"); }
+  }
+  return out;
+}
+
+function parseCsvDateStrict(v: string): string | null {
+  const r = parseCsvDate(v);
+  return r.ok ? r.value : null;
 }
 
 function lineInput(kind: ClaimCsvKind, l: Cms1500ImportLine | EobImportLine) {
@@ -366,7 +495,7 @@ function lineInput(kind: ClaimCsvKind, l: Cms1500ImportLine | EobImportLine) {
     return {
       sourceLineKey: c.sourceLineKey, dateOfService: c.dateOfService, cptCodes: c.cptCodes, modifier: c.modifier,
       unitsBilled: c.unitsBilled, placeOfService: c.placeOfService, diagnosisCodes: c.diagnosisCodes,
-      claimSubmittedDate: c.claimSubmittedDate, insuranceBilled: c.insuranceBilled, visitNumber: c.visitNumber ?? null, unreadable: [],
+      claimSubmittedDate: c.claimSubmittedDate, insuranceBilled: c.insuranceBilled, visitNumber: c.visitNumber ?? null, unreadable: c.unreadable,
     };
   }
   const e = l as EobImportLine;
@@ -379,14 +508,15 @@ function lineInput(kind: ClaimCsvKind, l: Cms1500ImportLine | EobImportLine) {
 }
 
 /** The review document the client renders: one group per claim. Its sha256 is display-only. */
-function toImportDocument(kind: ClaimCsvKind, fileName: string, csvText: string, claims: CsvClaim[]): ImportDocument {
+function toImportDocument(kind: ClaimCsvKind, fileName: string, csvText: string, claims: CsvClaim[], parsed: ParsedClaimCsv): ImportDocument {
   return {
     kind,
     sha256: sha256Hex(Buffer.from(csvText, "utf8")),
     fileName,
     pageCount: null,
-    extractionMethod: `CSV template (${CLAIM_CSV_TEMPLATES[kind].fileName})`,
-    warnings: [],
+    extractionMethod: parsed.isExport ? "CMS1500 invoice export (CSV)" : `CSV template (${CLAIM_CSV_TEMPLATES[kind].fileName})`,
+    warnings: parsed.fileWarnings ?? [],
+    columnMapping: parsed.isExport ? CMS1500_EXPORT_MAPPING : undefined,
     groups: claims.map((c): ImportGroup => ({
       groupKey: c.groupKey,
       patientName: c.patientName,
@@ -395,6 +525,9 @@ function toImportDocument(kind: ClaimCsvKind, fileName: string, csvText: string,
       lines: c.lines,
       warnings: c.warnings,
       unresolvedClaimTotals: c.unresolvedClaimTotals,
+      patientIdentity: c.identity ?? null,
+      sourcePayerLabel: c.payerLabel ?? null,
+      lineDateOptions: c.lineDateOptions,
     })),
   };
 }
@@ -412,6 +545,9 @@ export const csvImportPreviewInput = z.object({
   ...csvFileInput,
   /** Reviewer's patient choice per claim (groupKey) — only used when the file has no patient_id. */
   patientChoices: z.record(groupKey, z.string().uuid()).optional(),
+  /** P4-P28: reviewer's request to create the patient, per claim. */
+  patientCreates: z.record(groupKey, createPatientRequest).optional(),
+  lineEdits: lineEditsInput.optional(),
 });
 
 export interface CsvPreviewResult {
@@ -424,7 +560,7 @@ export interface CsvPreviewResult {
 }
 
 export async function previewClaimCsvImport(input: z.infer<typeof csvImportPreviewInput>): Promise<CsvPreviewResult> {
-  const { parsed, roster, claims } = await loadAndCheck(input.kind, input.csvText);
+  const { parsed, roster, externalIds, claims } = await loadAndCheck(input.kind, input.csvText);
   const base = { templateError: parsed.templateError, rowErrors: parsed.rowErrors, blockedClaimIds: parsed.blockedClaimIds, dataRowCount: parsed.dataRowCount };
   if (parsed.templateError) return { ...base, document: null, preview: null };
 
@@ -437,15 +573,16 @@ export async function previewClaimCsvImport(input: z.infer<typeof csvImportPrevi
       contextPatientId: null,
       groups: [{
         groupKey: c.groupKey,
-        patientName: c.patientName,
+        patientName: claimName(c),
         patientId: c.patientId ?? input.patientChoices?.[c.groupKey] ?? null,
-        lines: c.lines.map(l => lineInput(input.kind, l)),
+        createPatient: c.patientId ? null : input.patientCreates?.[c.groupKey] ?? null,
+        lines: c.lines.map(l => lineInput(input.kind, c.lineDateOptions ? applyCsvLineEdits(l as Cms1500ImportLine, input.lineEdits?.[l.sourceLineKey], c.lineDateOptions[l.sourceLineKey]) : l)),
       }],
     });
-    const r = await previewClaimImport(request, await hintsFor(c, roster, cmsDocIds));
+    const r = await previewClaimImport(request, await hintsFor(c, roster, externalIds, cmsDocIds));
     groups.push(...r.groups);
   }
-  return { ...base, document: toImportDocument(input.kind, input.fileName, input.csvText, claims), preview: { documentId: null, groups } };
+  return { ...base, document: toImportDocument(input.kind, input.fileName, input.csvText, claims, parsed), preview: { documentId: null, groups } };
 }
 
 // ─── Commit ─────────────────────────────────────────────────────────────────
@@ -454,7 +591,8 @@ const commitGroup = <D extends z.ZodTypeAny>(decision: D) => z.object({
   groupKey,
   patientId: z.string().uuid().nullable().optional(),
   patientConfirmed: z.boolean().optional(),
-  lines: z.array(z.object({ sourceLineKey: groupKey, decision })).min(1).max(500),
+  createPatient: createPatientRequest.nullable().optional(),
+  lines: z.array(z.object({ sourceLineKey: groupKey, decision, edits: csvLineEdits.optional() })).min(1).max(500),
 });
 
 export const csvImportCommitInput = z.discriminatedUnion("kind", [
@@ -466,7 +604,7 @@ export const csvImportCommitInput = z.discriminatedUnion("kind", [
 export class CsvTemplateError extends Error {}
 
 export async function commitClaimCsvImport(input: z.infer<typeof csvImportCommitInput>, actor: ActorContext): Promise<{ importBatchId: string; groups: CommitGroupResult[] }> {
-  const { parsed, roster, claims } = await loadAndCheck(input.kind, input.csvText);
+  const { parsed, roster, externalIds, claims } = await loadAndCheck(input.kind, input.csvText);
   if (parsed.templateError) throw new CsvTemplateError(parsed.templateError);
   const byKey = new Map(claims.map(c => [c.groupKey, c]));
   const blocked = new Set(parsed.blockedClaimIds.map(id => csvGroupKey(input.kind, id)));
@@ -492,6 +630,7 @@ export async function commitClaimCsvImport(input: z.infer<typeof csvImportCommit
 
     let committed: CommitLineResult[] = [];
     let patientId: string | null = null;
+    let patientOutcome: CommitGroupResult["patientOutcome"] = null;
     if (present.length > 0) {
       const request = importCommitInput.parse({
         kind: input.kind,
@@ -500,21 +639,28 @@ export async function commitClaimCsvImport(input: z.infer<typeof csvImportCommit
         contextAuthPeriod: null,
         groups: [{
           groupKey: claim.groupKey,
-          patientName: claim.patientName,
+          patientName: claimName(claim),
           // A patient_id in the file wins over a reviewer choice; confirmation rules still apply.
           patientId: claim.patientId ?? g.patientId ?? null,
           patientConfirmed: g.patientConfirmed,
+          createPatient: claim.patientId ? null : g.createPatient ?? null,
           allLineKeys: claim.lines.map(l => l.sourceLineKey),
-          lines: present.map(l => ({ ...lineInput(input.kind, fileLines.get(l.sourceLineKey)!), decision: l.decision })),
+          lines: present.map(l => {
+            const fileLine = fileLines.get(l.sourceLineKey)!;
+            const line = claim.lineDateOptions ? applyCsvLineEdits(fileLine as Cms1500ImportLine, (l as { edits?: CsvLineEdits }).edits, claim.lineDateOptions[l.sourceLineKey]) : fileLine;
+            return { ...lineInput(input.kind, line), decision: l.decision };
+          }),
         }],
       });
-      const r = await commitClaimImport(request, actor, { ...(await hintsFor(claim, roster, cmsDocIds)), importBatchId });
+      const r = await commitClaimImport(request, actor, { ...(await hintsFor(claim, roster, externalIds, cmsDocIds)), importBatchId });
       committed = r.groups[0].lines;
       patientId = r.groups[0].patientId;
+      patientOutcome = r.groups[0].patientOutcome ?? null;
     }
     results.push({
       groupKey: g.groupKey,
       patientId,
+      patientOutcome,
       lines: [...committed, ...missing.map(k => notInFile(k, "This line is not in the file any more."))],
     });
   }

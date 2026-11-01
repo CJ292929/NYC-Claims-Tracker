@@ -62,7 +62,10 @@ describe("initialDecision", () => {
   it("applies an EOB line only to its single matched target; selection and replacement wait for the reviewer", () => {
     expect(initialDecision({ kind: "eob", mode: "bulk", contextAuthPeriod: null, line: { ...preview({ status: "matched", targetClaimId: "t1" }), kind: "eob" } }))
       .toEqual({ action: "apply", claimRecordId: "t1" });
-    for (const status of ["needs_selection", "needs_confirmation", "cms1500_required", "invalid"]) {
+    // P4-P28: a line with no CMS1500 yet is kept pending by Save.
+    expect(initialDecision({ kind: "eob", mode: "bulk", contextAuthPeriod: null, line: { ...preview({ status: "cms1500_required" }), kind: "eob" } }))
+      .toEqual({ action: "hold" });
+    for (const status of ["needs_selection", "needs_confirmation", "invalid"]) {
       expect(initialDecision({ kind: "eob", mode: "bulk", contextAuthPeriod: null, line: { ...preview({ status, targetClaimId: "t1" }), kind: "eob" } })).toBeNull();
     }
   });
@@ -185,14 +188,25 @@ describe("P4-P26 CSV requests", () => {
     expect(batch).toEqual({
       ...source,
       groups: [{
-        groupKey: "g0", patientId: "11111111-1111-4111-8111-111111111111", patientConfirmed: true,
+        groupKey: "g0", patientId: "11111111-1111-4111-8111-111111111111", patientConfirmed: true, createPatient: null,
         lines: [
           { sourceLineKey: "g0:csv.0", decision: { action: "create", authPeriod: 1, periodSource: "resolved" } },
           { sourceLineKey: "g0:csv.1", decision: { action: "create", authPeriod: 1, periodSource: "resolved" } },
         ],
       }],
     });
-    expect(buildCsvPreviewInput({ source, state })).toEqual({ ...source, patientChoices: { g0: "11111111-1111-4111-8111-111111111111" } });
+    expect(buildCsvPreviewInput({ source, state })).toEqual({ ...source, patientChoices: { g0: "11111111-1111-4111-8111-111111111111" }, patientCreates: {}, lineEdits: {} });
+  });
+
+  it("P4-P28: sends a new patient request and a reviewer's values for flagged fields, for preview and save alike", () => {
+    const state = withGroups(1, 1);
+    state.patientCreate = { g0: { name: "NEW, PERSON" } };
+    state.edits = { "g0:csv.0": { cptCodes: "97110" } };
+    expect(buildCsvCommitInputs({ source, state })[0].groups[0]).toMatchObject({
+      createPatient: { name: "NEW, PERSON" },
+      lines: [{ sourceLineKey: "g0:csv.0", edits: { cptCodes: "97110" } }],
+    });
+    expect(buildCsvPreviewInput({ source, state })).toMatchObject({ patientCreates: { g0: { name: "NEW, PERSON" } }, lineEdits: { "g0:csv.0": { cptCodes: "97110" } } });
   });
 
   it("splits large files into bounded requests without splitting a claim, and never resends done lines", () => {

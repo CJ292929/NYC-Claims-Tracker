@@ -40,6 +40,32 @@ export const CLAIM_IMPORT_STATUSES = ["submitted", "approved", "pending", "denie
 export type ClaimImportStatus = (typeof CLAIM_IMPORT_STATUSES)[number];
 export const SHA256_RE = /^[0-9a-f]{64}$/;
 
+/** P4-P28: largest single upload. Vercel refuses a request body over 4.5 MB before the app sees it. */
+export const CLAIM_UPLOAD_MAX_BYTES = 4_400_000;
+export const CLAIM_UPLOAD_MAX_LABEL = "4.4 MB";
+
+// ─── P4-P28: patient identity from an import ────────────────────────────────
+
+/** External id namespace for CMS-1500 Box 26. */
+export const CMS1500_BOX26_SOURCE_SYSTEM = "cms1500_box26";
+
+/**
+ * What a file says about who a group is, besides the name.
+ *   strength "patient": a source system's stable patient id. Decisive once a
+ *     reviewer has linked it: later imports match by id alone.
+ *   strength "account": a form's account number, which may be per claim. Only
+ *     supports a name match; it never overrides a different name.
+ * birthDate is evidence only and is never written to the patient.
+ */
+export interface ImportPatientIdentity {
+  sourceSystem: string;
+  externalId: string | null;
+  strength: "patient" | "account";
+  birthDate: string | null;
+  /** The file contradicts itself about this person; always reviewed. */
+  conflict?: string | null;
+}
+
 /** One CMS1500 Box 24 service line, as extracted. */
 export interface Cms1500ImportLine {
   sourceLineKey: string;
@@ -110,6 +136,12 @@ export interface ImportGroup<L extends ImportLine = ImportLine> {
   lines: L[];
   warnings: string[];
   unresolvedClaimTotals: UnresolvedClaimTotal[];
+  /** P4-P28: identity evidence from the file, when it has any. */
+  patientIdentity?: ImportPatientIdentity | null;
+  /** P4-P28: payer text from the file, shown to the reviewer only; never saved. */
+  sourcePayerLabel?: string | null;
+  /** P4-P28: date choices for a line whose file lists several, by sourceLineKey. */
+  lineDateOptions?: Record<string, string[]>;
 }
 
 export interface ImportDocument<L extends ImportLine = ImportLine> {
@@ -127,6 +159,8 @@ export interface ImportDocument<L extends ImportLine = ImportLine> {
    * never sent back to the server.
    */
   extractionFallback?: string | null;
+  /** P4-P28: how an external export's columns were used, shown in review. */
+  columnMapping?: Array<{ column: string; usedAs: string }>;
 }
 
 // ─── Authorization period ────────────────────────────────────────────────────
@@ -392,7 +426,7 @@ export function classifyEobLine(params: {
  * re-validates the reviewer's chosen target on commit.
  */
 export interface EobCsvTarget {
-  cms1500Ref?: { documentId: string | null; lineKey: string; label: string } | null;
+  cms1500Ref?: { documentId: string | null; lineKey: string; label: string; sha256?: string } | null;
   authPeriod?: number | null;
 }
 

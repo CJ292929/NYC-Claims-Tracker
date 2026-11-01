@@ -136,22 +136,28 @@ export function cms1500GroupsFromClaims(groups: AnyGroup[]): ImportGroup<Cms1500
   const identities = groupIdentities("cms1500", groups);
   return groups.map((g, gi) => {
     const groupKey = groupKeyFor(identities[gi]);
-    const lines = g.claims.flatMap(flattenLines).map(l => ({
-      page: null,
-      slot: null,
-      dateOfService: toIsoDate(l.dateOfService),
-      placeOfService: str(l.placeOfService),
-      cptCodes: str(l.cptCodes),
-      modifier: str(l.modifier),
-      unitsBilled: num(l.unitsBilled),
-      diagnosisPointer: str(l.diagnosisPointer),
-      diagnosisCodes: str(l.diagnosisCodes),
-      claimSubmittedDate: toIsoDate(l.claimSubmittedDate),
-      insuranceBilled: str(l.insuranceBilled),
-      lineChargeForValidation: num(l.chargeAmount),
-      unreadable: [] as string[],
-      notes: str(l.notes),
-    }));
+    const lines = g.claims.flatMap(flattenLines).map(l => {
+      // P4-P28: a misread units cell (0, 1.5) becomes a flagged blank for the
+      // reviewer, instead of failing validation for the whole file.
+      const rawUnits = num(l.unitsBilled);
+      const unitsBilled = rawUnits != null && Number.isInteger(rawUnits) && rawUnits >= 1 && rawUnits <= 999 ? rawUnits : null;
+      return {
+        page: null,
+        slot: null,
+        dateOfService: toIsoDate(l.dateOfService),
+        placeOfService: str(l.placeOfService),
+        cptCodes: str(l.cptCodes),
+        modifier: str(l.modifier),
+        unitsBilled,
+        diagnosisPointer: str(l.diagnosisPointer),
+        diagnosisCodes: str(l.diagnosisCodes),
+        claimSubmittedDate: toIsoDate(l.claimSubmittedDate),
+        insuranceBilled: str(l.insuranceBilled),
+        lineChargeForValidation: num(l.chargeAmount),
+        unreadable: rawUnits != null && unitsBilled == null ? ["unitsBilled"] : ([] as string[]),
+        notes: str(l.notes),
+      };
+    });
     return {
       groupKey,
       patientName: str(g.patientName) && g.patientName !== "UNKNOWN" ? str(g.patientName) : null,

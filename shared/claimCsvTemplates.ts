@@ -29,7 +29,27 @@
 import Papa from "papaparse";
 
 export type ClaimCsvKind = "cms1500" | "eob";
-export type DetectedCsvTemplate = ClaimCsvKind | "patient" | "unknown";
+export type DetectedCsvTemplate = ClaimCsvKind | "cms1500_export" | "patient" | "unknown";
+
+/** P4-P28: the billing system's invoice export, read by server/cms1500ExportCsv.ts (normalized headers). */
+export const CMS1500_EXPORT_HEADERS = [
+  "invoice date(s)", "service date(s)", "patient_guid", "patient", "staff member", "invoice #", "claim", "adjuster",
+  "adjuster phone", "adjuster email", "description", "personal health number", "birth date", "date of injury",
+  "employer", "total", "balance",
+] as const;
+/** Without these a service line cannot be built at all. patient_guid and birth date only strengthen identity. */
+export const CMS1500_EXPORT_REQUIRED = ["service date(s)", "patient", "invoice #", "description"] as const;
+/** How each export column is used, shown in the review screen. */
+export const CMS1500_EXPORT_MAPPING: Array<{ column: string; usedAs: string }> = [
+  { column: "Invoice #", usedAs: "Import identity (kept as text)" },
+  { column: "Service Date(s)", usedAs: "Date of service" },
+  { column: "Description", usedAs: "CPT code, units, and that service's diagnosis codes" },
+  { column: "Patient", usedAs: "Patient name" },
+  { column: "patient_guid", usedAs: "Billing system's patient ID (not a dashboard ID)" },
+  { column: "Birth Date", usedAs: "Identity check only, not added to the patient record" },
+  { column: "Total, Balance", usedAs: "Not imported. Never treated as a payment or reimbursement" },
+  { column: "Invoice Date(s), Staff Member, Claim, Adjuster (3 columns), Personal Health Number, Date of Injury, Employer", usedAs: "Not imported" },
+];
 
 /** Mirrors the claim_status values the import RPC accepts (shared/claimImport.ts CLAIM_IMPORT_STATUSES). */
 export const CLAIM_CSV_STATUS_VALUES = ["submitted", "approved", "pending", "denied", "pended", "rejected", "resubmitted", "needs_review"] as const;
@@ -230,6 +250,7 @@ export function detectCsvTemplate(headers: string[]): DetectedCsvTemplate {
   const h = new Set(headers.map(normalizeHeader));
   if (h.has("reimbursement_id") || h.has("reimbursement_line_id")) return "eob";
   if (h.has("cms1500_claim_id") || h.has("cms1500_line_id")) return "cms1500";
+  if (h.has("description") && (h.has("invoice #") || h.has("patient_guid") || h.has("service date(s)"))) return "cms1500_export";
   if (h.has("patient name") || h.has("authorized sessions")) return "patient";
   return "unknown";
 }
@@ -238,24 +259,22 @@ export function detectCsvTemplateFromText(text: string): DetectedCsvTemplate {
   return detectCsvTemplate(readCsvHeaders(text));
 }
 
-const UPLOAD_LOCATION: Record<DetectedCsvTemplate, string> = {
-  cms1500: "Bulk Upload → CMS1500",
-  eob: "Bulk Upload → Insurance Reimbursement",
-  patient: "Bulk Upload → Patient Data",
-  unknown: "",
-};
-
-/** The message for a file uploaded under the wrong option, or null when it is the expected template. */
-export function wrongTemplateMessage(expected: DetectedCsvTemplate, detected: DetectedCsvTemplate): string | null {
+/** The message for a file uploaded under the wrong option, or null when it can be read there. */
+export function wrongTemplateMessage(expected: ClaimCsvKind, detected: DetectedCsvTemplate): string | null {
   if (detected === expected) return null;
-  const expectedName = expected === "patient" ? "Patient Data" : CLAIM_CSV_TEMPLATES[expected as ClaimCsvKind]?.title ?? expected;
-  if (detected === "unknown") {
-    return expected === "patient"
-      ? null
-      : `This file is not the ${expectedName} CSV template. Download ${CLAIM_CSV_TEMPLATES[expected as ClaimCsvKind].fileName} and use its header row.`;
+  // P4-P28: the billing system's invoice export is a CMS1500 source (server/cms1500ExportCsv.ts).
+  if (detected === "cms1500_export") {
+    return expected === "cms1500" ? null : "This is a CMS1500 invoice export, not an Insurance Reimbursement CSV. Nothing was imported. Upload it under Bulk Upload → CMS1500.";
   }
-  const detectedName = detected === "patient" ? "Patient Data" : CLAIM_CSV_TEMPLATES[detected].title;
-  return `This is the ${detectedName} CSV template, not ${expectedName}. Nothing was imported. Upload it under ${UPLOAD_LOCATION[detected]}.`;
+  const expectedName = CLAIM_CSV_TEMPLATES[expected].title;
+  if (detected === "unknown") {
+    return `This file is not a ${expectedName} CSV this app can read. Download ${CLAIM_CSV_TEMPLATES[expected].fileName} and use its header row${expected === "cms1500" ? ", or upload the billing system's invoice export" : ""}.`;
+  }
+  // P4-P28: there is no patient CSV import any more. Patients come from reviewed claim imports or Add Patient.
+  if (detected === "patient") {
+    return `This looks like a patient list, not a ${expectedName} CSV. Nothing was imported. Patients are created from reviewed CMS1500 / reimbursement imports, or one at a time with Add Patient.`;
+  }
+  return `This is the ${CLAIM_CSV_TEMPLATES[detected].title} CSV template, not ${expectedName}. Nothing was imported. Upload it under Bulk Upload → ${CLAIM_CSV_TEMPLATES[detected].title}.`;
 }
 
 // ─── Cells ──────────────────────────────────────────────────────────────────

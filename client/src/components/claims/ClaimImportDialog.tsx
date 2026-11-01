@@ -15,6 +15,11 @@
  *   - P4-P27: Bulk Upload → CMS1500 → "Upload CMS1500 PDFs" and Insurance
  *     Reimbursement → "Upload EOB PDFs" open this dialog in bulk document
  *     mode with the picked PDFs (the primary path; CSV is the alternative).
+ *   - P4-P28: each group is marked Existing patient / New patient / Needs
+ *     confirmation. A new patient is created by Save, in one transaction with
+ *     that group's lines. A choice made for one person applies to every group
+ *     of that person in the file. An EOB line with no CMS1500 yet is kept
+ *     pending by Save (PendingEobPanel lists them), never paid.
  *
  * Every file is extracted (at most 2 at a time), previewed, reviewed, and
  * saved on its own: one failed file never clears another's preview, and a
@@ -42,6 +47,7 @@ import {
   isLineDone,
   runWithConcurrency,
   summarizeFiles,
+  summarizePatients,
   summarizeResults,
   type Cms1500Decision,
   type CommitResult,
@@ -51,12 +57,13 @@ import {
   type FileStage,
   type LineDecision,
   type LineEdits,
+  type PatientCreateRequest,
   type PreviewGroup,
   type PreviewLine,
   type PreviewResult,
   type ReviewMode,
 } from "@/lib/claimImportReview";
-import type { Cms1500ImportLine, EobImportLine, ExistingClaimLine, ImportDocument } from "@shared/claimImport";
+import { CLAIM_UPLOAD_MAX_BYTES, CLAIM_UPLOAD_MAX_LABEL, type Cms1500ImportLine, type EobImportLine, type ExistingClaimLine, type ImportDocument } from "@shared/claimImport";
 import { formatCalendarDate } from "@/lib/date";
 import { CLAIM_CSV_MAX_BYTES, CLAIM_CSV_TEMPLATES } from "@shared/claimCsvTemplates";
 import { downloadClaimCsvTemplate } from "./ClaimCsvTemplatePanel";
@@ -96,6 +103,8 @@ export interface ClaimImportDialogProps {
 }
 
 const MAX_PARALLEL_EXTRACTIONS = 2;
+/** Above the deployed function's 90 s limit, so the server's own timeout answer arrives first. */
+const EXTRACT_TIMEOUT_MS = 110_000;
 /** Lines per CSV save request — keeps each request well inside the server time limit. */
 const CSV_LINES_PER_REQUEST = 150;
 
@@ -118,7 +127,7 @@ const LINE_STATUS_LABEL: Record<string, string> = {
   invalid: "Not readable",
   matched: "Matched",
   needs_confirmation: "Confirm",
-  cms1500_required: "CMS1500 needed",
+  cms1500_required: "Pending CMS1500",
   patient_required: "Patient needed",
 };
 
@@ -126,13 +135,14 @@ const RESULT_LABEL: Record<string, string> = {
   saved: "Saved",
   unchanged: "Already up to date",
   skipped: "Skipped",
+  held: "Pending CMS1500",
   review_required: "Needs review",
   failed: "Failed",
 };
 
 function statusTone(status: string): "default" | "secondary" | "destructive" | "outline" {
   if (status === "saved" || status === "unchanged" || status === "matched" || status === "ready_new" || status === "already_saved") return "secondary";
-  if (status === "failed" || status === "invalid" || status === "cms1500_required") return "destructive";
+  if (status === "failed" || status === "invalid") return "destructive";
   return "outline";
 }
 
@@ -168,6 +178,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
   const csvCommit = trpc.claims.csvImportCommit.useMutation();
   const needsRoster = mode === "bulk";
   const { data: roster = [] } = trpc.patients.list.useQuery(undefined, { enabled: open && needsRoster });
+  const utils = trpc.useUtils();
 
   const contextPatientId = contextPatient?.id ?? null;
   const uploadType = kind === "eob" ? "reimbursement" : "cms1500";
@@ -241,23 +252,32 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
     update(id, e => ({ ...e, stage: "extracting", error: undefined, rowErrors: undefined, review: undefined, preview: undefined }));
     if (csv) return processCsv(id, session, file, live);
     try {
+      if (file.size > CLAIM_UPLOAD_MAX_BYTES) throw new Error(`This file is larger than ${CLAIM_UPLOAD_MAX_LABEL}, the upload limit. Nothing was read or saved. Split it into smaller PDFs and upload them together.`);
       const form = new FormData();
       form.append("file", file);
       form.append("uploadType", uploadType);
-      const res = await fetch("/api/claims/upload-extract", { method: "POST", credentials: "include", body: form });
+      let res: Response;
+      try {
+        res = await fetch("/api/claims/upload-extract", { method: "POST", credentials: "include", body: form, signal: AbortSignal.timeout(EXTRACT_TIMEOUT_MS) });
+      } catch (err: any) {
+        throw new Error(err?.name === "TimeoutError" ? "The server took too long reading this file. Nothing was saved. Try again, or split it into smaller files." : "The file could not be sent to the server. Check your connection and try again.");
+      }
       const raw = await res.text();
       let json: any;
       try {
         json = JSON.parse(raw);
       } catch {
-        throw new Error(res.status === 504 ? "The server took too long reading this file. Try again, or split it into smaller files." : `Unexpected server response (status ${res.status}).`);
+        // Platform limits answer before the app does, so these have no JSON body.
+        throw new Error(res.status === 504 ? "The server took too long reading this file. Nothing was saved. Try again, or split it into smaller files."
+          : res.status === 413 ? `This file is larger than the upload limit (${CLAIM_UPLOAD_MAX_LABEL}). Nothing was read or saved. Split it into smaller PDFs.`
+          : `Unexpected server response (status ${res.status}). Nothing was saved.`);
       }
       if (!res.ok) throw new Error(json.error ?? "Extraction failed.");
       const doc = json.importDocument as ImportDocument | undefined;
       if (!doc) throw new Error("The server did not return reviewable lines for this file.");
       if (doc.groups.every(g => g.lines.length === 0)) throw new Error(json.extractionNotes || "No service lines were found in this file.");
       if (!live()) return;
-      const review: FileReviewState = { doc, patientChoice: {}, patientConfirmed: {}, decisions: {}, edits: {}, results: {} };
+      const review: FileReviewState = { doc, patientChoice: {}, patientConfirmed: {}, patientCreate: {}, patientOutcomes: {}, decisions: {}, edits: {}, results: {} };
       update(id, e => ({ ...e, stage: "checking", review }));
       await runPreview(id, session, review, true);
     } catch (err: any) {
@@ -270,6 +290,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
     try {
       if (file.size > CLAIM_CSV_MAX_BYTES) throw new Error(`The file is larger than ${CLAIM_CSV_MAX_BYTES / 1_000_000} MB. Split it into smaller files.`);
       const csvText = await file.text();
+      if (!csvText.trim()) throw new Error("This file is empty. Nothing was imported.");
       const result = await csvPreview.mutateAsync({ kind, fileName: file.name, csvText, patientChoices: {} });
       if (!live()) return;
       if (result.templateError) throw new Error(result.templateError);
@@ -277,7 +298,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
         update(id, e => ({ ...e, csvText, rowErrors: result.rowErrors, stage: "failed", error: "No claim in this file can be imported until the problems below are fixed." }));
         return;
       }
-      const review: FileReviewState = { doc: result.document, patientChoice: {}, patientConfirmed: {}, decisions: {}, edits: {}, results: {} };
+      const review: FileReviewState = { doc: result.document, patientChoice: {}, patientConfirmed: {}, patientCreate: {}, patientOutcomes: {}, decisions: {}, edits: {}, results: {} };
       update(id, e => ({ ...e, csvText, rowErrors: result.rowErrors, stage: "checking", review }));
       applyPreview(id, result.preview as PreviewResult);
     } catch (err: any) {
@@ -299,8 +320,13 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
       if (!e.review) return e;
       const decisions = { ...e.review.decisions };
       const patientChoice = { ...e.review.patientChoice };
+      const patientCreate = { ...e.review.patientCreate };
       for (const g of result.groups) {
         if (g.patient.patientId && !patientChoice[g.groupKey]) patientChoice[g.groupKey] = g.patient.patientId;
+        // A group marked new starts by creating its patient on save, under the file's name.
+        if (g.patient.identityStatus === "new" && !patientCreate[g.groupKey] && g.patient.creatingName) patientCreate[g.groupKey] = { name: g.patient.creatingName };
+        // Someone else's save (or this one) created or linked this patient: it is existing now.
+        if (g.patient.identityStatus === "existing") delete patientCreate[g.groupKey];
         for (const line of g.lines) {
           const existing = decisions[line.sourceLineKey];
           if (!existing || !decisionStillValid(kind, existing, line)) {
@@ -308,7 +334,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
           }
         }
       }
-      return { ...e, stage: "review", checking: false, preview: result, review: { ...e.review, decisions, patientChoice } };
+      return { ...e, stage: "review", checking: false, preview: result, review: { ...e.review, decisions, patientChoice, patientCreate } };
     });
   }
 
@@ -392,16 +418,30 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
         if (!e.review) return e;
         const results = { ...e.review.results };
         for (const g of result.groups) for (const l of g.lines) results[l.sourceLineKey] = l;
-        return { ...e, saving: false, recheck: true, review: { ...e.review, results } };
+        const patientOutcomes = { ...e.review.patientOutcomes };
+        for (const g of result.groups) {
+          // "created" sticks: a retried group finding its patient must still count as new.
+          if (g.patientOutcome && patientOutcomes[g.groupKey] !== "created") patientOutcomes[g.groupKey] = g.patientOutcome;
+        }
+        return { ...e, saving: false, recheck: true, review: { ...e.review, results, patientOutcomes } };
       }));
       const lines = result.groups.flatMap(g => g.lines);
       const saved = lines.filter(l => l.status === "saved").length;
+      const held = lines.filter(l => l.status === "held").length;
       const review = lines.filter(l => l.status === "review_required").length;
       const failed = lines.filter(l => l.status === "failed").length;
-      if (saved > 0) onSaved?.();
+      const createdPatients = result.groups.some(g => g.patientOutcome === "created");
+      if (saved > 0 || held > 0 || createdPatients) onSaved?.();
       const name = current.file.name;
-      if (failed > 0 || review > 0) toast.warning(`${name}: ${saved} saved, ${review} need review, ${failed} failed. Unresolved lines stay below for retry.`, { duration: 10000 });
-      else toast.success(`${name}: ${saved} saved${lines.length - saved > 0 ? `, ${lines.length - saved} already up to date or skipped` : ""}.`);
+      const heldText = held > 0 ? `, ${held} pending until the CMS1500 is uploaded` : "";
+      if (failed > 0 || review > 0) toast.warning(`${name}: ${saved} saved${heldText}, ${review} need review, ${failed} failed. Unresolved lines stay below for retry.`, { duration: 10000 });
+      else toast.success(`${name}: ${saved} saved${heldText}${lines.length - saved - held > 0 ? `, ${lines.length - saved - held} already up to date or skipped` : ""}.`);
+      if (kind === "cms1500" && saved > 0) {
+        // Lines this save created may be what a waiting reimbursement needed.
+        const pending = await utils.claims.pendingEobList.fetch();
+        const ready = pending.items.filter(i => i.classification.status !== "cms1500_required").length;
+        if (ready > 0) toast.info(`${ready} waiting reimbursement line${ready !== 1 ? "s" : ""} can now be applied under Bulk Upload → Insurance Reimbursement.`, { duration: 12000 });
+      }
     } catch (err: any) {
       if (isLive(id, session)) {
         update(id, e => ({ ...e, saving: false }));
@@ -441,7 +481,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
             <FileUp className="w-5 h-5 text-brand-gold" /> {title}
           </DialogTitle>
           <DialogDescription>
-            {csv && "One row per service line, from the CSV template. "}
+            {csv && (kind === "cms1500" ? "From the CSV template or the billing system's invoice export. " : "One row per service line, from the CSV template. ")}
             {kind === "cms1500"
               ? "CMS1500 forms create the claim's service lines (date, CPT, modifiers, units, diagnosis). Amounts stay blank until the EOB is uploaded."
               : "The EOB adds billed, paid and patient-responsibility amounts to lines that already came from a CMS1500. Upload the CMS1500 first."}
@@ -481,7 +521,7 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
         {entries.length === 0 && (
           <p className="text-sm text-muted-foreground py-6 text-center">
             {csv
-              ? `Add one or more files made from ${CLAIM_CSV_TEMPLATES[kind].fileName}. Each claim in a file is reviewed on its own.`
+              ? `Add one or more files made from ${CLAIM_CSV_TEMPLATES[kind].fileName}${kind === "cms1500" ? ", or invoice exports" : ""}. Each claim in a file is reviewed on its own.`
               : mode === "bulk" ? "Add one or more PDFs. Each PDF can have several pages and several patients; scanned PDFs are read with OCR." : "Choose a file to start."}
           </p>
         )}
@@ -501,6 +541,26 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
               onDecision={(key, d) => setDecision(e.id, key, d)}
               onPatient={(groupKey, patientId) => setReview(e.id, r => ({ ...r, patientChoice: { ...r.patientChoice, [groupKey]: patientId } }), true)}
               onConfirmPatient={(groupKey, v) => setReview(e.id, r => ({ ...r, patientConfirmed: { ...r.patientConfirmed, [groupKey]: v } }))}
+              onPatientForCluster={(clusterKey, patientId, confirmed) => setReview(e.id, r => forCluster(e, clusterKey, r, k => ({
+                patientChoice: { [k]: patientId }, patientConfirmed: { [k]: confirmed }, patientCreate: { [k]: undefined },
+              })), true)}
+              onConfirmCluster={(clusterKey, v) => setReview(e.id, r => forCluster(e, clusterKey, r, k => ({ patientConfirmed: { [k]: v } })))}
+              onCreateForCluster={(clusterKey, request) => setReview(e.id, r => forCluster(e, clusterKey, r, k => ({
+                patientCreate: { [k]: request }, patientChoice: { [k]: undefined }, patientConfirmed: { [k]: false },
+              })), true)}
+              onPeriodForCluster={(clusterKey, period) => setReview(e.id, r => {
+                const decisions = { ...r.decisions };
+                for (const g of e.preview?.groups ?? []) {
+                  if (g.patient.clusterKey !== clusterKey) continue;
+                  for (const line of g.lines) {
+                    if (line.status !== "period_required") continue;
+                    const prev = decisions[line.sourceLineKey] as Cms1500Decision | null | undefined;
+                    if (prev?.action === "skip") continue;
+                    decisions[line.sourceLineKey] = { ...(prev ?? {}), action: "create", authPeriod: period, periodSource: "selected" };
+                  }
+                }
+                return { ...r, decisions };
+              })}
               onEdit={(key, edits) => setReview(e.id, r => ({ ...r, edits: { ...r.edits, [key]: { ...r.edits[key], ...edits } } }))}
               onRecheck={() => setReview(e.id, r => r, true)}
             />
@@ -521,8 +581,27 @@ export function ClaimImportDialog(props: ClaimImportDialogProps) {
   );
 }
 
+/** Applies one review choice to every group of the same person in this file. */
+function forCluster(
+  entry: FileEntry,
+  clusterKey: string,
+  review: FileReviewState,
+  patch: (groupKey: string) => Partial<Record<"patientChoice" | "patientConfirmed" | "patientCreate", Record<string, any>>>,
+): FileReviewState {
+  const next = { ...review, patientChoice: { ...review.patientChoice }, patientConfirmed: { ...review.patientConfirmed }, patientCreate: { ...review.patientCreate } };
+  for (const g of entry.preview?.groups ?? []) {
+    if (g.patient.clusterKey !== clusterKey) continue;
+    const p = patch(g.groupKey);
+    Object.assign(next.patientChoice, p.patientChoice ?? {});
+    Object.assign(next.patientConfirmed, p.patientConfirmed ?? {});
+    Object.assign(next.patientCreate, p.patientCreate ?? {});
+  }
+  return next;
+}
+
 function decisionStillValid(kind: Kind, decision: LineDecision, line: PreviewLine): boolean {
   if (decision.action === "skip") return true;
+  if (decision.action === "hold") return line.status === "cms1500_required";
   if (kind === "cms1500") {
     const d = decision as Cms1500Decision;
     if (line.status === "already_saved") return true;
@@ -549,12 +628,17 @@ function FileCard(props: {
   onDecision: (key: string, d: LineDecision | null) => void;
   onPatient: (groupKey: string, patientId: string | undefined) => void;
   onConfirmPatient: (groupKey: string, v: boolean) => void;
+  onPatientForCluster: (clusterKey: string, patientId: string | undefined, confirmed: boolean) => void;
+  onConfirmCluster: (clusterKey: string, v: boolean) => void;
+  onCreateForCluster: (clusterKey: string, request: PatientCreateRequest | undefined) => void;
+  onPeriodForCluster: (clusterKey: string, period: number) => void;
   onEdit: (key: string, edits: LineEdits) => void;
   onRecheck: () => void;
 }) {
   const { kind, entry, onRemove, onRetry, onSave } = props;
   const { review, preview } = entry;
   const summary = review ? summarizeResults(review) : null;
+  const patients = review ? summarizePatients(review, k => preview?.groups.find(g => g.groupKey === k)?.patient.clusterKey) : null;
   const readyCount = useMemo(() => {
     if (!review) return 0;
     const input = buildCommitInput({ state: review, contextPatientId: null, contextAuthPeriod: null });
@@ -593,6 +677,15 @@ function FileCard(props: {
         </div>
       )}
 
+      {review?.doc.columnMapping && (
+        <details className="mx-3 mt-2 rounded-md border border-blue-200 bg-blue-50 p-2 text-xs text-blue-900" data-testid="claim-import-column-mapping">
+          <summary className="cursor-pointer font-semibold">How this file's columns are used</summary>
+          <ul className="mt-1 space-y-0.5">
+            {review.doc.columnMapping.map(m => <li key={m.column}><span className="font-medium">{m.column}:</span> {m.usedAs}</li>)}
+          </ul>
+        </details>
+      )}
+
       {review?.doc.extractionFallback && (
         <p className="mx-3 mt-2 flex gap-1 rounded-md border border-amber-400 bg-amber-100 p-2 text-xs font-medium text-amber-950" role="alert" data-testid="claim-import-fallback">
           <AlertTriangle className="w-4 h-4 shrink-0" /> {review.doc.extractionFallback}
@@ -618,6 +711,9 @@ function FileCard(props: {
         <div className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2 text-xs">
           <span>{summary.total} line(s)</span>
           {summary.saved > 0 && <Badge variant="secondary">{summary.saved} saved</Badge>}
+          {patients && patients.created > 0 && <Badge variant="secondary" data-testid="claim-import-patients-created">{patients.created} new patient{patients.created !== 1 ? "s" : ""} created</Badge>}
+          {patients && patients.existing > 0 && <Badge variant="secondary" data-testid="claim-import-patients-existing">{patients.existing} existing patient{patients.existing !== 1 ? "s" : ""}</Badge>}
+          {summary.held > 0 && <Badge variant="outline" data-testid="claim-import-held">{summary.held} pending CMS1500</Badge>}
           {summary.unchanged > 0 && <Badge variant="secondary">{summary.unchanged} already up to date</Badge>}
           {summary.review > 0 && <Badge variant="outline">{summary.review} need review</Badge>}
           {summary.failed > 0 && <Badge variant="destructive">{summary.failed} failed</Badge>}
@@ -639,8 +735,14 @@ function FileCard(props: {
 
 // ─── One patient group inside a file ──────────────────────────────────────
 
-function GroupSection(props: Parameters<typeof FileCard>[0] & { group: { groupKey: string; patientName: string | null; pages: number[] | null; claimIdentifier: string | null; lines: Array<Cms1500ImportLine | EobImportLine>; warnings: string[]; unresolvedClaimTotals: Array<{ dateOfService: string | null; cptCodes: string | null; planPaid: number | null; patientResponsibility: number | null; cptCount: number }> }; previewGroup: PreviewGroup }) {
-  const { kind, mode, entry, roster, contextPatient, group, previewGroup, onPatient, onConfirmPatient } = props;
+const IDENTITY_BADGE: Record<string, { label: string; className: string }> = {
+  existing: { label: "Existing patient", className: "border-green-300 bg-green-50 text-green-800" },
+  new: { label: "New patient", className: "border-blue-300 bg-blue-50 text-blue-800" },
+  needs_confirmation: { label: "Needs confirmation", className: "border-amber-400 bg-amber-50 text-amber-900" },
+};
+
+function GroupSection(props: Parameters<typeof FileCard>[0] & { group: { groupKey: string; patientName: string | null; pages: number[] | null; claimIdentifier: string | null; lines: Array<Cms1500ImportLine | EobImportLine>; warnings: string[]; unresolvedClaimTotals: Array<{ dateOfService: string | null; cptCodes: string | null; planPaid: number | null; patientResponsibility: number | null; cptCount: number }>; sourcePayerLabel?: string | null; lineDateOptions?: Record<string, string[]> }; previewGroup: PreviewGroup }) {
+  const { kind, mode, entry, roster, contextPatient, group, previewGroup, onPatient, onConfirmPatient, onPatientForCluster, onConfirmCluster, onCreateForCluster, onPeriodForCluster } = props;
   const review = entry.review!;
   const csvGroup = entry.csvText != null;
   const p = previewGroup.patient;
@@ -648,6 +750,14 @@ function GroupSection(props: Parameters<typeof FileCard>[0] & { group: { groupKe
   const options = p.status === "unreadable" && mode === "bulk"
     ? roster.map(r => ({ id: r.id, name: r.name }))
     : p.status === "unreadable" && contextPatient ? [contextPatient] : p.candidates;
+  const bulk = mode === "bulk";
+  const clusterKey = p.clusterKey ?? group.groupKey;
+  const creating = !!p.creatingName && bulk;
+  const createRequest = review.patientCreate?.[group.groupKey];
+  const createdName = createRequest?.name ?? p.creatingName ?? "";
+  const anyDone = group.lines.some(l => isLineDone(review.results[l.sourceLineKey]));
+  const badge = p.identityStatus ? IDENTITY_BADGE[p.identityStatus] : null;
+  const periodLines = previewGroup.lines.filter(l => l.status === "period_required" && !isLineDone(review.results[l.sourceLineKey]));
 
   return (
     <div className="rounded-lg border border-border" data-testid="claim-import-group">
@@ -657,14 +767,33 @@ function GroupSection(props: Parameters<typeof FileCard>[0] & { group: { groupKe
         <span className="font-medium">{group.patientName ?? "Patient name unreadable"}</span>
         {group.pages && <span className="text-xs text-muted-foreground">page{group.pages.length > 1 ? "s" : ""} {group.pages.join(", ")}</span>}
         <span className="text-muted-foreground">→</span>
+        {bulk && badge && <Badge variant="outline" className={badge.className} data-testid="claim-import-patient-status">{badge.label}</Badge>}
         {p.status === "matched" && <span className="font-medium text-green-700">{p.patientName}</span>}
-        {(p.status === "candidates" || p.status === "unreadable") && (
+        {creating && (
+          <span className="flex flex-wrap items-center gap-2" data-testid="claim-import-new-patient">
+            <input
+              key={`${group.groupKey}:${createdName}`}
+              aria-label="Name for the new patient"
+              className="h-8 w-56 max-w-full rounded-md border border-input bg-background px-2 text-xs"
+              defaultValue={createdName}
+              disabled={anyDone}
+              onBlur={e => {
+                const name = e.target.value.trim();
+                if (name && name !== createdName) onCreateForCluster(clusterKey, { ...createRequest, name });
+              }}
+            />
+            {createRequest?.distinctConfirmed && !anyDone && (
+              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onCreateForCluster(clusterKey, undefined)}>Use an existing patient instead</Button>
+            )}
+          </span>
+        )}
+        {!creating && (p.status === "candidates" || p.status === "unreadable") && (
           <span className="flex flex-wrap items-center gap-2">
             <select
               className={selectClass}
               aria-label="Patient for this part of the file"
               value={chosen ?? ""}
-              onChange={e => onPatient(group.groupKey, e.target.value || undefined)}
+              onChange={e => (bulk ? onPatientForCluster(clusterKey, e.target.value || undefined, false) : onPatient(group.groupKey, e.target.value || undefined))}
             >
               <option value="">Choose patient…</option>
               {options.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
@@ -673,15 +802,51 @@ function GroupSection(props: Parameters<typeof FileCard>[0] & { group: { groupKe
               <Checkbox
                 checked={review.patientConfirmed[group.groupKey] === true}
                 disabled={!chosen}
-                onCheckedChange={v => onConfirmPatient(group.groupKey, v === true)}
+                onCheckedChange={v => (bulk ? onConfirmCluster(clusterKey, v === true) : onConfirmPatient(group.groupKey, v === true))}
               />
               I confirm this is the right patient
             </label>
           </span>
         )}
-        {p.status === "unmatched" && <span className="text-destructive">No dashboard patient matches — not imported.</span>}
+        {bulk && !creating && p.canCreate && !anyDone && (
+          group.patientName
+            ? <Button size="sm" variant="outline" className="h-7 px-2 text-xs" data-testid="claim-import-create-patient" onClick={() => onCreateForCluster(clusterKey, { name: group.patientName!, distinctConfirmed: true })}>Create as a new patient</Button>
+            : (
+              <input
+                aria-label="Name for a new patient"
+                placeholder="Or type a new patient's name"
+                className="h-8 w-56 max-w-full rounded-md border border-input bg-background px-2 text-xs"
+                data-testid="claim-import-typed-name"
+                onBlur={e => {
+                  const name = e.target.value.trim();
+                  if (name) onCreateForCluster(clusterKey, { name, distinctConfirmed: true });
+                }}
+              />
+            )
+        )}
+        {p.status === "unmatched" && !bulk && <span className="text-destructive">No dashboard patient matches — not imported.</span>}
         {p.status === "other_patient" && <span className="text-destructive">A different patient — not imported here. Use the bulk upload.</span>}
       </div>
+      {bulk && p.identityReasons && p.identityReasons.length > 0 && !creating && (
+        <ul className="space-y-1 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900" data-testid="claim-import-identity-reasons">
+          {p.identityReasons.map((w, i) => <li key={i} className="flex gap-1"><AlertTriangle className="w-3.5 h-3.5 shrink-0" />{w}</li>)}
+        </ul>
+      )}
+      {creating && !anyDone && (
+        <p className="bg-blue-50 px-3 py-2 text-xs text-blue-900">
+          Added to the dashboard when you save, with this name only. Insurance and authorization stay blank until you set them on the patient's page.
+          {kind === "eob" ? " Reimbursement lines are kept pending until the matching CMS1500 is uploaded." : ""}
+        </p>
+      )}
+      {group.sourcePayerLabel && <p className="px-3 pt-2 text-xs text-muted-foreground">Payer in file (not saved): {group.sourcePayerLabel}</p>}
+      {kind === "cms1500" && bulk && periodLines.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2 bg-muted/20 px-3 py-2 text-xs" data-testid="claim-import-period-all">
+          <span>{creating ? "This patient has no authorization periods yet." : `${periodLines.length} lines need a period.`} Set every line for this patient:</span>
+          {(previewGroup.periodOptions.length > 0 ? previewGroup.periodOptions : [1]).map(n => (
+            <Button key={n} size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={() => onPeriodForCluster(clusterKey, n)}>Period {n}</Button>
+          ))}
+        </div>
+      )}
       {group.warnings.length > 0 && (
         <ul className="space-y-1 bg-amber-50 px-3 py-2 text-xs text-amber-900">
           {group.warnings.map((w, i) => <li key={i} className="flex gap-1"><AlertTriangle className="w-3.5 h-3.5 shrink-0" />{w}</li>)}
@@ -701,7 +866,7 @@ function GroupSection(props: Parameters<typeof FileCard>[0] & { group: { groupKe
       <div className="divide-y divide-border">
         {group.lines.map(line => {
           const pl = previewGroup.lines.find(l => l.sourceLineKey === line.sourceLineKey);
-          return pl ? <LineRow key={line.sourceLineKey} {...props} kind={kind} line={line} previewLine={pl} periodOptions={previewGroup.periodOptions} /> : null;
+          return pl ? <LineRow key={line.sourceLineKey} {...props} kind={kind} line={line} previewLine={pl} periodOptions={previewGroup.periodOptions} dateOptions={group.lineDateOptions?.[line.sourceLineKey]} /> : null;
         })}
       </div>
     </div>
@@ -710,14 +875,15 @@ function GroupSection(props: Parameters<typeof FileCard>[0] & { group: { groupKe
 
 // ─── One line ──────────────────────────────────────────────────────────────
 
-function LineRow(props: Parameters<typeof FileCard>[0] & { line: Cms1500ImportLine | EobImportLine; previewLine: PreviewLine; periodOptions: number[] }) {
-  const { kind, entry, line, previewLine: pl, periodOptions, onDecision, onEdit, onRecheck } = props;
+function LineRow(props: Parameters<typeof FileCard>[0] & { line: Cms1500ImportLine | EobImportLine; previewLine: PreviewLine; periodOptions: number[]; dateOptions?: string[] }) {
+  const { kind, entry, line, previewLine: pl, periodOptions, dateOptions, onDecision, onEdit, onRecheck } = props;
   const review = entry.review!;
   const result = review.results[line.sourceLineKey];
   const done = isLineDone(result);
   const decision = review.decisions[line.sourceLineKey] ?? null;
   const cms = kind === "cms1500" ? applyLineEdits(line as Cms1500ImportLine, review.edits[line.sourceLineKey]) : null;
   const eob = kind === "eob" ? (line as EobImportLine) : null;
+  const held = "held" in pl && pl.held === true;
   const status = result ? result.status : pl.status;
   const flagged = cms ? cms.unreadable : [];
   const editable = !!cms && !done && (flagged.length > 0 || pl.status === "invalid");
@@ -728,7 +894,17 @@ function LineRow(props: Parameters<typeof FileCard>[0] & { line: Cms1500ImportLi
     onEdit(line.sourceLineKey, { [field]: value } as LineEdits);
   };
   const cell = (field: keyof LineEdits, value: string | number | null, label: string, width = "w-24") =>
-    editable && (flagged.includes(field) || (pl.status === "invalid" && (field === "dateOfService" || field === "cptCodes"))) ? (
+    editable && field === "dateOfService" && dateOptions && dateOptions.length > 1 ? (
+      <select
+        aria-label="Date of service (the file lists several)"
+        className={`${inputClass} w-32`}
+        value={value ?? ""}
+        onChange={e => { editField(field, e.target.value); onRecheck(); }}
+      >
+        <option value="">Choose date…</option>
+        {dateOptions.map(d => <option key={d} value={d}>{d}</option>)}
+      </select>
+    ) : editable && (flagged.includes(field) || (pl.status === "invalid" && (field === "dateOfService" || field === "cptCodes"))) ? (
       <input
         aria-label={`${label} (unreadable — enter from the form)`}
         className={`${inputClass} ${width}`}
@@ -771,11 +947,12 @@ function LineRow(props: Parameters<typeof FileCard>[0] & { line: Cms1500ImportLi
         <div className="flex flex-wrap items-center gap-1">
           <Badge variant={statusTone(status)}>{RESULT_LABEL[status] ?? LINE_STATUS_LABEL[status] ?? status}</Badge>
           {"reason" in pl && pl.reason && !done && <span className="text-muted-foreground">{pl.reason}</span>}
+          {status === "held" && <span className="text-muted-foreground">{result?.message ?? "Upload the matching CMS1500 first."}</span>}
         </div>
         {result?.message && !done && <span className="text-amber-800">{result.message}</span>}
         {!done && (kind === "cms1500"
           ? <Cms1500Action line={pl} decision={decision as Cms1500Decision | null} periodOptions={periodOptions} flagged={flagged} onDecision={d => onDecision(line.sourceLineKey, d)} />
-          : <EobAction line={pl} decision={decision as EobDecision | null} onDecision={d => onDecision(line.sourceLineKey, d)} />)}
+          : <EobAction line={pl} decision={decision as EobDecision | null} held={held} onDecision={d => onDecision(line.sourceLineKey, d)} />)}
       </div>
     </div>
   );
@@ -854,8 +1031,20 @@ function Cms1500Action({ line, decision, periodOptions, flagged, onDecision }: {
   );
 }
 
-function EobAction({ line, decision, onDecision }: { line: PreviewLine; decision: EobDecision | null; onDecision: (d: EobDecision | null) => void }) {
-  if (line.status === "patient_required" || line.status === "invalid" || line.status === "cms1500_required") return null;
+function EobAction({ line, decision, held, onDecision }: { line: PreviewLine; decision: EobDecision | null; held: boolean; onDecision: (d: EobDecision | null) => void }) {
+  if (line.status === "patient_required" || line.status === "invalid") return null;
+  if (line.status === "cms1500_required") {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        {decision?.action === "skip"
+          ? <span className="text-muted-foreground">Skipped</span>
+          : <span>{held ? "Already pending from an earlier save." : "Saving keeps this line pending. Nothing is paid until its CMS1500 is saved."}</span>}
+        <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={() => onDecision(decision?.action === "skip" ? { action: "hold" } : { action: "skip" })}>
+          {decision?.action === "skip" ? "Undo skip" : "Skip"}
+        </Button>
+      </div>
+    );
+  }
   const candidates = "candidates" in line ? (line.candidates as ExistingClaimLine[]) : [];
   const target = "targetClaimId" in line ? line.targetClaimId : undefined;
   if (line.status === "already_saved") return <span className="text-muted-foreground">Already applied from this file.</span>;

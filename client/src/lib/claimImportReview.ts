@@ -37,7 +37,7 @@ export type Cms1500Decision = {
   periodSource?: "resolved" | "selected" | "context" | null;
   acknowledgeFlags?: boolean;
 };
-export type EobDecision = { action: "apply" | "skip"; claimRecordId?: string | null; confirmReplace?: boolean };
+export type EobDecision = { action: "apply" | "skip" | "hold"; claimRecordId?: string | null; confirmReplace?: boolean };
 export type LineDecision = Cms1500Decision | EobDecision;
 
 export type ReviewMode = "single" | "bulk";
@@ -54,6 +54,8 @@ export function initialDecision(params: {
     if ((line.status === "matched" || line.status === "already_saved") && "targetClaimId" in line && line.targetClaimId) {
       return { action: "apply", claimRecordId: line.targetClaimId };
     }
+    // P4-P28: saving keeps this reviewed line pending; nothing is paid until its CMS1500 exists.
+    if (line.status === "cms1500_required") return { action: "hold" };
     return null;
   }
   if (line.status === "already_saved") return { action: "create" };
@@ -68,7 +70,7 @@ export function initialDecision(params: {
   return null;
 }
 
-export const DONE_STATUSES = new Set(["saved", "unchanged", "skipped"]);
+export const DONE_STATUSES = new Set(["saved", "unchanged", "skipped", "held"]);
 
 export function isLineDone(result: CommitLineResult | undefined): boolean {
   return !!result && DONE_STATUSES.has(result.status);
@@ -80,7 +82,7 @@ export function isLineDone(result: CommitLineResult | undefined): boolean {
 export function decisionReady(kind: "cms1500" | "eob", decision: LineDecision | null | undefined, unreadable: string[]): boolean {
   if (!decision) return false;
   if (decision.action === "skip") return true;
-  if (kind === "eob") return !!(decision as EobDecision).claimRecordId;
+  if (kind === "eob") return decision.action === "hold" || !!(decision as EobDecision).claimRecordId;
   const d = decision as Cms1500Decision;
   if (d.action === "associate" && !d.claimRecordId) return false;
   if (unreadable.length > 0 && !d.acknowledgeFlags) return false;
@@ -96,10 +98,16 @@ export function applyLineEdits<L extends Cms1500ImportLine>(line: L, edits: Line
   return { ...line, ...edits, unreadable };
 }
 
+export type PatientCreateRequest = { name: string; distinctConfirmed?: boolean };
+
 export interface FileReviewState {
   doc: ImportDocument;
   patientChoice: Record<string, string | undefined>;
   patientConfirmed: Record<string, boolean | undefined>;
+  /** P4-P28: groups whose patient is created on save, by groupKey. */
+  patientCreate?: Record<string, PatientCreateRequest | undefined>;
+  /** P4-P28: what saving did to each group's patient, for the result counts. */
+  patientOutcomes?: Record<string, "created" | "existing" | null | undefined>;
   decisions: Record<string, LineDecision | null | undefined>;
   edits: Record<string, LineEdits | undefined>;
   results: Record<string, CommitLineResult | undefined>;
@@ -130,6 +138,8 @@ export function buildCommitInput(params: {
       patientName: group.patientName,
       patientId: state.patientChoice[group.groupKey] ?? null,
       patientConfirmed: state.patientConfirmed[group.groupKey] === true,
+      patientIdentity: group.patientIdentity && group.patientIdentity.strength === "account" ? group.patientIdentity : null,
+      createPatient: state.patientCreate?.[group.groupKey] ?? null,
       allLineKeys: group.lines.map(l => l.sourceLineKey),
       lines: pending.map(l => {
         const decision = state.decisions[l.sourceLineKey]!;
@@ -170,7 +180,7 @@ export function normalizeClaimStatus(s: string | null | undefined): ClaimImportS
 
 /** The preview request for one file (current edits and patient choices applied). */
 export function buildPreviewInput(params: {
-  state: Pick<FileReviewState, "doc" | "patientChoice" | "edits">;
+  state: Pick<FileReviewState, "doc" | "patientChoice" | "edits" | "patientCreate">;
   contextPatientId: string | null;
 }) {
   const { state, contextPatientId } = params;
@@ -183,6 +193,8 @@ export function buildPreviewInput(params: {
       groupKey: g.groupKey,
       patientName: g.patientName,
       patientId: state.patientChoice[g.groupKey] ?? null,
+      patientIdentity: g.patientIdentity && g.patientIdentity.strength === "account" ? g.patientIdentity : null,
+      createPatient: state.patientCreate?.[g.groupKey] ?? null,
       lines: (g.lines as Array<Cms1500ImportLine | EobImportLine>).map(l => {
         if (kind === "cms1500") {
           const e = applyLineEdits(l as Cms1500ImportLine, state.edits[l.sourceLineKey]);
@@ -215,11 +227,17 @@ export interface CsvFileSource {
   csvText: string;
 }
 
-export function buildCsvPreviewInput(params: { source: CsvFileSource; state: Pick<FileReviewState, "patientChoice"> }) {
+export function buildCsvPreviewInput(params: { source: CsvFileSource; state: Pick<FileReviewState, "patientChoice" | "patientCreate" | "edits"> }) {
   const patientChoices: Record<string, string> = {};
   for (const [k, v] of Object.entries(params.state.patientChoice)) if (v) patientChoices[k] = v;
-  return { ...params.source, patientChoices };
+  const patientCreates: Record<string, PatientCreateRequest> = {};
+  for (const [k, v] of Object.entries(params.state.patientCreate ?? {})) if (v) patientCreates[k] = v;
+  const lineEdits: Record<string, LineEdits> = {};
+  for (const [k, v] of Object.entries(params.state.edits ?? {})) if (v) lineEdits[k] = v;
+  return { ...params.source, patientChoices, patientCreates, lineEdits: lineEdits as CsvLineEdits };
 }
+
+type CsvLineEdits = NonNullable<Inputs["claims"]["csvImportPreview"]["lineEdits"]>;
 
 /**
  * The CSV commit requests for one file, split so no request carries more than
@@ -243,7 +261,8 @@ export function buildCsvCommitInputs(params: { source: CsvFileSource; state: Fil
       groupKey: g.groupKey,
       patientId: g.patientId,
       patientConfirmed: g.patientConfirmed,
-      lines: g.lines.map((l: any) => ({ sourceLineKey: l.sourceLineKey, decision: l.decision })),
+      createPatient: g.createPatient,
+      lines: g.lines.map((l: any) => ({ sourceLineKey: l.sourceLineKey, decision: l.decision, ...(state.edits[l.sourceLineKey] ? { edits: state.edits[l.sourceLineKey] } : {}) })),
     });
     count += g.lines.length;
   }
@@ -261,8 +280,24 @@ export function summarizeResults(state: Pick<FileReviewState, "doc" | "results">
     skipped: all.filter(r => r?.status === "skipped").length,
     review: all.filter(r => r?.status === "review_required").length,
     failed: all.filter(r => r?.status === "failed").length,
+    /** P4-P28: kept pending until the matching CMS1500 is saved. */
+    held: all.filter(r => r?.status === "held").length,
     pending: all.filter(r => !r || !DONE_STATUSES.has(r.status)).length,
   };
+}
+
+/** P4-P28: new and existing patients a file's saves touched, counted once per patient. */
+export function summarizePatients(state: Pick<FileReviewState, "doc" | "patientOutcomes" | "results">, clusterOf: (groupKey: string) => string | undefined): { created: number; existing: number } {
+  const created = new Set<string>();
+  const existing = new Set<string>();
+  for (const g of state.doc.groups) {
+    const outcome = state.patientOutcomes?.[g.groupKey];
+    if (!outcome || !g.lines.some(l => isLineDone(state.results[l.sourceLineKey]))) continue;
+    (outcome === "created" ? created : existing).add(clusterOf(g.groupKey) ?? g.groupKey);
+  }
+  // A patient created by one invoice and reused by the next counts as new only.
+  for (const k of Array.from(created)) existing.delete(k);
+  return { created: created.size, existing: existing.size };
 }
 
 /** Runs `worker` over `items` with at most `limit` in flight. Never rejects; returns settled results in order. */
