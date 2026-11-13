@@ -69,6 +69,7 @@ import { applyPendingEob, dismissPendingEob, listPendingEob, pendingEobApplyInpu
 import type { ClinicUser } from "../drizzle/schema";
 import { sdk } from "./_core/sdk";
 import { getActorContext } from "./actorIdentity";
+import { commitPatientCsvImport, patientCsvCommitInput, patientCsvPreviewInput, previewPatientCsvImport } from "./patientCsvImport";
 import { randomUUID } from "crypto";
 import { ONE_YEAR_MS } from "@shared/const";
 import { normalizeInsurerName } from "@shared/insuranceCatalog";
@@ -655,6 +656,20 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         return redactAuditRows(await listHistoryForEntity("patient", input.id), canAccessClaims(ctx.user));
       }),
+    /**
+     * P4-P29: "Bulk Upload Patients" (Patient Data CSV). Same gate as create —
+     * Staff, Clinic Admin and Owner; signed-out callers and sessions that must
+     * change their password are refused by normalProtectedProcedure. Preview
+     * never writes. Commit re-parses the file and re-checks every patient (see
+     * server/patientCsvImport.ts); no claims data is read or written.
+     */
+    csvImportPreview: normalProtectedProcedure
+      .input(patientCsvPreviewInput)
+      .mutation(({ input }) => previewPatientCsvImport(input)),
+
+    csvImportCommit: normalProtectedProcedure
+      .input(patientCsvCommitInput)
+      .mutation(({ input, ctx }) => commitPatientCsvImport(input, getActorContext(ctx.user))),
   }),
 
   // ── Insurer Catalog (P4-P7) ─────────────────────────────────────────────────

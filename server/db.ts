@@ -1788,6 +1788,56 @@ export async function commitImportWithNewPatient(params: {
   };
 }
 
+/** P4-P29: one new patient from the Patient Data CSV, with its sessions and
+ *  audit rows, in one transaction (import_patient_csv_group_with_audit).
+ *  Returns patient_exists — and writes nothing — when a patient with the same
+ *  name key is already on the dashboard, which is what makes a retry safe. */
+export async function commitPatientCsvGroup(
+  params: {
+    name: string;
+    insurance: string;
+    authDate: string | null;
+    visits: Array<{
+      sessionsAuthorized: number | null;
+      sessionsRemaining: number | null;
+      sessionNumber: number | null;
+      dateOfService: string | null;
+      newAuth: "YES" | "NO";
+      dateAuthSubmitted: string | null;
+    }>;
+    fileName: string;
+    importBatchId: string;
+  },
+  actor: ActorContext
+): Promise<{ status: "created" | "patient_exists"; patientId: string; sessions: number }> {
+  const { data, error } = await supabase.rpc("import_patient_csv_group_with_audit", {
+    p_patient_name: params.name,
+    p_insurance: params.insurance,
+    p_auth_date: params.authDate,
+    // Only these keys are ever sent; the SQL function also builds each visit from an explicit list.
+    p_visits: params.visits.map(v => ({
+      sessions_authorized: v.sessionsAuthorized,
+      sessions_remaining: v.sessionsRemaining,
+      session_number: v.sessionNumber,
+      date_of_service: v.dateOfService,
+      new_auth: v.newAuth,
+      date_ash_submitted: v.dateAuthSubmitted,
+    })),
+    p_file_name: params.fileName,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+    p_import_batch_id: params.importBatchId,
+  });
+  if (error) {
+    console.error("[Supabase] commitPatientCsvGroup:", error);
+    mapInsurerAssignmentError(error);
+    throw error;
+  }
+  const r = data as { status: "created" | "patient_exists"; patient_id: string; sessions?: number };
+  return { status: r.status, patientId: r.patient_id, sessions: r.sessions ?? 0 };
+}
+
 export async function holdEobLine(params: {
   patientId: string;
   source: ClaimImportSource;
