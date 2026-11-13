@@ -270,9 +270,9 @@ export function wrongTemplateMessage(expected: ClaimCsvKind, detected: DetectedC
   if (detected === "unknown") {
     return `This file is not a ${expectedName} CSV this app can read. Download ${CLAIM_CSV_TEMPLATES[expected].fileName} and use its header row${expected === "cms1500" ? ", or upload the billing system's invoice export" : ""}.`;
   }
-  // P4-P28: there is no patient CSV import any more. Patients come from reviewed claim imports or Add Patient.
+  // P4-P29: the Patient Data CSV is imported from Patient Records, never here.
   if (detected === "patient") {
-    return `This looks like a patient list, not a ${expectedName} CSV. Nothing was imported. Patients are created from reviewed CMS1500 / reimbursement imports, or one at a time with Add Patient.`;
+    return `This looks like a patient list, not a ${expectedName} CSV. Nothing was imported. Upload patient lists under Patient Records → Bulk Upload Patients.`;
   }
   return `This is the ${CLAIM_CSV_TEMPLATES[detected].title} CSV template, not ${expectedName}. Nothing was imported. Upload it under Bulk Upload → ${CLAIM_CSV_TEMPLATES[detected].title}.`;
 }

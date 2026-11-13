@@ -44,6 +44,7 @@ import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
 import { ClaimImportDialog } from '@/components/claims/ClaimImportDialog';
 import { ClaimBulkUploadPanel } from '@/components/claims/ClaimBulkUploadPanel';
+import { PatientBulkUploadDialog } from '@/components/dashboard/PatientBulkUploadDialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { sumKnownMoney } from '@shared/claimImport';
 import { formatCalendarDate } from '@/lib/date';
@@ -1290,7 +1291,9 @@ export default function Dashboard() {
 
   // P4-P26 / P4-P28: Bulk Upload is CMS1500 and Insurance Reimbursement only, for
   // Clinic Admin / Owner. Staff have neither the dialog nor a way to open it, and
-  // the server gates every procedure behind it independently.
+  // the server gates every procedure behind it independently. P4-P29: patient
+  // lists are imported separately, from Patient Records → Bulk Upload Patients
+  // (PatientBulkUploadDialog), which every role that can add a patient sees.
   const bulkUploadDialog = canAccessClaims ? (
     <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
       <DialogContent className="w-[calc(100vw-1rem)] max-h-[90vh] overflow-y-auto overflow-x-hidden bg-white sm:max-w-xl">
@@ -3388,7 +3391,7 @@ export default function Dashboard() {
         canAccessClaims={canAccessClaims}
         topbarTitle="Patient Records"
         topbarSubtitle="Find and select a patient to view their information"
-        topbarActions={<div className="flex flex-wrap items-center gap-2">{addPatientAction}{canManageStaff && addInsuranceAction}{canManageStaff && manageInsuranceAction}</div>}
+        topbarActions={<div className="flex flex-wrap items-center gap-2">{addPatientAction}<PatientBulkUploadDialog />{canManageStaff && addInsuranceAction}{canManageStaff && manageInsuranceAction}</div>}
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6">
           {filterChipsElement}
