@@ -29,6 +29,7 @@ import {
   getAuthAlertSummaries,
   getMarkAsRequestedTargetVisitId,
   approveAndCreateNewBatch,
+  setAuthPeriodExpired,
   getCompletedPatients,
   getClaimsByPatientAndPeriod,
   listPatientClaimPeriods,
@@ -91,7 +92,7 @@ const visitRecordInput = z.object({
   dateOfService: z.string().nullable().optional(),    // ISO date string "YYYY-MM-DD"
   newAuth: z.string().nullable().optional(),
   dateAshSubmitted: z.string().nullable().optional(), // ISO date string "YYYY-MM-DD"
-  authStatus: z.enum(["none", "pending", "approved", "denied"]).optional(),
+  authStatus: z.enum(["none", "pending", "approved", "denied", "expired"]).optional(),
   totalInsuranceReimbursement: z.number().nullable().optional(),
   totalPatientDue: z.number().nullable().optional(),
   totalPatientPaid: z.number().nullable().optional(),
@@ -934,6 +935,29 @@ export const appRouter = router({
           dateAshSubmitted: todayMidnight,
         }, actor, { action: "AUTHORIZATION_MARKED_REQUESTED", patientId: input.patientId });
         return { success: true, visitId, date: todayMidnight.toISOString().split("T")[0] };
+      }),
+
+    // P4-P31: manually mark one authorization period Expired, or clear a
+    // mistaken Expired. Same gate as visits.update / markAsRequested (every
+    // authenticated dashboard user who can edit authorization sessions).
+    // Never inferred from dates or a zero balance; only that period's
+    // auth_status changes, each changed row audited before/after.
+    setPeriodExpired: normalProtectedProcedure
+      .input(z.object({
+        patientId: z.string().uuid(),
+        authPeriod: z.number().int().min(1),
+        expired: z.boolean(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        try {
+          const changed = await setAuthPeriodExpired(input.patientId, input.authPeriod, input.expired, getActorContext(ctx.user));
+          return { success: true, changed };
+        } catch (err: unknown) {
+          const code = (err as { code?: string })?.code;
+          if (code === "P0020") throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
+          if (code === "P0034") throw new TRPCError({ code: "NOT_FOUND", message: "Authorization period not found for this patient" });
+          throw err;
+        }
       }),
 
     historyForPatient: normalProtectedProcedure

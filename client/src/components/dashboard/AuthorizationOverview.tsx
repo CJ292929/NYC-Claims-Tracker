@@ -1,4 +1,4 @@
-import { AlertCircle, AlertTriangle, ArrowRight, Ban, CalendarClock, Clock, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react';
+import { AlertCircle, AlertTriangle, ArrowRight, Ban, CalendarClock, CalendarX, Clock, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { MetricCard } from '@/components/dashboard/MetricCard';
@@ -16,6 +16,7 @@ import type { AuthUrgency } from '@shared/authUrgency';
 
 const URGENCY_SHORT_LABEL: Record<AuthUrgency, string> = {
   denied: 'Denied',
+  expired: 'Expired',
   exhausted: 'Exhausted',
   critical: 'Critical',
   warning: 'Warning',
@@ -42,7 +43,7 @@ export function AuthorizationOverview({ onNavigate }: { onNavigate: (route: stri
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-7 gap-4">
         {Array.from({ length: 6 }).map((_, i) => (
           <div key={i} className="h-24 rounded-xl bg-gray-100 animate-pulse" />
         ))}
@@ -100,6 +101,13 @@ export function AuthorizationOverview({ onNavigate }: { onNavigate: (route: stri
           tone="destructive"
         />
         <MetricCard
+          icon={<CalendarX className="w-4 h-4 text-brand-blue" />}
+          label="Expired"
+          value={metrics.expired}
+          sub="Marked expired"
+          tone="navy"
+        />
+        <MetricCard
           icon={<ShieldAlert className="w-4 h-4 text-destructive" />}
           label="Critical"
           value={metrics.critical}
@@ -149,7 +157,9 @@ export function AuthorizationOverview({ onNavigate }: { onNavigate: (route: stri
                   </div>
                   <div className="flex items-center gap-3 shrink-0">
                     <span className="text-xs font-semibold text-gray-600">
-                      {record.sessionsRemaining !== null ? `${record.sessionsRemaining} left` : '—'}
+                      {record.periodExpired
+                        ? (record.unusedExpiredSessions ? `${record.unusedExpiredSessions} unused · expired` : 'Expired')
+                        : record.sessionsRemaining !== null ? `${record.sessionsRemaining} left` : '—'}
                     </span>
                     <UrgencyBadge urgency={record.urgency} />
                   </div>

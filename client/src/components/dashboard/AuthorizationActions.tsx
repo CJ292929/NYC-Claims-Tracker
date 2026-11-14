@@ -12,7 +12,17 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { CheckCircle2, Loader2, ShieldCheck } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { CalendarX, CheckCircle2, Loader2, RotateCcw, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
@@ -267,5 +277,110 @@ export function ApproveAuthorizationDialog({ target, onClose }: { target: Approv
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * P4-P31: Mark Expired / Clear Expired for ONE authorization period (the card
+ * it sits in). Always an explicit, confirmed staff action — expiry is never
+ * inferred from dates or a zero balance. Only that period's authorization
+ * status changes: session counts, dates of service, claims and money are
+ * untouched, and each changed row is audited with its before/after status.
+ */
+export function PeriodExpiryControl({
+  patientId,
+  patientName,
+  period,
+  expired,
+  authorized,
+  completed,
+  className = '',
+}: {
+  patientId: string;
+  patientName: string;
+  period: number;
+  expired: boolean;
+  authorized: number;
+  completed: number;
+  className?: string;
+}) {
+  const refresh = useRefreshAfterAuthorizationChange();
+  const [open, setOpen] = useState(false);
+  const guard = useRef(createSingleFlightGuard());
+  const mutation = trpc.visits.setPeriodExpired.useMutation({
+    onSettled: () => guard.current.exit(),
+    onSuccess: (_data, vars) => {
+      toast.success(vars.expired
+        ? `Authorization Period ${vars.authPeriod} marked Expired`
+        : `Expired cleared for Authorization Period ${vars.authPeriod}`);
+      setOpen(false);
+      refresh(vars.patientId);
+    },
+    onError: (err) => toast.error(err.message || 'Failed to update authorization period'),
+  });
+  const unused = Math.max(0, authorized - completed);
+
+  const confirm = () => {
+    if (!guard.current.tryEnter()) return;
+    mutation.mutate({ patientId, authPeriod: period, expired: !expired });
+  };
+
+  return (
+    <>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => setOpen(true)}
+        className={`bg-white text-slate-700 border-slate-300 hover:bg-slate-50 ${className}`}
+      >
+        {expired ? <RotateCcw className="w-4 h-4" /> : <CalendarX className="w-4 h-4" />}
+        {expired ? 'Clear Expired' : 'Mark Expired'}
+      </Button>
+      <AlertDialog open={open} onOpenChange={(next) => { if (!mutation.isPending) setOpen(next); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {expired ? `Clear Expired on Authorization Period ${period}?` : `Mark Authorization Period ${period} Expired?`}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                {expired ? (
+                  <p>
+                    Period {period} for <strong>{patientName}</strong> stops being expired. Its rows marked
+                    Expired go back to no status, so any unused sessions count as available again. The change
+                    is recorded in the history.
+                  </p>
+                ) : (
+                  <>
+                    <p>
+                      Only Period {period} for <strong>{patientName}</strong> changes. Other periods are not touched.
+                    </p>
+                    <p>
+                      Authorized stays <strong>{authorized}</strong> and completed stays <strong>{completed}</strong>.
+                      {unused > 0 && (
+                        <span> The <strong>{unused}</strong> unused session(s) stay visible as history but will no longer be available.</span>
+                      )}
+                      <span> No sessions, claims or amounts are changed.</span>
+                    </p>
+                  </>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={mutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={mutation.isPending}
+              onClick={(e) => { e.preventDefault(); confirm(); }}
+              className={expired ? '' : 'bg-slate-700 hover:bg-slate-800 text-white'}
+            >
+              {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+              {expired ? 'Clear Expired' : 'Mark Expired'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

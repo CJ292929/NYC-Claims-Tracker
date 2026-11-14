@@ -40,7 +40,8 @@ import type { NavSection } from '@/components/dashboard/DashboardSidebar';
 import { getPatientMetrics } from '@/lib/patientMetrics';
 import { getPatientOverviewMetrics } from '@/lib/patientOverviewMetrics';
 import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
-import { ApproveAuthorizationDialog, AuthorizationActionButtons, useMarkAuthorizationRequested, type ApproveTarget } from '@/components/dashboard/AuthorizationActions';
+import { ApproveAuthorizationDialog, AuthorizationActionButtons, PeriodExpiryControl, useMarkAuthorizationRequested, type ApproveTarget } from '@/components/dashboard/AuthorizationActions';
+import { getPeriodMetrics } from '@shared/authPeriodMetrics';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
 import { ClaimImportDialog } from '@/components/claims/ClaimImportDialog';
@@ -84,7 +85,7 @@ interface DbVisit {
   dateOfService: Date | null;
   newAuth: string | null;
   dateAshSubmitted: Date | null;
-  authStatus: 'none' | 'pending' | 'approved' | 'denied';
+  authStatus: 'none' | 'pending' | 'approved' | 'denied' | 'expired';
   assignmentOfBenefits: 'yes' | 'no' | null;
   submissionStatus: 'ready_to_file' | 'hold' | 'do_not_file' | null;
   remarks: string | null;
@@ -147,6 +148,7 @@ const msToInputDate = (ms: number | null | undefined): string => {
  *  same convention AuthAlertPanel uses to decide which patients are "urgent". */
 const AUTH_BANNER_STYLE: Record<Exclude<AuthUrgency, 'ok'>, { border: string; bg: string; icon: string; heading: string; body: string }> = {
   denied: { border: 'border-red-600', bg: 'bg-red-50', icon: 'text-red-700', heading: 'text-red-800', body: 'text-red-700' },
+  expired: { border: 'border-slate-500', bg: 'bg-slate-50', icon: 'text-slate-600', heading: 'text-slate-800', body: 'text-slate-700' },
   exhausted: { border: 'border-red-400', bg: 'bg-red-50', icon: 'text-red-600', heading: 'text-red-800', body: 'text-red-700' },
   critical: { border: 'border-orange-400', bg: 'bg-orange-50', icon: 'text-orange-600', heading: 'text-orange-800', body: 'text-orange-700' },
   warning: { border: 'border-yellow-400', bg: 'bg-yellow-50', icon: 'text-yellow-600', heading: 'text-yellow-800', body: 'text-yellow-700' },
@@ -161,10 +163,14 @@ function authBannerMessage(
   remaining: number,
   insurance: string,
   authExpiryWarning: boolean,
+  unusedExpired = 0,
 ): string {
   if (authExpiryWarning) return `Authorization is expiring soon. Contact ${insurance} to renew.`;
   switch (urgency) {
     case 'denied': return `Authorization was denied. ${remaining} session(s) remaining.`;
+    case 'expired': return unusedExpired > 0
+      ? `This authorization expired with ${unusedExpired} unused session(s). They are no longer available. Request a new authorization from ${insurance}.`
+      : `This authorization expired. Request a new authorization from ${insurance}.`;
     case 'exhausted': return `${remaining} session(s) remaining. Authorization request is urgent.`;
     case 'critical': return `Only ${remaining} session(s) remaining. Request new authorization from ${insurance} immediately.`;
     case 'warning': return `Only ${remaining} session(s) remaining. Request new authorization from ${insurance} soon.`;
@@ -173,12 +179,16 @@ function authBannerMessage(
 }
 
 /** Compact colored dropdown for a visit's auth status. `onChange` receives the
- *  same '' | 'Pending' | 'Approved' | 'Denied' shape handleUpdateAuthStatus expects. */
+ *  same '' | 'Pending' | 'Approved' | 'Denied' | 'Expired' shape handleUpdateAuthStatus expects.
+ *  P4-P31: Expired set on any row makes that row's period expired (see
+ *  shared/authPeriodMetrics.ts); the period header's Mark Expired sets the
+ *  whole period at once. */
 function VisitAuthStatusSelect({ visit, onChange }: { visit: DbVisit; onChange: (visitId: string, status: string) => void }) {
   const value = visit.authStatus === 'none' ? 'none' : visit.authStatus.charAt(0).toUpperCase() + visit.authStatus.slice(1);
   const colorClass =
     visit.authStatus === 'approved' ? 'bg-green-100 text-green-700' :
     visit.authStatus === 'denied' ? 'bg-red-100 text-red-700' :
+    visit.authStatus === 'expired' ? 'bg-slate-200 text-slate-800' :
     visit.authStatus === 'pending' ? 'bg-yellow-100 text-yellow-700' :
     'bg-gray-100 text-gray-600';
   return (
@@ -195,6 +205,7 @@ function VisitAuthStatusSelect({ visit, onChange }: { visit: DbVisit; onChange: 
         <SelectItem value="Pending">Pending</SelectItem>
         <SelectItem value="Approved">Approved</SelectItem>
         <SelectItem value="Denied">Denied</SelectItem>
+        <SelectItem value="Expired">Expired</SelectItem>
       </SelectContent>
     </Select>
   );
@@ -732,6 +743,8 @@ export default function Dashboard() {
     onSuccess: () => {
       utils.visits.listByPatient.invalidate({ patientId: activePatient?.id });
       utils.visits.completedPatientIds.invalidate();
+      // P4-P31: an auth status edit (e.g. Expired) can change the alerts.
+      utils.visits.authAlerts.invalidate();
     },
     onError: (e) => toast.error(`Failed to update: ${e.message}`),
   });
@@ -1201,7 +1214,7 @@ export default function Dashboard() {
   };
 
   const handleUpdateAuthStatus = (visitId: string, status: string) => {
-    const mapped = status === '' ? 'none' : (status.toLowerCase() as 'none' | 'pending' | 'approved' | 'denied');
+    const mapped = status === '' ? 'none' : (status.toLowerCase() as 'none' | 'pending' | 'approved' | 'denied' | 'expired');
     updateVisit.mutate({ id: visitId, authStatus: mapped });
     toast.success(`Auth status updated to ${mapped}`);
   };
@@ -1727,7 +1740,7 @@ export default function Dashboard() {
           {/* Auth Alert */}
           {alertStatus && alertStatus.urgency !== 'ok' && (() => {
             const style = AUTH_BANNER_STYLE[alertStatus.urgency];
-            const message = authBannerMessage(alertStatus.urgency, activeMetrics.remaining, activePatient.insurance, alertStatus.authExpiryWarning);
+            const message = authBannerMessage(alertStatus.urgency, activeMetrics.remaining, activePatient.insurance, alertStatus.authExpiryWarning, activeMetrics.unusedExpired);
             return (
               <div role="status" className={`mb-6 rounded-xl border-2 p-4 shadow-md flex items-start gap-3 ${style.border} ${style.bg}`}>
                 <AlertCircle className={`w-6 h-6 mt-0.5 shrink-0 ${style.icon}`} />
@@ -1760,9 +1773,13 @@ export default function Dashboard() {
             {[
               { label: 'Authorized', value: activeMetrics.totalAuthorized, tone: 'navy' as const },
               { label: 'Completed', value: activeMetrics.completed, tone: 'gold' as const },
-              { label: 'Remaining', value: activeMetrics.remaining, tone: 'navy' as const },
-            ].map(({ label, value, tone }) => (
-              <MetricCard key={label} label={label} value={value} tone={tone} />
+              { label: 'Remaining', value: activeMetrics.remaining, tone: 'navy' as const,
+                // P4-P31: unused sessions of an expired period are history, not availability.
+                sub: activeMetrics.expired
+                  ? (activeMetrics.unusedExpired > 0 ? `Authorization expired · ${activeMetrics.unusedExpired} unused` : 'Authorization expired')
+                  : undefined },
+            ].map(({ label, value, tone, sub }) => (
+              <MetricCard key={label} label={label} value={value} tone={tone} sub={sub} />
             ))}
           </div>
 
@@ -1791,6 +1808,7 @@ export default function Dashboard() {
                   const periodAuth = periodVisits.find(v => v.sessionsAuthorized != null)?.sessionsAuthorized ?? 0;
                   const periodInsurance = periodVisits.find(v => v.insuranceCompany)?.insuranceCompany ?? null;
                   const isActive = period === activePeriod;
+                  const periodMetrics = getPeriodMetrics(periodVisits, period);
                   // P4-P23: the session table no longer shows the three
                   // financial totals (or their Claims-derived auto-fill and
                   // period Totals footer) for any role — those values stay
@@ -1814,12 +1832,23 @@ export default function Dashboard() {
                             {periodInsurance && (
                               <span className="font-medium">{periodInsurance} · </span>
                             )}
-                            {isActive
+                            {periodMetrics.expired
+                              ? `Authorization expired · ${periodMetrics.completed} of ${periodMetrics.authorized} used${periodMetrics.unusedExpired > 0 ? ` · ${periodMetrics.unusedExpired} unused (not available)` : ''}`
+                              : isActive
                               ? 'Active period · click any (editable) field below to correct it'
                               : 'Completed authorization period · fields marked (editable) can still be corrected'}
                           </CardDescription>
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                          {/* P4-P31: expiry is set per period, by hand. */}
+                          <PeriodExpiryControl
+                            patientId={activePatient.id}
+                            patientName={activePatient.name}
+                            period={period}
+                            expired={periodMetrics.expired}
+                            authorized={periodMetrics.authorized}
+                            completed={periodMetrics.completed}
+                          />
                           {/* Claims access only (P4-P25) */}
                           {canAccessClaims && (
                           <Button

@@ -8,7 +8,8 @@
  */
 
 export type UserRole = "user" | "admin";
-export type AuthStatus = "none" | "pending" | "approved" | "denied";
+// P4-P31: "expired" is set manually per authorization period (see set_auth_period_expired_with_audit).
+export type AuthStatus = "none" | "pending" | "approved" | "denied" | "expired";
 export type ClaimsStatus = "submitted" | "approved" | "pending" | "denied" | "pended" | "rejected" | "resubmitted";
 export type ClinicUserRole = "admin" | "staff";
 export type ClinicUserStatus = "active" | "archived";

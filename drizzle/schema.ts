@@ -58,7 +58,7 @@ export interface VisitRecord {
   dateOfService: Date | null;
   newAuth: string | null;
   dateAshSubmitted: Date | null;
-  authStatus: "none" | "pending" | "approved" | "denied";
+  authStatus: "none" | "pending" | "approved" | "denied" | "expired";
   insuranceCompany: string | null;  // insurance used for this auth period
   totalInsuranceReimbursement: number | null;  // numeric(10,2)
   totalPatientDue: number | null;              // numeric(10,2)

@@ -9,7 +9,7 @@ import { supabase } from "./supabase";
 import { ENV } from "./_core/env";
 import { normalizeUsername, escapeLikePattern } from "./_core/username";
 import type { User, Patient, VisitRecord, ClinicUser, InsertVisitRecord, InsurerCatalogEntry } from "../drizzle/schema";
-import { determineActivePeriod, deriveAuthPeriodMetrics, getPeriodMetrics } from "@shared/authPeriodMetrics";
+import { determineActivePeriod, deriveAuthPeriodMetrics, getPeriodMetrics, isLatestPeriodExpired } from "@shared/authPeriodMetrics";
 import { deriveAuthorizationUrgency } from "@shared/authUrgency";
 import type { DismissedEobLine, ExistingClaimLine, SavedDocumentLine } from "@shared/claimImport";
 import type { ActorContext } from "./actorIdentity";
@@ -488,7 +488,7 @@ export async function createVisitRecord(data: {
   dateOfService?: Date | null;
   newAuth?: string | null;
   dateAshSubmitted?: Date | null;
-  authStatus?: "none" | "pending" | "approved" | "denied";
+  authStatus?: "none" | "pending" | "approved" | "denied" | "expired";
   totalInsuranceReimbursement?: number | null;
   totalPatientDue?: number | null;
   totalPatientPaid?: number | null;
@@ -540,7 +540,7 @@ export async function updateVisitRecord(
     dateOfService?: Date | null;
     newAuth?: string | null;
     dateAshSubmitted?: Date | null;
-    authStatus?: "none" | "pending" | "approved" | "denied";
+    authStatus?: "none" | "pending" | "approved" | "denied" | "expired";
     totalInsuranceReimbursement?: number | null;
     totalPatientDue?: number | null;
     totalPatientPaid?: number | null;
@@ -599,7 +599,7 @@ export async function bulkCreateVisitRecords(
     dateOfService?: Date | null;
     newAuth?: string | null;
     dateAshSubmitted?: Date | null;
-    authStatus?: "none" | "pending" | "approved" | "denied";
+    authStatus?: "none" | "pending" | "approved" | "denied" | "expired";
   }>,
   actor?: ActorContext
 ): Promise<void> {
@@ -656,6 +656,8 @@ export async function getAuthAlertSummaries() {
         authStatus: "none" as const, dateAshSubmitted: null, urgency: "ok" as const,
         authValidUntil: patient.authValidUntil ?? null,
         authPeriod: null,
+        periodExpired: false,
+        unusedExpiredSessions: 0,
       };
     }
 
@@ -675,12 +677,17 @@ export async function getAuthAlertSummaries() {
     const authStatus = lastActiveRow?.authStatus ?? "none";
     const dateAshSubmitted = lastActiveRow?.dateAshSubmitted ?? null;
 
+    // P4-P31: a manually expired target period keeps its history but has no
+    // available sessions (remaining is already 0 — it can't be active).
+    const targetMetrics = getPeriodMetrics(pVisits, targetPeriod);
+
     const authValidUntil = patient.authValidUntil ?? null;
     const { urgency, authExpiryWarning } = deriveAuthorizationUrgency({
       remaining: sessionsRemaining,
       authStatus,
       authValidUntil,
       now: new Date(),
+      periodExpired: targetMetrics.expired,
     });
 
     return {
@@ -693,6 +700,8 @@ export async function getAuthAlertSummaries() {
       authValidUntil,
       authExpiryWarning,
       authPeriod: targetPeriod,
+      periodExpired: targetMetrics.expired,
+      unusedExpiredSessions: targetMetrics.unusedExpired,
     };
   });
 }
@@ -714,14 +723,16 @@ export async function getLatestVisitIdForPatient(patientId: string): Promise<str
 // with remaining sessions > 0, or null if every period is exhausted. Kept as a
 // pure function so approval always targets the same period the alert showed,
 // without touching any historical (already-resolved) period.
+// P4-P31: rows carry auth_status so a manually expired period is skipped.
 export function determineActiveAuthPeriod(
-  visits: { auth_period: number | null; sessions_authorized: number | null; date_of_service: string | null }[],
+  visits: { auth_period: number | null; sessions_authorized: number | null; date_of_service: string | null; auth_status?: string | null }[],
 ): number | null {
   return determineActivePeriod(
     visits.map(v => ({
       authPeriod: v.auth_period,
       sessionsAuthorized: v.sessions_authorized,
       dateOfService: v.date_of_service,
+      authStatus: v.auth_status ?? null,
     }))
   );
 }
@@ -732,6 +743,7 @@ type MarkAsRequestedRow = {
   session_number: number | null;
   sessions_authorized: number | null;
   date_of_service: string | null;
+  auth_status?: string | null;
 };
 
 // Picks the visit row that Mark Requested should update: the last row (by
@@ -762,7 +774,7 @@ export function determineMarkAsRequestedTargetRow(
 export async function getMarkAsRequestedTargetVisitId(patientId: string): Promise<string | null> {
   const { data, error } = await supabase
     .from("visit_records")
-    .select("id, auth_period, session_number, sessions_authorized, date_of_service")
+    .select("id, auth_period, session_number, sessions_authorized, date_of_service, auth_status")
     .eq("patient_id", patientId);
 
   if (error) { console.error("[Supabase] getMarkAsRequestedTargetVisitId:", error); return null; }
@@ -796,12 +808,12 @@ export async function approveAndCreateNewBatch(
   // (read-only — safe to resolve before the atomic write below).
   const { data: periodStatusRows, error: periodStatusErr } = await supabase
     .from("visit_records")
-    .select("auth_period, sessions_authorized, date_of_service")
+    .select("auth_period, sessions_authorized, date_of_service, auth_status")
     .eq("patient_id", patientId);
 
   if (periodStatusErr) { console.error("[Supabase] approveAndCreateNewBatch periodStatus:", periodStatusErr); throw periodStatusErr; }
 
-  const statusRows = (periodStatusRows ?? []) as { auth_period: number | null; sessions_authorized: number | null; date_of_service: string | null }[];
+  const statusRows = (periodStatusRows ?? []) as { auth_period: number | null; sessions_authorized: number | null; date_of_service: string | null; auth_status: string | null }[];
   const statusPeriods = Array.from(new Set(statusRows.map(r => r.auth_period ?? 1))).sort((a, b) => a - b);
   const latestStatusPeriod = statusPeriods.length > 0 ? statusPeriods[statusPeriods.length - 1] : 1;
   const targetApprovalPeriod = determineActiveAuthPeriod(statusRows) ?? latestStatusPeriod;
@@ -827,6 +839,34 @@ export async function approveAndCreateNewBatch(
   return { newVisitIds: (newVisitIds ?? []) as string[] };
 }
 
+/** P4-P31: marks ONE authorization period Expired (expired=true), or clears a
+ * mistaken Expired (expired=false), in one transaction via
+ * set_auth_period_expired_with_audit. Only that period's rows change, and only
+ * auth_status: session counts, dates of service, claims and money are never
+ * touched. Every changed row gets its own audit entry with the before/after
+ * status. Clearing sets the period's expired rows back to 'none' (the earlier
+ * values stay readable in the audit history). Returns how many rows changed. */
+export async function setAuthPeriodExpired(
+  patientId: string,
+  authPeriod: number,
+  expired: boolean,
+  actor: ActorContext,
+): Promise<number> {
+  const { data, error } = await supabase.rpc("set_auth_period_expired_with_audit", {
+    p_patient_id: patientId,
+    p_auth_period: authPeriod,
+    p_expired: expired,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
+  if (error) {
+    console.error("[Supabase] setAuthPeriodExpired:", error);
+    throw error;
+  }
+  return typeof data === "number" ? data : 0;
+}
+
 export async function getCompletedPatients(): Promise<string[]> {
   const { data: allPatients, error: pErr } = await supabase
     .from("patients")
@@ -838,7 +878,7 @@ export async function getCompletedPatients(): Promise<string[]> {
 
   const { data: allVisits, error: vErr } = await supabase
     .from("visit_records")
-    .select("id, patient_id, date_of_service, sessions_authorized, auth_period");
+    .select("id, patient_id, date_of_service, sessions_authorized, auth_period, auth_status");
 
   if (vErr) { console.error("[Supabase] getCompletedPatients visits:", vErr); return []; }
   const visits = (allVisits ?? []).map(toVisitRecord);
@@ -847,6 +887,10 @@ export async function getCompletedPatients(): Promise<string[]> {
     .filter(patient => {
       const pVisits = visits.filter(v => v.patientId === patient.id);
       if (pVisits.length === 0) return false;
+
+      // P4-P31: a patient whose latest period was marked Expired is not
+      // "completed" (sessions exhausted) — the authorization expired.
+      if (isLatestPeriodExpired(pVisits)) return false;
 
       return determineActivePeriod(pVisits) === null;
     })
