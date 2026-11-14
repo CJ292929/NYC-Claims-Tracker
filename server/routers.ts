@@ -84,12 +84,14 @@ import {
 
 // ─── Shared input schemas ─────────────────────────────────────────────────────
 
-// P4-P31: visit_records_period_expiry_guard refuses these on every write
-// path; translate them into user-facing errors instead of a 500.
-function rethrowPeriodExpiryGuard(err: unknown): never {
+// P4-P31 / P4-P31R: visit_records_period_expiry_guard refuses these on every
+// write path; translate them into user-facing errors instead of a 500.
+// Exported for unit tests.
+export function rethrowPeriodExpiryGuard(err: unknown): never {
   const code = (err as { code?: string })?.code;
   if (code === "P0035") throw new TRPCError({ code: "BAD_REQUEST", message: "Expiry is set per authorization period. Use Mark Expired / Restore on the period instead." });
-  if (code === "P0036") throw new TRPCError({ code: "CONFLICT", message: "This authorization period is expired. A date of service after the expiry date can't be recorded against it." });
+  if (code === "P0036") throw new TRPCError({ code: "CONFLICT", message: "This authorization period is expired. A date of service after its expiry date (the New York calendar date it was marked Expired) can't be recorded against it." });
+  if (code === "P0038") throw new TRPCError({ code: "CONFLICT", message: "This is the last session of an expired authorization period, so it can't be moved out. Restore the period first, or leave at least one session in it." });
   throw err;
 }
 

@@ -38,6 +38,7 @@ import {
   sortAuthorizationRecords,
 } from "@/lib/authorizationRecordFilters";
 import { deriveAuthorizationOverviewMetrics, type AuthorizationOverviewRecord } from "@/lib/authorizationOverview";
+import { rethrowPeriodExpiryGuard } from "./routers";
 
 type V = AuthPeriodVisit & { authStatus: string };
 
@@ -234,5 +235,32 @@ describe("P4-P31 records, filters and overview", () => {
     const m = deriveAuthorizationOverviewMetrics(records);
     expect(m).toMatchObject({ expired: 1, denied: 1, exhausted: 1 });
     expect(m.statusDistribution).toEqual({ none: 0, pending: 0, approved: 2, denied: 1 });
+  });
+});
+
+describe("P4-P31R guard errors reach the user as explained conflicts, not 500s", () => {
+  const thrown = (code: string) => {
+    try {
+      rethrowPeriodExpiryGuard({ code });
+    } catch (e) {
+      return e as { code?: string; message?: string };
+    }
+    throw new Error("expected a throw");
+  };
+
+  it("P0036 names the New York calendar date rule", () => {
+    expect(thrown("P0036")).toMatchObject({ code: "CONFLICT" });
+    expect(thrown("P0036").message).toMatch(/New York calendar date/);
+  });
+
+  it("P0038 (last row of an expired period) says to restore first", () => {
+    expect(thrown("P0038")).toMatchObject({ code: "CONFLICT" });
+    expect(thrown("P0038").message).toMatch(/Restore the period first/);
+  });
+
+  it("other errors pass through unchanged", () => {
+    const original = { code: "23505", message: "dup" };
+    expect(thrown("23505")).toMatchObject({ code: "23505" });
+    expect(() => rethrowPeriodExpiryGuard(original)).toThrow(expect.objectContaining(original));
   });
 });

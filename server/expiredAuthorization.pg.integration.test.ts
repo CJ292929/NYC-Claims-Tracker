@@ -4,10 +4,10 @@
  * Real-Postgres tests for supabase/migrations/20261114000000_p4_p31_expired_authorization_status.sql,
  * synthetic data only:
  *
- *   "upgrade" database — references/local-setup-schema.sql as of origin/main
- *     (before this change) plus every earlier migration, seeded with existing
- *     Approved/Denied rows, THEN the P4-P31 migration applied twice
- *     (re-runnable). Proves no existing row is converted.
+ *   "upgrade" database — references/local-setup-schema.sql as of a5a2a71
+ *     (main before P4-P31) plus every earlier migration, seeded with existing
+ *     Approved/Denied rows, THEN the P4-P31 and P4-P31R migrations, each
+ *     applied twice (re-runnable). Proves no existing row is converted.
  *   "fresh" database — the updated local-setup-schema.sql plus every migration.
  *
  * Proves: expiry is a period-level mark (period_expired_at) that never
@@ -20,8 +20,11 @@
  * period without reactivating the old one or carrying unused sessions over.
  *
  * Same harness as sessionWorkflowFields.pg.integration.test.ts: disposable
- * `postgres:16` Docker container; excluded from CI by the
- * `**\/*.integration.test.ts` glob; self-skips when Docker isn't available.
+ * `postgres:16` Docker container; self-skips when Docker isn't available,
+ * unless REQUIRE_PG_INTEGRATION=1 (set by CI's postgres-integration job):
+ * then a missing prerequisite fails the run instead. The P4-P31R
+ * regressions (New York cutoff, lock protocol, last-row protection, legacy
+ * upgrade) are in expiredPeriodGuard.p4p31r.pg.integration.test.ts.
  *
  *   npx vitest run server/expiredAuthorization.pg.integration.test.ts
  */
@@ -37,6 +40,10 @@ const REPO_ROOT = path.resolve(import.meta.dirname, "..");
 const CONTAINER_NAME = `p4p31-expired-auth-pg-${randomUUID().slice(0, 8)}`;
 const MIGRATIONS_DIR = path.join(REPO_ROOT, "supabase", "migrations");
 const P31_MIGRATION = "20261114000000_p4_p31_expired_authorization_status.sql";
+const P31R_MIGRATION = "20261115000000_p4_p31r_expired_period_guard_upgrade.sql";
+/** main immediately before P4-P31 (merge of PR #82). Pinned rather than
+ *  origin/main, so this fixture stays "before P4-P31" after the PR merges. */
+const PRE_P31_REF = "a5a2a71";
 
 function dockerAvailable(): boolean {
   try {
@@ -49,7 +56,7 @@ function dockerAvailable(): boolean {
 
 function preChangeSchemaAvailable(): string | null {
   try {
-    return execFileSync("git", ["show", "origin/main:references/local-setup-schema.sql"], { cwd: REPO_ROOT, encoding: "utf8" });
+    return execFileSync("git", ["show", `${PRE_P31_REF}:references/local-setup-schema.sql`], { cwd: REPO_ROOT, encoding: "utf8" });
   } catch {
     return null;
   }
@@ -57,6 +64,9 @@ function preChangeSchemaAvailable(): string | null {
 
 const HAS_DOCKER = dockerAvailable();
 const PRE_CHANGE_SCHEMA = preChangeSchemaAvailable();
+if (process.env.REQUIRE_PG_INTEGRATION === "1" && (!HAS_DOCKER || !PRE_CHANGE_SCHEMA)) {
+  throw new Error(`REQUIRE_PG_INTEGRATION=1 but docker=${HAS_DOCKER}, pre-P4-P31 schema at ${PRE_P31_REF}=${PRE_CHANGE_SCHEMA !== null}`);
+}
 
 function sh(cmd: string, args: string[]) {
   return execFileSync(cmd, args, { encoding: "utf8" });
@@ -201,10 +211,10 @@ describe.skipIf(!HAS_DOCKER || !PRE_CHANGE_SCHEMA)("P4-P31 period-level Expired 
     writeFileSync(preSchemaPath, PRE_CHANGE_SCHEMA ?? "");
     psqlInline("upgrade_db", SUPABASE_ROLES);
     psqlFile("upgrade_db", preSchemaPath);
-    for (const file of migrations.filter((f) => f !== P31_MIGRATION)) psqlFile("upgrade_db", path.join(MIGRATIONS_DIR, file));
+    for (const file of migrations.filter((f) => f < P31_MIGRATION)) psqlFile("upgrade_db", path.join(MIGRATIONS_DIR, file));
     upgradePatient = await seed("upgrade_db", "denied");
-    psqlFile("upgrade_db", path.join(MIGRATIONS_DIR, P31_MIGRATION));
-    psqlFile("upgrade_db", path.join(MIGRATIONS_DIR, P31_MIGRATION));
+    for (const file of [P31_MIGRATION, P31_MIGRATION, P31R_MIGRATION, P31R_MIGRATION]) psqlFile("upgrade_db", path.join(MIGRATIONS_DIR, file));
+    for (const file of migrations.filter((f) => f > P31R_MIGRATION)) psqlFile("upgrade_db", path.join(MIGRATIONS_DIR, file));
 
     psqlInline("fresh_db", SUPABASE_ROLES);
     psqlFile("fresh_db", path.join(REPO_ROOT, "references", "local-setup-schema.sql"));

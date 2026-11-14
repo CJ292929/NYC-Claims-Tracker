@@ -1045,6 +1045,7 @@ DECLARE
   v_before_diff jsonb := '{}'::jsonb;
   v_after_diff jsonb := '{}'::jsonb;
   v_key text;
+  v_lock_patient uuid;
 BEGIN
   IF p_id IS NULL THEN
     v_after := jsonb_populate_record(NULL::public.visit_records, p_data);
@@ -1079,6 +1080,18 @@ BEGIN
 
     RETURN v_id;
   ELSE
+    -- P4-P31R (supabase/migrations/20261115000000) lock protocol: a write that may move the row to another
+    -- period locks the patient BEFORE the row, the same order as
+    -- mark/restore/approve, so the app can't deadlock against them. It
+    -- also serialises the guard trigger's "last row of an expired period"
+    -- check. (Unlocked read, re-checked under the row lock below.)
+    IF p_data ? 'auth_period' THEN
+      SELECT vr.patient_id INTO v_lock_patient FROM public.visit_records vr WHERE vr.id = p_id;
+      IF v_lock_patient IS NOT NULL THEN
+        PERFORM 1 FROM public.patients WHERE id = v_lock_patient FOR NO KEY UPDATE;
+      END IF;
+    END IF;
+
     SELECT * INTO v_before FROM public.visit_records WHERE id = p_id FOR UPDATE;
     IF NOT FOUND THEN
       RAISE EXCEPTION 'visit_record_not_found: %', p_id USING ERRCODE = 'P0030';
@@ -1088,6 +1101,9 @@ BEGIN
     IF p_patient_id IS NOT NULL AND v_before.patient_id <> p_patient_id THEN
       RAISE EXCEPTION 'visit_record_patient_mismatch: % does not belong to %', p_id, p_patient_id
         USING ERRCODE = 'P0031';
+    END IF;
+    IF v_lock_patient IS NOT NULL AND v_before.patient_id <> v_lock_patient THEN
+      RAISE EXCEPTION 'visit_record_moved_concurrently: %', p_id USING ERRCODE = '40001';
     END IF;
 
     v_after := jsonb_populate_record(v_before, p_data);
@@ -2441,7 +2457,22 @@ REVOKE ALL ON FUNCTION public.import_patient_csv_group_with_audit(text, text, da
 GRANT EXECUTE ON FUNCTION public.import_patient_csv_group_with_audit(text, text, date, jsonb, text, uuid, text, text, uuid) TO service_role;
 
 -- ─── P4-P31: manual Expired per authorization period (see supabase/migrations/20261114000000) ─
--- ─── 2: guard trigger ───────────────────────────────────────────────────────
+-- (guard and cutoff as revised by P4-P31R, supabase/migrations/20261115000000)
+-- ─── 3: New York calendar-date cutoff ───────────────────────────────────────
+-- The last date_of_service that may be recorded against a period marked
+-- Expired at p_marked_at: that instant's calendar date in America/New_York.
+-- tzdata handles both DST transitions.
+CREATE OR REPLACE FUNCTION public.auth_period_expiry_cutoff(p_marked_at timestamptz)
+RETURNS date
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+  SELECT (p_marked_at AT TIME ZONE 'America/New_York')::date
+$$;
+
+-- ─── 4: guard trigger (replaces the bf51417 definition) ─────────────────────
 CREATE OR REPLACE FUNCTION public.visit_records_period_expiry_guard()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -2449,10 +2480,48 @@ SET search_path = pg_catalog, public
 AS $$
 DECLARE
   v_period_expired_at timestamptz;
+  v_removing boolean;
 BEGIN
-  -- The only sanctioned writer of period_expired_at (transaction-local flag).
-  IF current_setting('app.p4p31_period_expiry_write', true) = 'on' THEN
+  -- Internal bypass for set_auth_period_expired_with_audit's own UPDATE,
+  -- which keeps every row in its period. NOT a security boundary: any
+  -- session with direct SQL access can set this (see header, point 4).
+  IF TG_OP = 'UPDATE'
+     AND current_setting('app.p4p31_period_expiry_write', true) = 'on'
+     AND NEW.patient_id = OLD.patient_id
+     AND NEW.auth_period = OLD.auth_period THEN
     RETURN NEW;
+  END IF;
+
+  -- ── Removal from an expired period: DELETE, or a move out of it ──
+  v_removing := TG_OP = 'DELETE'
+    OR (TG_OP = 'UPDATE' AND (NEW.patient_id <> OLD.patient_id OR NEW.auth_period <> OLD.auth_period));
+
+  -- OLD is the latest row version, and this statement holds its row lock.
+  -- So OLD.period_expired_at can't change under us: mark and restore both
+  -- need that row lock.
+  IF v_removing AND OLD.period_expired_at IS NOT NULL THEN
+    -- Removers of one patient serialise here (NO KEY UPDATE conflicts with
+    -- itself, with the inserters' FOR SHARE and with mark/restore/approve's
+    -- FOR UPDATE). The EXISTS below is a new statement, so it sees every
+    -- removal committed while we waited. Two removers can't both see the
+    -- other's row and empty the period together.
+    PERFORM 1 FROM public.patients WHERE id = OLD.patient_id FOR NO KEY UPDATE;
+    -- No patient row: this is the patient-delete cascade (or the patient was
+    -- deleted concurrently). Let it through.
+    IF FOUND AND NOT EXISTS (
+      SELECT 1 FROM public.visit_records vr
+      WHERE vr.patient_id = OLD.patient_id
+        AND vr.auth_period = OLD.auth_period
+        AND vr.id <> OLD.id
+    ) THEN
+      RAISE EXCEPTION 'expired_period_last_row: session % is the last row of expired authorization period %; restore the period first',
+        OLD.id, OLD.auth_period
+        USING ERRCODE = 'P0038';
+    END IF;
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
   END IF;
 
   IF TG_OP = 'UPDATE'
@@ -2465,7 +2534,17 @@ BEGIN
     END IF;
   ELSE
     -- Insert, or a move to another period/patient: inherit the target
-    -- period's mark. Supplying a different mark directly is refused.
+    -- period's mark.
+    --
+    -- An INSERT, or a move from another patient, holds no lock that a
+    -- concurrent mark of NEW.patient_id would wait for. So take one. A move
+    -- within one patient already holds this row's lock, which that mark
+    -- needs too. Taking the patient lock here as well would only add a
+    -- deadlock, so it is skipped.
+    IF TG_OP = 'INSERT' OR NEW.patient_id <> OLD.patient_id THEN
+      PERFORM 1 FROM public.patients WHERE id = NEW.patient_id FOR SHARE;
+    END IF;
+
     SELECT vr.period_expired_at INTO v_period_expired_at
     FROM public.visit_records vr
     WHERE vr.patient_id = NEW.patient_id
@@ -2487,12 +2566,12 @@ BEGIN
 
   IF NEW.period_expired_at IS NOT NULL
      AND NEW.date_of_service IS NOT NULL
-     AND NEW.date_of_service > (NEW.period_expired_at AT TIME ZONE 'UTC')::date
+     AND NEW.date_of_service > public.auth_period_expiry_cutoff(NEW.period_expired_at)
      AND (TG_OP = 'INSERT'
           OR NEW.date_of_service IS DISTINCT FROM OLD.date_of_service
           OR NEW.period_expired_at IS DISTINCT FROM OLD.period_expired_at) THEN
-    RAISE EXCEPTION 'session_after_period_expiry: % is after authorization period % expired on %',
-      NEW.date_of_service, NEW.auth_period, (NEW.period_expired_at AT TIME ZONE 'UTC')::date
+    RAISE EXCEPTION 'session_after_period_expiry: % is after authorization period % expired on % (New York date)',
+      NEW.date_of_service, NEW.auth_period, public.auth_period_expiry_cutoff(NEW.period_expired_at)
       USING ERRCODE = 'P0036';
   END IF;
 
@@ -2502,7 +2581,7 @@ $$;
 
 DROP TRIGGER IF EXISTS visit_records_period_expiry_guard ON public.visit_records;
 CREATE TRIGGER visit_records_period_expiry_guard
-  BEFORE INSERT OR UPDATE ON public.visit_records
+  BEFORE INSERT OR UPDATE OR DELETE ON public.visit_records
   FOR EACH ROW EXECUTE FUNCTION public.visit_records_period_expiry_guard();
 
 -- ─── 3: set_auth_period_expired_with_audit ──────────────────────────────────

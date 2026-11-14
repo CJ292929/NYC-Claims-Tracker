@@ -8097,7 +8097,8 @@ function clearFailedAttempts(normalizedUsername, ip) {
 function rethrowPeriodExpiryGuard(err) {
   const code = err?.code;
   if (code === "P0035") throw new TRPCError3({ code: "BAD_REQUEST", message: "Expiry is set per authorization period. Use Mark Expired / Restore on the period instead." });
-  if (code === "P0036") throw new TRPCError3({ code: "CONFLICT", message: "This authorization period is expired. A date of service after the expiry date can't be recorded against it." });
+  if (code === "P0036") throw new TRPCError3({ code: "CONFLICT", message: "This authorization period is expired. A date of service after its expiry date (the New York calendar date it was marked Expired) can't be recorded against it." });
+  if (code === "P0038") throw new TRPCError3({ code: "CONFLICT", message: "This is the last session of an expired authorization period, so it can't be moved out. Restore the period first, or leave at least one session in it." });
   throw err;
 }
 var visitRecordInput = z7.object({
