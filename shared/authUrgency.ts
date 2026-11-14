@@ -11,7 +11,9 @@
 // server/getAuthAlertSummaries.urgencyParity.test.ts for the frozen pre-C5
 // reference behavior this intentionally diverges from.
 
-export type AuthUrgency = "exhausted" | "critical" | "warning" | "pending" | "ok" | "denied";
+// P4-P31: "expired" — staff manually marked the target authorization period
+// Expired. Distinct from both "exhausted" (sessions all used) and "denied".
+export type AuthUrgency = "exhausted" | "critical" | "warning" | "pending" | "ok" | "denied" | "expired";
 
 export interface AuthorizationUrgencyInput {
   remaining: number;
@@ -25,6 +27,8 @@ export interface AuthorizationUrgencyInput {
   // against real data and exist for forward compatibility only.
   authValidUntil?: number | string | Date | null;
   now?: Date;
+  /** P4-P31: the target period was manually marked Expired (see shared/authPeriodMetrics.ts). */
+  periodExpired?: boolean;
 }
 
 export interface AuthorizationUrgencyResult {
@@ -57,7 +61,7 @@ function toMillis(value: number | string | Date): number {
 export function deriveAuthorizationUrgency(
   input: AuthorizationUrgencyInput,
 ): AuthorizationUrgencyResult {
-  const { remaining, authStatus = null, authValidUntil = null, now = new Date() } = input;
+  const { remaining, authStatus = null, authValidUntil = null, now = new Date(), periodExpired = false } = input;
 
   let urgency: AuthUrgency = "ok";
   if (remaining === 0) urgency = "exhausted";
@@ -65,6 +69,13 @@ export function deriveAuthorizationUrgency(
   else if (remaining <= 3) urgency = "warning";
 
   if (authStatus === "pending" && urgency === "ok") urgency = "pending";
+  // P4-P31: an expired period has no available sessions, but it is not
+  // "exhausted" — it shows as expired. Once a new authorization has been
+  // requested from it (its status row is pending) it shows as pending, so
+  // Approved / Re-request stay reachable.
+  if (periodExpired) {
+    urgency = authStatus === "pending" ? "pending" : "expired";
+  }
   // Denied is top priority: it overrides every remaining-session tier above,
   // exactly as the old denied -> exhausted mapping did.
   if (authStatus === "denied") urgency = "denied";

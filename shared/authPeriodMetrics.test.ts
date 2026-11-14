@@ -27,7 +27,7 @@ describe("deriveAuthPeriodMetrics", () => {
 
     expect(result.periods).toEqual([1]);
     expect(result.activePeriod).toBe(1);
-    expect(result.activeMetrics).toEqual({ authorized: 10, completed: 3, remaining: 7 });
+    expect(result.activeMetrics).toEqual({ authorized: 10, completed: 3, remaining: 7, expired: false, unusedExpired: 0 });
   });
 
   it("CASE B: period 1 exhausted, period 2 active", () => {
@@ -46,7 +46,7 @@ describe("deriveAuthPeriodMetrics", () => {
 
     expect(result.periods).toEqual([1, 2]);
     expect(result.activePeriod).toBe(2);
-    expect(result.activeMetrics).toEqual({ authorized: 8, completed: 2, remaining: 6 });
+    expect(result.activeMetrics).toEqual({ authorized: 8, completed: 2, remaining: 6, expired: false, unusedExpired: 0 });
   });
 
   it("CASE C: oldest non-exhausted period wins, never newest", () => {
@@ -81,7 +81,7 @@ describe("deriveAuthPeriodMetrics", () => {
     const result = deriveAuthPeriodMetrics(visits);
 
     expect(result.activePeriod).toBeNull();
-    expect(result.activeMetrics).toEqual({ authorized: 0, completed: 0, remaining: 0 });
+    expect(result.activeMetrics).toEqual({ authorized: 0, completed: 0, remaining: 0, expired: false, unusedExpired: 0 });
   });
 
   it("CASE E: null authPeriod normalizes to period 1", () => {
@@ -100,7 +100,7 @@ describe("deriveAuthPeriodMetrics", () => {
     const resultWithoutStale = getPeriodMetrics(withoutStale, 1);
     const resultWithStale = getPeriodMetrics(withStale, 1);
 
-    expect(resultWithoutStale).toEqual({ authorized: 10, completed: 2, remaining: 8 });
+    expect(resultWithoutStale).toEqual({ authorized: 10, completed: 2, remaining: 8, expired: false, unusedExpired: 0 });
     expect(resultWithStale).toEqual(resultWithoutStale);
   });
 
@@ -109,7 +109,7 @@ describe("deriveAuthPeriodMetrics", () => {
 
     const result = getPeriodMetrics(visits, 1);
 
-    expect(result).toEqual({ authorized: 2, completed: 3, remaining: 0 });
+    expect(result).toEqual({ authorized: 2, completed: 3, remaining: 0, expired: false, unusedExpired: 0 });
   });
 
   it("CASE H: empty input", () => {
@@ -117,7 +117,7 @@ describe("deriveAuthPeriodMetrics", () => {
 
     expect(result.periods).toEqual([]);
     expect(result.activePeriod).toBeNull();
-    expect(result.activeMetrics).toEqual({ authorized: 0, completed: 0, remaining: 0 });
+    expect(result.activeMetrics).toEqual({ authorized: 0, completed: 0, remaining: 0, expired: false, unusedExpired: 0 });
   });
 
   it("CASE I: periods are sorted ascending regardless of input order", () => {

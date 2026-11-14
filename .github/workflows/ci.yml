@@ -37,3 +37,37 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  postgres-integration:
+    # P4-P31 / P4-P31R: the expired-period guard lives in Postgres (trigger,
+    # lock protocol, migrations), so it is proven against a real database.
+    # Each suite starts its own throwaway postgres:16 container on the runner
+    # and removes it afterwards. Synthetic data only. No secrets and no hosted
+    # database are used.
+    name: Postgres integration (expired authorization periods)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (full history; the upgrade fixture reads a5a2a71)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: P4-P31 + P4-P31R real-Postgres suites
+        env:
+          # Fail (don't skip) if Docker or the pinned git history is missing.
+          REQUIRE_PG_INTEGRATION: "1"
+        run: npx vitest run server/expiredAuthorization.pg.integration.test.ts server/expiredPeriodGuard.p4p31r.pg.integration.test.ts

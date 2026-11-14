@@ -98,8 +98,15 @@ function getPeriodMetrics(visits, period) {
   const authRow = periodVisits.find((v) => v.sessionsAuthorized != null);
   const authorized = authRow?.sessionsAuthorized ?? 0;
   const completed = periodVisits.filter((v) => v.dateOfService != null).length;
-  const remaining = Math.max(0, authorized - completed);
-  return { authorized, completed, remaining };
+  const leftover = Math.max(0, authorized - completed);
+  const expired = periodVisits.some((v) => v.periodExpiredAt != null);
+  return {
+    authorized,
+    completed,
+    remaining: expired ? 0 : leftover,
+    expired,
+    unusedExpired: expired ? leftover : 0
+  };
 }
 function determineActivePeriod(visits) {
   const periods = getSortedUniquePeriods(visits);
@@ -111,8 +118,12 @@ function determineActivePeriod(visits) {
 function deriveAuthPeriodMetrics(visits) {
   const periods = getSortedUniquePeriods(visits);
   const activePeriod = determineActivePeriod(visits);
-  const activeMetrics = activePeriod != null ? getPeriodMetrics(visits, activePeriod) : { authorized: 0, completed: 0, remaining: 0 };
+  const activeMetrics = activePeriod != null ? getPeriodMetrics(visits, activePeriod) : { authorized: 0, completed: 0, remaining: 0, expired: false, unusedExpired: 0 };
   return { periods, activePeriod, activeMetrics };
+}
+function areAllAuthorizedSessionsUsed(visits) {
+  if (visits.length === 0) return false;
+  return determineActivePeriod(visits.map((v) => ({ ...v, periodExpiredAt: null }))) === null;
 }
 var init_authPeriodMetrics = __esm({
   "shared/authPeriodMetrics.ts"() {
@@ -127,12 +138,15 @@ function toMillis(value) {
   return new Date(value).getTime();
 }
 function deriveAuthorizationUrgency(input) {
-  const { remaining, authStatus = null, authValidUntil = null, now = /* @__PURE__ */ new Date() } = input;
+  const { remaining, authStatus = null, authValidUntil = null, now = /* @__PURE__ */ new Date(), periodExpired = false } = input;
   let urgency = "ok";
   if (remaining === 0) urgency = "exhausted";
   else if (remaining <= 2) urgency = "critical";
   else if (remaining <= 3) urgency = "warning";
   if (authStatus === "pending" && urgency === "ok") urgency = "pending";
+  if (periodExpired) {
+    urgency = authStatus === "pending" ? "pending" : "expired";
+  }
   if (authStatus === "denied") urgency = "denied";
   const nowMs = now.getTime();
   const authValidUntilMs = authValidUntil !== null ? toMillis(authValidUntil) : null;
@@ -221,6 +235,7 @@ __export(db_exports, {
   reactivateClinicUser: () => reactivateClinicUser,
   reactivateInsurerCatalogEntry: () => reactivateInsurerCatalogEntry,
   reopenDismissedEobLine: () => reopenDismissedEobLine,
+  setAuthPeriodExpired: () => setAuthPeriodExpired,
   setPatientActive: () => setPatientActive,
   sortByFollowUpUrgency: () => sortByFollowUpUrgency,
   touchClinicUserLastLogin: () => touchClinicUserLastLogin,
@@ -272,6 +287,8 @@ function toVisitRecord(row) {
     newAuth: row.new_auth ?? null,
     dateAshSubmitted: row.date_ash_submitted ? /* @__PURE__ */ new Date(row.date_ash_submitted + "T00:00:00Z") : null,
     authStatus: row.auth_status ?? "none",
+    // P4-P31: period-level expiry mark (null = not expired).
+    periodExpiredAt: row.period_expired_at ? new Date(row.period_expired_at) : null,
     insuranceCompany: row.insurance_company ?? null,
     totalInsuranceReimbursement: row.total_insurance_reimbursement ?? null,
     totalPatientDue: row.total_patient_due ?? null,
@@ -614,7 +631,9 @@ async function getAuthAlertSummaries() {
         dateAshSubmitted: null,
         urgency: "ok",
         authValidUntil: patient.authValidUntil ?? null,
-        authPeriod: null
+        authPeriod: null,
+        periodExpired: false,
+        unusedExpiredSessions: 0
       };
     }
     const { periods: allPeriods, activePeriod } = deriveAuthPeriodMetrics(pVisits);
@@ -627,12 +646,14 @@ async function getAuthAlertSummaries() {
     const lastActiveRow = targetVisits[targetVisits.length - 1];
     const authStatus = lastActiveRow?.authStatus ?? "none";
     const dateAshSubmitted = lastActiveRow?.dateAshSubmitted ?? null;
+    const targetMetrics = getPeriodMetrics(pVisits, targetPeriod);
     const authValidUntil = patient.authValidUntil ?? null;
     const { urgency, authExpiryWarning } = deriveAuthorizationUrgency({
       remaining: sessionsRemaining,
       authStatus,
       authValidUntil,
-      now: /* @__PURE__ */ new Date()
+      now: /* @__PURE__ */ new Date(),
+      periodExpired: targetMetrics.expired
     });
     return {
       patientId: patient.id,
@@ -645,7 +666,9 @@ async function getAuthAlertSummaries() {
       urgency,
       authValidUntil,
       authExpiryWarning,
-      authPeriod: targetPeriod
+      authPeriod: targetPeriod,
+      periodExpired: targetMetrics.expired,
+      unusedExpiredSessions: targetMetrics.unusedExpired
     };
   });
 }
@@ -663,7 +686,8 @@ function determineActiveAuthPeriod(visits) {
     visits.map((v) => ({
       authPeriod: v.auth_period,
       sessionsAuthorized: v.sessions_authorized,
-      dateOfService: v.date_of_service
+      dateOfService: v.date_of_service,
+      periodExpiredAt: v.period_expired_at ?? null
     }))
   );
 }
@@ -677,7 +701,7 @@ function determineMarkAsRequestedTargetRow(visits) {
   return targetVisits[targetVisits.length - 1] ?? null;
 }
 async function getMarkAsRequestedTargetVisitId(patientId) {
-  const { data, error } = await supabase.from("visit_records").select("id, auth_period, session_number, sessions_authorized, date_of_service").eq("patient_id", patientId);
+  const { data, error } = await supabase.from("visit_records").select("id, auth_period, session_number, sessions_authorized, date_of_service, period_expired_at").eq("patient_id", patientId);
   if (error) {
     console.error("[Supabase] getMarkAsRequestedTargetVisitId:", error);
     return null;
@@ -687,7 +711,7 @@ async function getMarkAsRequestedTargetVisitId(patientId) {
   return target?.id ?? null;
 }
 async function approveAndCreateNewBatch(patientId, sessionsAuthorized, authDate, newInsurance, authValidUntil, actor) {
-  const { data: periodStatusRows, error: periodStatusErr } = await supabase.from("visit_records").select("auth_period, sessions_authorized, date_of_service").eq("patient_id", patientId);
+  const { data: periodStatusRows, error: periodStatusErr } = await supabase.from("visit_records").select("auth_period, sessions_authorized, date_of_service, period_expired_at").eq("patient_id", patientId);
   if (periodStatusErr) {
     console.error("[Supabase] approveAndCreateNewBatch periodStatus:", periodStatusErr);
     throw periodStatusErr;
@@ -714,6 +738,22 @@ async function approveAndCreateNewBatch(patientId, sessionsAuthorized, authDate,
   }
   return { newVisitIds: newVisitIds ?? [] };
 }
+async function setAuthPeriodExpired(patientId, authPeriod, expired, reason, actor) {
+  const { data, error } = await supabase.rpc("set_auth_period_expired_with_audit", {
+    p_patient_id: patientId,
+    p_auth_period: authPeriod,
+    p_expired: expired,
+    p_reason: reason,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay
+  });
+  if (error) {
+    console.error("[Supabase] setAuthPeriodExpired:", error);
+    throw error;
+  }
+  return typeof data === "number" ? data : 0;
+}
 async function getCompletedPatients() {
   const { data: allPatients, error: pErr } = await supabase.from("patients").select("id").order("name", { ascending: true });
   if (pErr) {
@@ -729,8 +769,7 @@ async function getCompletedPatients() {
   const visits = (allVisits ?? []).map(toVisitRecord);
   return allPatients.filter((patient) => {
     const pVisits = visits.filter((v) => v.patientId === patient.id);
-    if (pVisits.length === 0) return false;
-    return determineActivePeriod(pVisits) === null;
+    return areAllAuthorizedSessionsUsed(pVisits);
   }).map((p) => p.id);
 }
 async function getClinicUserByUsername(username) {
@@ -8055,6 +8094,13 @@ function clearFailedAttempts(normalizedUsername, ip) {
 }
 
 // server/routers.ts
+function rethrowPeriodExpiryGuard(err) {
+  const code = err?.code;
+  if (code === "P0035") throw new TRPCError3({ code: "BAD_REQUEST", message: "Expiry is set per authorization period. Use Mark Expired / Restore on the period instead." });
+  if (code === "P0036") throw new TRPCError3({ code: "CONFLICT", message: "This authorization period is expired. A date of service after its expiry date (the New York calendar date it was marked Expired) can't be recorded against it." });
+  if (code === "P0038") throw new TRPCError3({ code: "CONFLICT", message: "This is the last session of an expired authorization period, so it can't be moved out. Restore the period first, or leave at least one session in it." });
+  throw err;
+}
 var visitRecordInput = z7.object({
   sessionsAuthorized: z7.number().nullable().optional(),
   sessionsRemaining: z7.number().nullable().optional(),
@@ -8615,22 +8661,31 @@ var appRouter = router({
     create: normalProtectedProcedure.input(visitRecordInput.extend({ patientId: z7.string().uuid() })).mutation(async ({ input, ctx }) => {
       assertMayWriteVisitFinancials(ctx.user, input);
       const { patientId, dateOfService, dateAshSubmitted, ...rest } = input;
-      const id = await createVisitRecord({
-        patientId,
-        ...rest,
-        dateOfService: parseDate2(dateOfService),
-        dateAshSubmitted: parseDate2(dateAshSubmitted)
-      }, getActorContext(ctx.user));
+      let id;
+      try {
+        id = await createVisitRecord({
+          patientId,
+          ...rest,
+          dateOfService: parseDate2(dateOfService),
+          dateAshSubmitted: parseDate2(dateAshSubmitted)
+        }, getActorContext(ctx.user));
+      } catch (err) {
+        rethrowPeriodExpiryGuard(err);
+      }
       return { id };
     }),
     update: normalProtectedProcedure.input(visitRecordInput.extend({ id: z7.string().uuid() })).mutation(async ({ input, ctx }) => {
       assertMayWriteVisitFinancials(ctx.user, input);
       const { id, dateOfService, dateAshSubmitted, ...rest } = input;
-      await updateVisitRecord(id, {
-        ...rest,
-        ...dateOfService !== void 0 ? { dateOfService: parseDate2(dateOfService) } : {},
-        ...dateAshSubmitted !== void 0 ? { dateAshSubmitted: parseDate2(dateAshSubmitted) } : {}
-      }, getActorContext(ctx.user));
+      try {
+        await updateVisitRecord(id, {
+          ...rest,
+          ...dateOfService !== void 0 ? { dateOfService: parseDate2(dateOfService) } : {},
+          ...dateAshSubmitted !== void 0 ? { dateAshSubmitted: parseDate2(dateAshSubmitted) } : {}
+        }, getActorContext(ctx.user));
+      } catch (err) {
+        rethrowPeriodExpiryGuard(err);
+      }
       return { success: true };
     }),
     // P4-P23: per-session workflow fields (Assignment of Benefits, Submission
@@ -8686,7 +8741,11 @@ var appRouter = router({
         dateAshSubmitted: parseDate2(r.dateAshSubmitted),
         authStatus: r.authStatus ?? "none"
       }));
-      await bulkCreateVisitRecords(rows, getActorContext(ctx.user));
+      try {
+        await bulkCreateVisitRecords(rows, getActorContext(ctx.user));
+      } catch (err) {
+        rethrowPeriodExpiryGuard(err);
+      }
       return { success: true };
     }),
     // Returns urgency summaries for ALL patients — used by the homepage alert panel
@@ -8732,6 +8791,39 @@ var appRouter = router({
         dateAshSubmitted: todayMidnight
       }, actor, { action: "AUTHORIZATION_MARKED_REQUESTED", patientId: input.patientId });
       return { success: true, visitId, date: todayMidnight.toISOString().split("T")[0] };
+    }),
+    // P4-P31: manually mark one authorization period Expired, or restore it
+    // (reason required; refused once a later period exists). Same gate as
+    // visits.update / markAsRequested (every authenticated dashboard user who
+    // can edit authorization sessions). Never inferred from dates or a zero
+    // balance. Only the period's period_expired_at changes — row statuses,
+    // counts, dates, claims and money are untouched — audited once per change.
+    setPeriodExpired: normalProtectedProcedure.input(z7.object({
+      patientId: z7.string().uuid(),
+      authPeriod: z7.number().int().min(1),
+      expired: z7.boolean(),
+      reason: z7.string().trim().max(500).optional()
+    }).refine((v) => v.expired || (v.reason ?? "").length > 0, {
+      message: "A reason is required to restore an expired authorization period",
+      path: ["reason"]
+    })).mutation(async ({ input, ctx }) => {
+      try {
+        const changed = await setAuthPeriodExpired(
+          input.patientId,
+          input.authPeriod,
+          input.expired,
+          input.reason || null,
+          getActorContext(ctx.user)
+        );
+        return { success: true, changed };
+      } catch (err) {
+        const code = err?.code;
+        if (code === "P0020") throw new TRPCError3({ code: "NOT_FOUND", message: "Patient not found" });
+        if (code === "P0034") throw new TRPCError3({ code: "NOT_FOUND", message: "Authorization period not found for this patient" });
+        if (code === "P0037") throw new TRPCError3({ code: "CONFLICT", message: "This period can't be restored: a newer authorization period already exists." });
+        if (code === "22023") throw new TRPCError3({ code: "BAD_REQUEST", message: "A reason (500 characters or fewer) is required to restore an expired period." });
+        throw err;
+      }
     }),
     historyForPatient: normalProtectedProcedure.input(z7.object({ patientId: z7.string().uuid() })).query(async ({ ctx, input }) => {
       return redactAuditRows(await listHistoryForEntity("visit_record", input.patientId), canAccessClaims(ctx.user));

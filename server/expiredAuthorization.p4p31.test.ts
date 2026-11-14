@@ -1,0 +1,266 @@
+/**
+ * server/expiredAuthorization.p4p31.test.ts — P4-P31 period-level "Expired" authorization.
+ *
+ * Pure-logic coverage (synthetic data only) of the shared period math, the
+ * shared urgency, the server's period targeting and the client presentation:
+ *   - 16 authorized / 13 completed, then marked Expired: authorized stays 16,
+ *     completed stays 13, the 3 unused stay visible as history, none count as
+ *     available, and it shows "Authorization Expired" (not Exhausted/Denied).
+ *   - A fully used Approved period is still "Sessions Exhausted".
+ *   - Denied stays distinct from Expired.
+ *   - Expiry is never inferred from dates or a zero balance.
+ *   - Expiry is period-level (period_expired_at), independent of row
+ *     auth_status: a row status edit (pending / approved / denied) never
+ *     expires or reactivates a period.
+ *   - Mark Requested / Approve target the right period after an expiry.
+ *   - Completed Patients ("Sessions exhausted") keeps its pre-P4-P31 meaning.
+ * The SQL side (period-scoped write, audit, approve not reactivating the old
+ * period) is proven against real Postgres in
+ * server/expiredAuthorization.pg.integration.test.ts.
+ */
+import { describe, expect, it } from "vitest";
+import {
+  deriveAuthPeriodMetrics,
+  determineActivePeriod,
+  getPeriodMetrics,
+  areAllAuthorizedSessionsUsed,
+  isPeriodExpired,
+  type AuthPeriodVisit,
+} from "@shared/authPeriodMetrics";
+import { deriveAuthorizationUrgency } from "@shared/authUrgency";
+import { determineActiveAuthPeriod, determineMarkAsRequestedTargetRow } from "./db";
+import { getPatientMetrics } from "@/lib/patientMetrics";
+import { derivePatientAlertPresentation } from "@/lib/patientAuthUrgency";
+import {
+  getAuthorizationActivity,
+  getCompletedSessions,
+  matchesAuthorizationRecordFilters,
+  sortAuthorizationRecords,
+} from "@/lib/authorizationRecordFilters";
+import { deriveAuthorizationOverviewMetrics, type AuthorizationOverviewRecord } from "@/lib/authorizationOverview";
+import { rethrowPeriodExpiryGuard } from "./routers";
+
+type V = AuthPeriodVisit & { authStatus: string };
+
+const EXPIRED_AT = "2026-11-10T15:00:00Z";
+
+/** One period: `authorized` rows, the first `completed` of them dated. */
+function period(n: number, authorized: number, completed: number, authStatus = "none", expired = false): V[] {
+  return Array.from({ length: authorized }, (_, i) => ({
+    authPeriod: n,
+    sessionsAuthorized: authorized,
+    dateOfService: i < completed ? `2026-0${n}-${String(i + 1).padStart(2, "0")}` : null,
+    authStatus,
+    periodExpiredAt: expired ? EXPIRED_AT : null,
+  }));
+}
+
+const NOW = new Date("2026-11-14T12:00:00Z");
+
+describe("P4-P31 period math: 13 of 16 then Expired", () => {
+  const expired = period(1, 16, 13, "approved", true);
+
+  it("keeps authorized 16 and completed 13, reports 3 unused, 0 available", () => {
+    expect(getPeriodMetrics(expired, 1)).toEqual({
+      authorized: 16, completed: 13, remaining: 0, expired: true, unusedExpired: 3,
+    });
+  });
+
+  it("is never the active period, so nothing counts as available", () => {
+    expect(determineActivePeriod(expired)).toBeNull();
+    expect(deriveAuthPeriodMetrics(expired).activeMetrics.remaining).toBe(0);
+  });
+
+  it("patient metrics show 16 / 13 / 0 with 3 unused as history", () => {
+    expect(getPatientMetrics(expired)).toEqual({
+      totalAuthorized: 16, completed: 13, remaining: 0, activePeriod: null, expired: true, unusedExpired: 3,
+    });
+  });
+
+  it("shows Authorization Expired, not Sessions Exhausted or Denied", () => {
+    const p = derivePatientAlertPresentation(expired, 0, null, NOW);
+    expect(p.urgency).toBe("expired");
+    expect(p.label).toBe("Authorization Expired");
+  });
+
+  it("expiry is the period mark, scoped to that period only", () => {
+    const rows = [...period(1, 4, 4, "approved"), ...period(2, 16, 13, "none", true)];
+    expect(isPeriodExpired(rows, 2)).toBe(true);
+    expect(isPeriodExpired(rows, 1)).toBe(false);
+    expect(getPeriodMetrics(rows, 1)).toMatchObject({ authorized: 4, completed: 4, expired: false });
+  });
+
+  it("row auth_status edits never expire or reactivate a period", () => {
+    // A stray row status value does not expire anything...
+    const notExpired = period(1, 16, 13, "none").map((v, i) => (i === 15 ? { ...v, authStatus: "expired" } : v));
+    expect(getPeriodMetrics(notExpired, 1)).toMatchObject({ remaining: 3, expired: false });
+    // ...and any status on every row of an expired period keeps it expired.
+    for (const status of ["none", "pending", "approved", "denied"]) {
+      const rows = period(1, 16, 13, status, true);
+      expect(getPeriodMetrics(rows, 1)).toMatchObject({ remaining: 0, expired: true, unusedExpired: 3 });
+      expect(determineActivePeriod(rows)).toBeNull();
+    }
+  });
+});
+
+describe("P4-P31 distinct from Exhausted and Denied", () => {
+  it("fully used Approved period is still Sessions Exhausted", () => {
+    const used = period(1, 16, 16, "approved");
+    expect(getPeriodMetrics(used, 1)).toMatchObject({ remaining: 0, expired: false, unusedExpired: 0 });
+    const p = derivePatientAlertPresentation(used, 0, null, NOW);
+    expect(p.urgency).toBe("exhausted");
+    expect(p.label).toBe("Sessions Exhausted");
+  });
+
+  it("Denied stays Denied and does not expire the period", () => {
+    const denied = period(1, 16, 13, "denied");
+    expect(getPeriodMetrics(denied, 1)).toMatchObject({ remaining: 3, expired: false });
+    expect(derivePatientAlertPresentation(denied, 3, null, NOW).urgency).toBe("denied");
+  });
+
+  it("a Denied status row in an expired period still reads Denied (denied keeps top priority)", () => {
+    expect(derivePatientAlertPresentation(period(1, 16, 13, "denied", true), 0, null, NOW).urgency).toBe("denied");
+    expect(deriveAuthorizationUrgency({ remaining: 0, authStatus: "denied", periodExpired: true, now: NOW }).urgency).toBe("denied");
+  });
+});
+
+describe("P4-P31 expiry is never inferred", () => {
+  it("a past Authorization Valid Until date does not make a period expired", () => {
+    const rows = period(1, 16, 13);
+    expect(isPeriodExpired(rows, 1)).toBe(false);
+    const p = derivePatientAlertPresentation(rows, 3, NOW.getTime() - 86_400_000, NOW);
+    expect(p.urgency).not.toBe("expired");
+  });
+
+  it("zero remaining without Expired is Exhausted, not Expired", () => {
+    expect(deriveAuthorizationUrgency({ remaining: 0, authStatus: "none", now: NOW }).urgency).toBe("exhausted");
+  });
+
+  it("rows without periodExpiredAt are never expired (callers that don't select it)", () => {
+    const rows: AuthPeriodVisit[] = [{ authPeriod: 1, sessionsAuthorized: 2, dateOfService: null }];
+    expect(getPeriodMetrics(rows, 1)).toMatchObject({ remaining: 2, expired: false });
+  });
+});
+
+describe("P4-P31 request / re-request / approval targeting", () => {
+  type Row = { id: string; auth_period: number; session_number: number; sessions_authorized: number; date_of_service: string | null; period_expired_at: string | null };
+  function rows(p: number, authorized: number, completed: number, expired: boolean, prefix: string): Row[] {
+    return Array.from({ length: authorized }, (_, i) => ({
+      id: `${prefix}-${i + 1}`, auth_period: p, session_number: i + 1, sessions_authorized: authorized,
+      date_of_service: i < completed ? "2026-05-01" : null, period_expired_at: expired ? EXPIRED_AT : null,
+    }));
+  }
+
+  it("an older expired period with unused sessions is skipped: the newer active period is targeted", () => {
+    const all = [...rows(1, 16, 13, true, "p1"), ...rows(2, 10, 2, false, "p2")];
+    expect(determineActiveAuthPeriod(all)).toBe(2);
+    expect(determineMarkAsRequestedTargetRow(all)?.id).toBe("p2-10");
+  });
+
+  it("from an expired latest period, Mark Requested targets that period's status row", () => {
+    const all = [...rows(1, 4, 4, false, "p1"), ...rows(2, 16, 13, true, "p2")];
+    expect(determineActiveAuthPeriod(all)).toBeNull();
+    expect(determineMarkAsRequestedTargetRow(all)?.id).toBe("p2-16");
+  });
+
+  it("after the request, the period stays expired (0 available) and shows Pending so Approved / Re-request are offered", () => {
+    const visits: V[] = period(1, 16, 13, "none", true);
+    visits[15] = { ...visits[15], authStatus: "pending" };
+    expect(getPeriodMetrics(visits, 1)).toMatchObject({ remaining: 0, expired: true, unusedExpired: 3 });
+    const p = derivePatientAlertPresentation(visits, 0, null, NOW);
+    expect(p.urgency).toBe("pending");
+    expect(p.authStatus).toBe("pending");
+  });
+
+  it("after approval creates the next period, that new period is active with only its own sessions", () => {
+    const visits: V[] = [...period(1, 16, 13, "approved", true), ...period(2, 12, 0)];
+    const m = getPatientMetrics(visits);
+    expect(m).toMatchObject({ activePeriod: 2, totalAuthorized: 12, completed: 0, remaining: 12, expired: false });
+    expect(getPeriodMetrics(visits, 1)).toMatchObject({ authorized: 16, completed: 13, unusedExpired: 3, expired: true });
+  });
+
+  it("even a 1-session expired period stays expired after Mark Requested sets its only row pending", () => {
+    const visits: V[] = period(1, 1, 0, "pending", true);
+    expect(getPeriodMetrics(visits, 1)).toMatchObject({ remaining: 0, expired: true, unusedExpired: 1 });
+    expect(determineActivePeriod(visits)).toBeNull();
+  });
+});
+
+describe("Completed Patients (Sessions exhausted) keeps its pre-P4-P31 meaning", () => {
+  it("is 'every authorized session used'; marking Expired neither adds nor removes a patient", () => {
+    // Expired with unused sessions: not exhausted, same as before it was marked.
+    expect(areAllAuthorizedSessionsUsed(period(1, 16, 13))).toBe(false);
+    expect(areAllAuthorizedSessionsUsed(period(1, 16, 13, "none", true))).toBe(false);
+    // Fully used: exhausted whether or not it was also marked Expired.
+    expect(areAllAuthorizedSessionsUsed(period(1, 16, 16, "approved"))).toBe(true);
+    expect(areAllAuthorizedSessionsUsed(period(1, 16, 16, "approved", true))).toBe(true);
+    // An older expired period with unused sessions keeps the patient out, as before.
+    expect(areAllAuthorizedSessionsUsed([...period(1, 16, 13, "approved", true), ...period(2, 4, 4)])).toBe(false);
+    expect(areAllAuthorizedSessionsUsed([])).toBe(false);
+  });
+});
+
+describe("P4-P31 records, filters and overview", () => {
+  const base = { insurance: "Synthetic Ins", authPeriod: 1, authValidUntil: null, authExpiryWarning: false };
+  const records: AuthorizationOverviewRecord[] = [
+    { ...base, patientId: "a", patientName: "Synthetic A", sessionsAuthorized: 16, sessionsRemaining: 0, authStatus: "approved", urgency: "expired", periodExpired: true, unusedExpiredSessions: 3 },
+    { ...base, patientId: "b", patientName: "Synthetic B", sessionsAuthorized: 16, sessionsRemaining: 0, authStatus: "approved", urgency: "exhausted", periodExpired: false, unusedExpiredSessions: 0 },
+    { ...base, patientId: "c", patientName: "Synthetic C", sessionsAuthorized: 16, sessionsRemaining: 3, authStatus: "denied", urgency: "denied", periodExpired: false, unusedExpiredSessions: 0 },
+  ];
+
+  it("completed for an expired record is 13, not 16", () => {
+    expect(getCompletedSessions(16, 0, 3)).toBe(13);
+    expect(getCompletedSessions(16, 0)).toBe(16);
+  });
+
+  it("activity is 'expired' for an expired period, 'exhausted' for a fully used one", () => {
+    expect(getAuthorizationActivity(0, true)).toBe("expired");
+    expect(getAuthorizationActivity(0, false)).toBe("exhausted");
+  });
+
+  it("urgency and activity filters separate Expired from Denied and Exhausted; auth status stays the row's own", () => {
+    const scope = { search: "", insurance: "", authStatus: "all", urgency: "all", activity: "all" };
+    expect(records.filter(r => matchesAuthorizationRecordFilters(r, { ...scope, urgency: "expired" })).map(r => r.patientId)).toEqual(["a"]);
+    expect(records.filter(r => matchesAuthorizationRecordFilters(r, { ...scope, authStatus: "approved" })).map(r => r.patientId)).toEqual(["a", "b"]);
+    expect(records.filter(r => matchesAuthorizationRecordFilters(r, { ...scope, urgency: "denied" })).map(r => r.patientId)).toEqual(["c"]);
+    expect(records.filter(r => matchesAuthorizationRecordFilters(r, { ...scope, activity: "exhausted" })).map(r => r.patientId)).toEqual(["b"]);
+    expect(records.filter(r => matchesAuthorizationRecordFilters(r, { ...scope, activity: "expired" })).map(r => r.patientId)).toEqual(["a"]);
+  });
+
+  it("sorts Denied, then Expired, then Exhausted", () => {
+    expect(sortAuthorizationRecords(records).map(r => r.urgency)).toEqual(["denied", "expired", "exhausted"]);
+  });
+
+  it("overview counts Expired separately", () => {
+    const m = deriveAuthorizationOverviewMetrics(records);
+    expect(m).toMatchObject({ expired: 1, denied: 1, exhausted: 1 });
+    expect(m.statusDistribution).toEqual({ none: 0, pending: 0, approved: 2, denied: 1 });
+  });
+});
+
+describe("P4-P31R guard errors reach the user as explained conflicts, not 500s", () => {
+  const thrown = (code: string) => {
+    try {
+      rethrowPeriodExpiryGuard({ code });
+    } catch (e) {
+      return e as { code?: string; message?: string };
+    }
+    throw new Error("expected a throw");
+  };
+
+  it("P0036 names the New York calendar date rule", () => {
+    expect(thrown("P0036")).toMatchObject({ code: "CONFLICT" });
+    expect(thrown("P0036").message).toMatch(/New York calendar date/);
+  });
+
+  it("P0038 (last row of an expired period) says to restore first", () => {
+    expect(thrown("P0038")).toMatchObject({ code: "CONFLICT" });
+    expect(thrown("P0038").message).toMatch(/Restore the period first/);
+  });
+
+  it("other errors pass through unchanged", () => {
+    const original = { code: "23505", message: "dup" };
+    expect(thrown("23505")).toMatchObject({ code: "23505" });
+    expect(() => rethrowPeriodExpiryGuard(original)).toThrow(expect.objectContaining(original));
+  });
+});

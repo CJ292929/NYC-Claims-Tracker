@@ -29,7 +29,7 @@ export function PatientSnapshotPane({
   emptyStateMessage = 'Select a patient to see their summary.',
 }: {
   patient: SnapshotPatient | null;
-  metrics: { totalAuthorized: number; completed: number; remaining: number };
+  metrics: { totalAuthorized: number; completed: number; remaining: number; expired?: boolean; unusedExpired?: number };
   alertStatus: AlertStatus | null;
   onToggleActive: (checked: boolean) => void;
   togglePending: boolean;
@@ -93,6 +93,9 @@ export function PatientSnapshotPane({
         <div className="p-3 bg-brand-cream/40 rounded-lg text-center">
           <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1">Remaining</p>
           <p className="text-2xl font-bold text-brand-blue">{metrics.remaining}</p>
+          {metrics.expired && (metrics.unusedExpired ?? 0) > 0 && (
+            <p className="text-[10px] text-slate-600 mt-0.5">{metrics.unusedExpired} unused · expired</p>
+          )}
         </div>
       </div>
 

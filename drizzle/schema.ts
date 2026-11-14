@@ -59,6 +59,8 @@ export interface VisitRecord {
   newAuth: string | null;
   dateAshSubmitted: Date | null;
   authStatus: "none" | "pending" | "approved" | "denied";
+  /** P4-P31: period-level manual expiry (visit_records.period_expired_at); null = not expired. */
+  periodExpiredAt: Date | null;
   insuranceCompany: string | null;  // insurance used for this auth period
   totalInsuranceReimbursement: number | null;  // numeric(10,2)
   totalPatientDue: number | null;              // numeric(10,2)

@@ -9,8 +9,10 @@ import {
   ShieldCheck,
   AlertTriangle,
   XCircle,
+  CalendarX,
 } from 'lucide-react';
 import { trpc } from '@/lib/trpc';
+import { URGENCY_SORT_ORDER } from '@/lib/authorizationRecordFilters';
 import { ApproveAuthorizationDialog, AuthorizationActionButtons, useMarkAuthorizationRequested, type ApproveTarget } from './AuthorizationActions';
 
 const URGENCY_CONFIG = {
@@ -21,6 +23,15 @@ const URGENCY_CONFIG = {
     cardClass: 'border-l-4 border-red-600 bg-red-50',
     badgeClass: 'bg-red-100 text-red-700',
     iconClass: 'text-red-700',
+  },
+  // P4-P31: manually marked Expired — not Denied, not Sessions Exhausted.
+  expired: {
+    label: 'Authorization Expired',
+    sublabel: 'Request a new authorization',
+    icon: <CalendarX className="w-4 h-4" />,
+    cardClass: 'border-l-4 border-slate-500 bg-slate-50',
+    badgeClass: 'bg-slate-200 text-slate-800',
+    iconClass: 'text-slate-600',
   },
   exhausted: {
     label: 'Sessions Exhausted',
@@ -73,8 +84,7 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
   const urgent = alerts
     .filter(a => a.urgency !== 'ok')
     .sort((a, b) => {
-      const order = { denied: 0, exhausted: 1, critical: 2, warning: 3, pending: 4, ok: 5 };
-      return order[a.urgency] - order[b.urgency];
+      return URGENCY_SORT_ORDER[a.urgency] - URGENCY_SORT_ORDER[b.urgency];
     });
 
   return (
@@ -119,7 +129,11 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center justify-between gap-2">
                           <p className="font-semibold text-sm text-brand-blue truncate">{alert.patientName}</p>
-                          {alert.sessionsRemaining !== null && (
+                          {alert.periodExpired ? (
+                            <span className="shrink-0 text-xs font-semibold text-slate-600">
+                              {alert.unusedExpiredSessions > 0 ? `${alert.unusedExpiredSessions} unused · expired` : 'Expired'}
+                            </span>
+                          ) : alert.sessionsRemaining !== null && (
                             <span className="shrink-0 text-xs font-semibold text-gray-600">{alert.sessionsRemaining} left</span>
                           )}
                         </div>

@@ -1,4 +1,4 @@
-import { deriveAuthPeriodMetrics, type AuthPeriodVisit } from '@shared/authPeriodMetrics';
+import { deriveAuthPeriodMetrics, isPeriodExpired, type AuthPeriodVisit } from '@shared/authPeriodMetrics';
 import { deriveAuthorizationUrgency, type AuthUrgency } from '@shared/authUrgency';
 
 export interface AuthUrgencyVisit extends AuthPeriodVisit {
@@ -21,6 +21,7 @@ export const URGENCY_LABEL: Record<AuthUrgency, string> = {
   pending: 'Authorization Pending',
   ok: 'On Track',
   denied: 'Authorization Denied',
+  expired: 'Authorization Expired',
 };
 
 export const URGENCY_COLOR: Record<AuthUrgency, string> = {
@@ -32,6 +33,8 @@ export const URGENCY_COLOR: Record<AuthUrgency, string> = {
   // Reuses the existing authorization-denied badge convention (VisitAuthStatusSelect),
   // distinct from exhausted's red-800 text.
   denied: 'bg-red-100 text-red-700',
+  // P4-P31: neutral slate, deliberately unlike denied/exhausted red.
+  expired: 'bg-slate-200 text-slate-800',
 };
 
 // Mirrors server/db.ts getAuthAlertSummaries' target-period + status-row
@@ -42,8 +45,8 @@ export const URGENCY_COLOR: Record<AuthUrgency, string> = {
 // that same order. Kept separate from getPatientMetrics because that
 // helper's all-exhausted display fallback intentionally discards the status
 // row along with zeroing remaining (see patientMetrics.ts).
-function resolveAuthStatus(visits: AuthUrgencyVisit[]): string | null {
-  if (visits.length === 0) return null;
+function resolveAuthStatus(visits: AuthUrgencyVisit[]): { authStatus: string | null; periodExpired: boolean } {
+  if (visits.length === 0) return { authStatus: null, periodExpired: false };
 
   const { periods, activePeriod } = deriveAuthPeriodMetrics(visits);
   const latestPeriod = periods[periods.length - 1];
@@ -51,7 +54,10 @@ function resolveAuthStatus(visits: AuthUrgencyVisit[]): string | null {
 
   const targetVisits = visits.filter(v => (v.authPeriod ?? 1) === targetPeriod);
   const lastActiveRow = targetVisits[targetVisits.length - 1];
-  return lastActiveRow?.authStatus ?? null;
+  return {
+    authStatus: lastActiveRow?.authStatus ?? null,
+    periodExpired: isPeriodExpired(visits, targetPeriod),
+  };
 }
 
 /**
@@ -72,12 +78,13 @@ export function derivePatientAlertPresentation(
   if (visits.length === 0) {
     return { urgency: 'ok', authExpiryWarning: false, label: 'No Authorization On File', color: 'bg-gray-100 text-gray-700', authStatus: null };
   }
-  const authStatus = resolveAuthStatus(visits);
+  const { authStatus, periodExpired } = resolveAuthStatus(visits);
   const { urgency, authExpiryWarning } = deriveAuthorizationUrgency({
     remaining,
     authStatus,
     authValidUntil,
     now,
+    periodExpired,
   });
 
   return {

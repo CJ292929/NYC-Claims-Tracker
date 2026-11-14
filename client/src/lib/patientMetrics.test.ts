@@ -15,7 +15,7 @@ describe('getPatientMetrics', () => {
       visit(1, null, null),
     ]);
 
-    expect(result).toEqual({ totalAuthorized: 10, completed: 3, remaining: 7, activePeriod: 1 });
+    expect(result).toEqual({ totalAuthorized: 10, completed: 3, remaining: 7, activePeriod: 1, expired: false, unusedExpired: 0 });
   });
 
   it('CASE B: period 1 exhausted / period 2 active', () => {
@@ -30,7 +30,7 @@ describe('getPatientMetrics', () => {
       visit(2, null, null),
     ]);
 
-    expect(result).toEqual({ totalAuthorized: 8, completed: 2, remaining: 6, activePeriod: 2 });
+    expect(result).toEqual({ totalAuthorized: 8, completed: 2, remaining: 6, activePeriod: 2, expired: false, unusedExpired: 0 });
   });
 
   it('CASE C: period 1 active while period 2 exists (oldest non-exhausted wins)', () => {
@@ -41,7 +41,7 @@ describe('getPatientMetrics', () => {
     ]);
 
     expect(result.activePeriod).toBe(1);
-    expect(result).toEqual({ totalAuthorized: 10, completed: 2, remaining: 8, activePeriod: 1 });
+    expect(result).toEqual({ totalAuthorized: 10, completed: 2, remaining: 8, activePeriod: 1, expired: false, unusedExpired: 0 });
   });
 
   it('CASE D: all periods exhausted — falls back to latest period totals, remaining 0', () => {
@@ -53,7 +53,7 @@ describe('getPatientMetrics', () => {
       visit(1, null, '2026-01-05'),
     ]);
 
-    expect(result).toEqual({ totalAuthorized: 5, completed: 5, remaining: 0, activePeriod: null });
+    expect(result).toEqual({ totalAuthorized: 5, completed: 5, remaining: 0, activePeriod: null, expired: false, unusedExpired: 0 });
   });
 
   it('CASE D2: all periods exhausted with multiple periods — uses the latest period, not period 1', () => {
@@ -68,13 +68,13 @@ describe('getPatientMetrics', () => {
       visit(2, null, '2026-02-03'),
     ]);
 
-    expect(result).toEqual({ totalAuthorized: 3, completed: 3, remaining: 0, activePeriod: null });
+    expect(result).toEqual({ totalAuthorized: 3, completed: 3, remaining: 0, activePeriod: null, expired: false, unusedExpired: 0 });
   });
 
   it('CASE E: null authPeriod normalizes to period 1', () => {
     const result = getPatientMetrics([visit(null, 10, '2026-01-01'), visit(null, null, null)]);
 
-    expect(result).toEqual({ totalAuthorized: 10, completed: 1, remaining: 9, activePeriod: 1 });
+    expect(result).toEqual({ totalAuthorized: 10, completed: 1, remaining: 9, activePeriod: 1, expired: false, unusedExpired: 0 });
   });
 
   it('CASE F: stale stored sessionsRemaining on the input row does not affect output', () => {
@@ -85,6 +85,6 @@ describe('getPatientMetrics', () => {
   });
 
   it('CASE H (empty): no visits at all', () => {
-    expect(getPatientMetrics([])).toEqual({ totalAuthorized: 0, completed: 0, remaining: 0, activePeriod: null });
+    expect(getPatientMetrics([])).toEqual({ totalAuthorized: 0, completed: 0, remaining: 0, activePeriod: null, expired: false, unusedExpired: 0 });
   });
 });

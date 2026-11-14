@@ -27,6 +27,7 @@ const AUTH_STATUS_OPTIONS = [
 const URGENCY_OPTIONS = [
   { value: 'all', label: 'All' },
   { value: 'denied', label: 'Denied' },
+  { value: 'expired', label: 'Expired' },
   { value: 'exhausted', label: 'Exhausted' },
   { value: 'critical', label: 'Critical' },
   { value: 'warning', label: 'Warning' },
@@ -38,10 +39,12 @@ const ACTIVITY_OPTIONS = [
   { value: 'all', label: 'All' },
   { value: 'active', label: 'Active' },
   { value: 'exhausted', label: 'Exhausted' },
+  { value: 'expired', label: 'Expired' },
 ];
 
 const URGENCY_SHORT_LABEL: Record<string, string> = {
   denied: 'Denied',
+  expired: 'Expired',
   exhausted: 'Exhausted',
   critical: 'Critical',
   warning: 'Warning',
@@ -203,10 +206,10 @@ export function AuthorizationRecordsWorkspace({ onViewVisits }: { onViewVisits: 
 
           <div className="flex flex-col gap-1">
             <label htmlFor="records-activity" className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">
-              Active / Exhausted
+              Active / Exhausted / Expired
             </label>
             <Select value={recordsActivity} onValueChange={setRecordsActivity}>
-              <SelectTrigger id="records-activity" aria-label="Filter by active or exhausted status" className="w-[150px]">
+              <SelectTrigger id="records-activity" aria-label="Filter by active, exhausted or expired status" className="w-[150px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -254,7 +257,7 @@ export function AuthorizationRecordsWorkspace({ onViewVisits }: { onViewVisits: 
               {/* Mobile cards — below lg */}
               <div className="lg:hidden divide-y divide-gray-100 bg-white">
                 {records.map(r => {
-                  const completed = getCompletedSessions(r.sessionsAuthorized, r.sessionsRemaining);
+                  const completed = getCompletedSessions(r.sessionsAuthorized, r.sessionsRemaining, r.unusedExpiredSessions);
                   return (
                     <div key={r.patientId} className="p-4 space-y-3">
                       <div className="flex items-start justify-between gap-2">
@@ -282,6 +285,9 @@ export function AuthorizationRecordsWorkspace({ onViewVisits }: { onViewVisits: 
                         <div>
                           <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Remaining</p>
                           <p className="font-bold text-brand-gold">{r.sessionsRemaining ?? '—'}</p>
+                          {r.periodExpired && r.unusedExpiredSessions > 0 && (
+                            <p className="text-[11px] text-slate-600">{r.unusedExpiredSessions} unused (expired)</p>
+                          )}
                         </div>
                         <div>
                           <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Valid Until</p>
@@ -325,7 +331,7 @@ export function AuthorizationRecordsWorkspace({ onViewVisits }: { onViewVisits: 
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-100">
                     {records.map(r => {
-                      const completed = getCompletedSessions(r.sessionsAuthorized, r.sessionsRemaining);
+                      const completed = getCompletedSessions(r.sessionsAuthorized, r.sessionsRemaining, r.unusedExpiredSessions);
                       return (
                         <tr key={r.patientId} className="hover:bg-brand-cream/30 transition-colors">
                           <td className="px-4 py-2.5 text-sm font-semibold text-brand-blue whitespace-nowrap">{r.patientName}</td>
@@ -343,6 +349,9 @@ export function AuthorizationRecordsWorkspace({ onViewVisits }: { onViewVisits: 
                             {r.sessionsRemaining != null ? (
                               <span className="font-bold text-brand-gold">{r.sessionsRemaining}</span>
                             ) : <span className="text-gray-300">—</span>}
+                            {r.periodExpired && r.unusedExpiredSessions > 0 && (
+                              <span className="ml-1.5 text-[11px] text-slate-600">({r.unusedExpiredSessions} unused, expired)</span>
+                            )}
                           </td>
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap"><StatusBadge status={r.authStatus} /></td>
                           <td className="px-4 py-2.5 text-sm text-muted-foreground whitespace-nowrap">{formatDate(r.authValidUntil)}</td>
