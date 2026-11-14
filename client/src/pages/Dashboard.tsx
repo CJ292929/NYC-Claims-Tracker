@@ -40,6 +40,7 @@ import type { NavSection } from '@/components/dashboard/DashboardSidebar';
 import { getPatientMetrics } from '@/lib/patientMetrics';
 import { getPatientOverviewMetrics } from '@/lib/patientOverviewMetrics';
 import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
+import { ApproveAuthorizationDialog, AuthorizationActionButtons, useMarkAuthorizationRequested, type ApproveTarget } from '@/components/dashboard/AuthorizationActions';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
 import { ClaimImportDialog } from '@/components/claims/ClaimImportDialog';
@@ -919,6 +920,9 @@ export default function Dashboard() {
 
   // Active patient metrics (from loaded visits)
   const activeMetrics = useMemo(() => getPatientMetrics(visits), [visits]);
+  // P4-P30: authorization actions on the patient details alert (shared with AuthAlertPanel).
+  const { requestingId: authRequestingId, markRequested: markAuthorizationRequested } = useMarkAuthorizationRequested();
+  const [approveAuthPatient, setApproveAuthPatient] = useState<ApproveTarget | null>(null);
   const alertStatus = activePatient
     ? derivePatientAlertPresentation(visits, activeMetrics.remaining, activePatient.authValidUntil)
     : null;
@@ -1727,17 +1731,29 @@ export default function Dashboard() {
             return (
               <div role="status" className={`mb-6 rounded-xl border-2 p-4 shadow-md flex items-start gap-3 ${style.border} ${style.bg}`}>
                 <AlertCircle className={`w-6 h-6 mt-0.5 shrink-0 ${style.icon}`} />
-                <div>
-                  <h3 className={`font-bold text-base mb-1 ${style.heading}`}>
-                    {alertStatus.label}
-                  </h3>
-                  <p className={`text-sm ${style.body}`}>
-                    {message}
-                  </p>
+                <div className="flex-1 min-w-0 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <h3 className={`font-bold text-base mb-1 ${style.heading}`}>
+                      {alertStatus.label}
+                    </h3>
+                    <p className={`text-sm ${style.body}`}>
+                      {message}
+                    </p>
+                  </div>
+                  {/* P4-P30: the same actions as this patient's Dashboard alert. */}
+                  <AuthorizationActionButtons
+                    className="flex gap-2 shrink-0"
+                    buttonClassName="h-8 text-xs flex-1 sm:flex-none"
+                    authPending={alertStatus.authStatus === 'pending'}
+                    requesting={authRequestingId === activePatient.id}
+                    onMarkRequested={() => markAuthorizationRequested(activePatient.id)}
+                    onApprove={() => setApproveAuthPatient({ id: activePatient.id, name: activePatient.name, insurance: activePatient.insurance ?? '' })}
+                  />
                 </div>
               </div>
             );
           })()}
+          <ApproveAuthorizationDialog target={approveAuthPatient} onClose={() => setApproveAuthPatient(null)} />
 
           {/* Summary cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">

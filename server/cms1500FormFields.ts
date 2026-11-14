@@ -16,6 +16,7 @@
  * place<n>, cpt<n>, mod<n>, mod<n>a-c, diag<n>, ch<n>, day<n>.
  */
 import type { VisionPage, VisionServiceLine } from "./cms1500Vision";
+import { loadPdfjs } from "./pdfjs";
 
 const ROWS = [1, 2, 3, 4, 5, 6];
 
@@ -95,7 +96,7 @@ export function formFieldsToPage(fields: FormFieldValues, pageNumber: number): V
  */
 export async function readCms1500FormPages(buffer: Buffer): Promise<VisionPage[]> {
   try {
-    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const pdfjsLib = await loadPdfjs();
     const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
     const pages: VisionPage[] = [];
     for (let i = 1; i <= pdf.numPages; i++) {

@@ -24,6 +24,7 @@
 import { createRequire } from "node:module";
 import path from "node:path";
 import { invokeLLM } from "./_core/llm";
+import { loadPdfjs } from "./pdfjs";
 import { ENV } from "./_core/env";
 import { assignCms1500LineKeys, groupKeyFor } from "./claimImportKeys";
 import { CMS1500_BOX26_SOURCE_SYSTEM, formatModifiers, type Cms1500ImportLine, type ImportGroup, type ImportPatientIdentity } from "@shared/claimImport";
@@ -242,11 +243,15 @@ async function requestRenderedPage(bands: Buffer[], pageNumber: number, pageCoun
  * text using a non-embedded standard font (printed form labels, filled form
  * values) renders blank: the image sent to the reader silently loses that text.
  * Packaged for the deployed function by includeFiles in vercel.json.
+ *
+ * P4-P30: located from legacy/build/pdf.mjs (always packaged, server/pdfjs.ts
+ * imports it), not pdfjs-dist/package.json — the file tracer does not package
+ * that package.json, so on the deployed function this lookup always failed.
  */
 export function standardFontDataUrl(): string | undefined {
   try {
-    const pkg = createRequire(import.meta.url).resolve("pdfjs-dist/package.json");
-    return `${path.join(path.dirname(pkg), "standard_fonts").replace(/\\/g, "/")}/`;
+    const lib = createRequire(import.meta.url).resolve("pdfjs-dist/legacy/build/pdf.mjs");
+    return `${path.join(path.dirname(lib), "..", "..", "standard_fonts").replace(/\\/g, "/")}/`;
   } catch {
     console.warn("[CMS1500 Vision] pdfjs standard font data not found; printed text may be missing from rendered pages");
     return undefined;
@@ -334,7 +339,7 @@ async function readRenderedPage(bands: Buffer[], pageNumber: number, pageCount: 
 /** Renders every page and cuts it into BANDS (PNG each), or returns null when no canvas backend is available. */
 export async function renderPdfPages(buffer: Buffer): Promise<Buffer[][] | null> {
   try {
-    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const pdfjsLib = await loadPdfjs();
     const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buffer), standardFontDataUrl: standardFontDataUrl() }).promise;
     const factory = (doc as unknown as { canvasFactory?: { create(w: number, h: number): { canvas: any; context: any } } }).canvasFactory;
     if (!factory) return null;

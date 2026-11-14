@@ -22,7 +22,14 @@ vi.mock('./aiClaimExtractor', () => ({
   extractClaimsWithAI: vi.fn(),
   detectInsuranceType: vi.fn(),
 }));
-vi.mock('./insuranceTemplates', () => ({
+// P4-P30: the route now opens every PDF up front and rejects the fake bytes
+// below as damaged. This suite is about field boundaries, not PDF opening
+// (claimUpload.pdfOpen.test.ts covers that), so the open is reported as ok.
+vi.mock('./pdfjs', async () => {
+  const actual = await vi.importActual<typeof import('./pdfjs')>('./pdfjs');
+  return { ...actual, openPdf: vi.fn(async () => ({ ok: true as const, pageCount: 1 })) };
+});
+vi.mock('./insuranceTemplates',() => ({
   tryTemplateExtraction: vi.fn(),
   parseCMS1500: vi.fn(),
 }));

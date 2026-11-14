@@ -23,6 +23,7 @@ import { extractClaimsWithAI, detectInsuranceType, KNOWN_INSURER_NAMES, reconcil
 import { cms1500GroupsFromClaims, eobGroupsFromClaims, sha256Hex } from './claimImportKeys';
 import { assembleCms1500Pages, extractCms1500PagesWithVision, MAX_SCANNED_PAGES } from './cms1500Vision';
 import { readCms1500FormPages } from './cms1500FormFields';
+import { loadPdfjs, openPdf, pdfOpenFailureResponse } from './pdfjs';
 import type { Cms1500ImportLine, EobImportLine, ImportDocument, ImportGroup } from '@shared/claimImport';
 import { CLAIM_CSV_TEMPLATES, detectCsvTemplateFromText } from '@shared/claimCsvTemplates';
 import { fuzzyNameMatch } from '@shared/nameMatch';
@@ -266,7 +267,7 @@ Extract claim line items and map each one to these columns (use null if not foun
 // Extract text from PDF buffer using pdfjs-dist
 async function extractPdfText(buffer: Buffer): Promise<string> {
   // Dynamically import pdfjs-dist (ESM-only in v4+)
-  const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const pdfjsLib = await loadPdfjs();
   const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
   const pdf = await loadingTask.promise;
   const textParts: string[] = [];
@@ -306,7 +307,7 @@ function extractPdfTextLayout(buffer: Buffer): string {
  * columns/rows together than this is.
  */
 async function extractPdfTextLayoutJS(buffer: Buffer): Promise<string> {
-  const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const pdfjsLib = await loadPdfjs();
   const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
   const pdf = await loadingTask.promise;
   const pageTexts: string[] = [];
@@ -389,7 +390,7 @@ function parseCms1500TextPages(text: string): ReturnType<typeof parseCMS1500> {
 /** Page count from pdfjs (works without a canvas backend); null if unreadable. */
 async function getPdfPageCount(buffer: Buffer): Promise<number | null> {
   try {
-    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const pdfjsLib = await loadPdfjs();
     const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
     return pdf.numPages;
   } catch {
@@ -445,7 +446,7 @@ function buildImportDocument<L extends Cms1500ImportLine | EobImportLine>(params
  */
 async function getPdfPagesWithoutText(buffer: Buffer): Promise<number[] | null> {
   try {
-    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const pdfjsLib = await loadPdfjs();
     const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
     const missing: number[] = [];
     for (let i = 1; i <= pdf.numPages; i++) {
@@ -588,7 +589,8 @@ export function registerClaimUploadRoute(app: Express) {
         // same claim_import_documents row -> retries/reimports are no-ops).
         const sha256 = sha256Hex(buffer);
 
-        console.log(`[ClaimUpload] Stage 1/7 — PDF uploaded: "${originalname}" (${(buffer.length / 1024).toFixed(1)} KB, ${mimetype})`);
+        // File names often carry the patient's name, so logs use the content hash.
+        console.log(`[ClaimUpload] Stage 1/7 — File uploaded: ${sha256.slice(0, 12)} (${(buffer.length / 1024).toFixed(1)} KB, ${mimetype})`);
 
         const isXlsx =
           name.endsWith('.xlsx') ||
@@ -615,15 +617,30 @@ export function registerClaimUploadRoute(app: Express) {
           }
           extractedText = extractCsvText(buffer);
         } else {
-          // pdfjs-dist's text extraction can throw in serverless Node.js
-          // environments without a canvas backend (e.g. "DOMMatrix is not
-          // defined") for PDFs whose glyph rendering path touches canvas-only
-          // APIs. This initial pass is only used for the empty-file check and
-          // response metadata when uploadType is explicit (the normal case) —
-          // the actual reimbursement/CMS1500 extraction re-reads the PDF via
-          // pdftotext regardless — so fall back to that instead of failing
-          // the whole request.
-          try {
+          // P4-P30: open the PDF once, up front. A file that cannot be opened
+          // stops here with the real reason. Before, every pdfjs failure —
+          // including the server's own PDF reader failing to load on Vercel
+          // ("DOMMatrix is not defined", see server/pdfjs.ts) — was swallowed
+          // and surfaced later as "This PDF could not be opened".
+          const opened = await openPdf(buffer);
+          if (!opened.ok) {
+            console.error(`[ClaimUpload] PDF open failed (${opened.failure.kind}) for file ${sha256.slice(0, 12)}: ${opened.failure.detail}`);
+            // A file pdfjs rejects may still be read by pdftotext where it is
+            // installed (never on Vercel). A reader that did not start, or a
+            // password, is reported as is.
+            if (opened.failure.kind === 'invalid' || opened.failure.kind === 'unreadable') {
+              try { extractedText = extractPdfTextLayout(buffer); } catch { extractedText = ''; }
+            }
+            if (!hasTextLayer(extractedText)) {
+              const { status, error } = pdfOpenFailureResponse(opened.failure);
+              res.status(status).json({ error, code: `pdf_${opened.failure.kind}` });
+              return;
+            }
+            console.warn('[ClaimUpload] pdfjs could not open the file; continuing with pdftotext text');
+          }
+          // This initial pass is only used for the empty-file check and
+          // response metadata; the CMS1500/reimbursement paths re-read the PDF.
+          if (!extractedText) try {
             extractedText = await extractPdfText(buffer);
           } catch (pdfjsError) {
             console.error('[ClaimUpload] pdfjs-dist extraction failed, falling back to pdftotext:', pdfjsError);
@@ -806,7 +823,8 @@ export function registerClaimUploadRoute(app: Express) {
           // A provider failure is a controlled error, never a silent empty or
           // partial success.
           if (!pageCount) {
-            res.status(422).json({ error: 'This PDF could not be opened. Re-save or re-scan it and try again.' });
+            // The PDF opened above, so losing its page count now is a server fault.
+            res.status(500).json({ error: 'The PDF opened but its pages could not be counted. Nothing was saved. Try again.' });
             return;
           }
           if (pageCount > MAX_SCANNED_PAGES) {
