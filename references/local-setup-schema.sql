@@ -99,9 +99,7 @@ CREATE TABLE IF NOT EXISTS public.visit_records (
   date_of_service date,
   new_auth text,
   date_ash_submitted date,
-  -- P4-P31: 'expired' added (named constraint; see 20261114000000_p4_p31_expired_authorization_status.sql).
-  auth_status text NOT NULL DEFAULT 'none' CONSTRAINT visit_records_auth_status_check
-    CHECK (auth_status IN ('none', 'pending', 'approved', 'denied', 'expired')),
+  auth_status text NOT NULL DEFAULT 'none' CHECK (auth_status IN ('none', 'pending', 'approved', 'denied')),
   insurance_company text,
   total_insurance_reimbursement numeric(10,2),
   total_patient_due numeric(10,2),
@@ -119,6 +117,9 @@ CREATE TABLE IF NOT EXISTS public.visit_records (
   created_by_type text,
   updated_by uuid,
   updated_by_type text,
+  -- P4-P31: period-level manual expiry (NULL = not expired). Only
+  -- set_auth_period_expired_with_audit changes it; see the guard trigger below.
+  period_expired_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -1470,11 +1471,9 @@ BEGIN
     RAISE EXCEPTION 'auth_period_not_found: %', p_target_period USING ERRCODE = 'P0034';
   END IF;
 
-  -- P4-P31: an expired period stays expired.
   UPDATE public.visit_records
   SET auth_status = 'approved', updated_by = p_actor_id, updated_by_type = p_actor_type
-  WHERE patient_id = p_patient_id AND auth_period = p_target_period
-    AND auth_status <> 'expired';
+  WHERE patient_id = p_patient_id AND auth_period = p_target_period;
 
   IF p_auth_date IS NOT NULL
      OR (p_new_insurance IS NOT NULL AND length(btrim(p_new_insurance)) > 0)
@@ -2442,10 +2441,76 @@ REVOKE ALL ON FUNCTION public.import_patient_csv_group_with_audit(text, text, da
 GRANT EXECUTE ON FUNCTION public.import_patient_csv_group_with_audit(text, text, date, jsonb, text, uuid, text, text, uuid) TO service_role;
 
 -- ─── P4-P31: manual Expired per authorization period (see supabase/migrations/20261114000000) ─
+-- ─── 2: guard trigger ───────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION public.visit_records_period_expiry_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  v_period_expired_at timestamptz;
+BEGIN
+  -- The only sanctioned writer of period_expired_at (transaction-local flag).
+  IF current_setting('app.p4p31_period_expiry_write', true) = 'on' THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE'
+     AND NEW.patient_id = OLD.patient_id
+     AND NEW.auth_period = OLD.auth_period THEN
+    -- Same period: the expiry mark is not a row field.
+    IF NEW.period_expired_at IS DISTINCT FROM OLD.period_expired_at THEN
+      RAISE EXCEPTION 'period_expiry_is_period_level: use set_auth_period_expired_with_audit'
+        USING ERRCODE = 'P0035';
+    END IF;
+  ELSE
+    -- Insert, or a move to another period/patient: inherit the target
+    -- period's mark. Supplying a different mark directly is refused.
+    SELECT vr.period_expired_at INTO v_period_expired_at
+    FROM public.visit_records vr
+    WHERE vr.patient_id = NEW.patient_id
+      AND vr.auth_period = NEW.auth_period
+      AND vr.id IS DISTINCT FROM NEW.id
+      AND vr.period_expired_at IS NOT NULL
+    LIMIT 1;
+
+    -- (A moved row's own old mark is simply replaced; only a mark supplied
+    -- by the write itself is refused.)
+    IF NEW.period_expired_at IS NOT NULL
+       AND NEW.period_expired_at IS DISTINCT FROM v_period_expired_at
+       AND (TG_OP = 'INSERT' OR NEW.period_expired_at IS DISTINCT FROM OLD.period_expired_at) THEN
+      RAISE EXCEPTION 'period_expiry_is_period_level: use set_auth_period_expired_with_audit'
+        USING ERRCODE = 'P0035';
+    END IF;
+    NEW.period_expired_at := v_period_expired_at;
+  END IF;
+
+  IF NEW.period_expired_at IS NOT NULL
+     AND NEW.date_of_service IS NOT NULL
+     AND NEW.date_of_service > (NEW.period_expired_at AT TIME ZONE 'UTC')::date
+     AND (TG_OP = 'INSERT'
+          OR NEW.date_of_service IS DISTINCT FROM OLD.date_of_service
+          OR NEW.period_expired_at IS DISTINCT FROM OLD.period_expired_at) THEN
+    RAISE EXCEPTION 'session_after_period_expiry: % is after authorization period % expired on %',
+      NEW.date_of_service, NEW.auth_period, (NEW.period_expired_at AT TIME ZONE 'UTC')::date
+      USING ERRCODE = 'P0036';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS visit_records_period_expiry_guard ON public.visit_records;
+CREATE TRIGGER visit_records_period_expiry_guard
+  BEFORE INSERT OR UPDATE ON public.visit_records
+  FOR EACH ROW EXECUTE FUNCTION public.visit_records_period_expiry_guard();
+
+-- ─── 3: set_auth_period_expired_with_audit ──────────────────────────────────
 CREATE OR REPLACE FUNCTION public.set_auth_period_expired_with_audit(
   p_patient_id uuid,
   p_auth_period integer,
   p_expired boolean,
+  p_reason text,
   p_actor_id uuid,
   p_actor_type text,
   p_actor_display text
@@ -2456,11 +2521,19 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE
-  v_row record;
-  v_changed integer := 0;
+  v_current timestamptz;
+  v_new timestamptz;
+  v_reason text := NULLIF(btrim(COALESCE(p_reason, '')), '');
+  v_authorized integer;
+  v_completed integer;
+  v_ids uuid[];
+  v_changed integer;
 BEGIN
   IF p_expired IS NULL THEN
     RAISE EXCEPTION 'invalid_expired_flag' USING ERRCODE = '22023';
+  END IF;
+  IF v_reason IS NOT NULL AND length(v_reason) > 500 THEN
+    RAISE EXCEPTION 'reason_too_long' USING ERRCODE = '22023';
   END IF;
 
   -- Same lock order as approve_authorization_with_audit: patient, then its visits.
@@ -2469,35 +2542,70 @@ BEGIN
     RAISE EXCEPTION 'patient_not_found: %', p_patient_id USING ERRCODE = 'P0020';
   END IF;
 
-  PERFORM 1 FROM public.visit_records
-  WHERE patient_id = p_patient_id AND auth_period = p_auth_period
-  FOR UPDATE;
-  IF NOT FOUND THEN
+  PERFORM 1 FROM public.visit_records WHERE patient_id = p_patient_id FOR UPDATE;
+
+  SELECT max(period_expired_at),
+         max(sessions_authorized),
+         count(date_of_service)::integer,
+         array_agg(id ORDER BY session_number NULLS LAST, id)
+    INTO v_current, v_authorized, v_completed, v_ids
+  FROM public.visit_records
+  WHERE patient_id = p_patient_id AND auth_period = p_auth_period;
+
+  IF v_ids IS NULL THEN
     RAISE EXCEPTION 'auth_period_not_found: %', p_auth_period USING ERRCODE = 'P0034';
   END IF;
 
-  FOR v_row IN
-    SELECT id FROM public.visit_records
-    WHERE patient_id = p_patient_id
-      AND auth_period = p_auth_period
-      AND CASE WHEN p_expired THEN auth_status <> 'expired' ELSE auth_status = 'expired' END
-    ORDER BY session_number NULLS LAST, id
-  LOOP
-    PERFORM public.write_visit_record_with_audit(
-      v_row.id,
-      p_patient_id,
-      jsonb_build_object('auth_status', CASE WHEN p_expired THEN 'expired' ELSE 'none' END),
-      p_actor_id,
-      p_actor_type,
-      p_actor_display,
-      CASE WHEN p_expired THEN 'AUTHORIZATION_PERIOD_EXPIRED' ELSE 'AUTHORIZATION_PERIOD_EXPIRY_CLEARED' END
-    );
-    v_changed := v_changed + 1;
-  END LOOP;
+  -- No-op: already in the requested state. Nothing written, nothing audited.
+  IF (p_expired AND v_current IS NOT NULL) OR (NOT p_expired AND v_current IS NULL) THEN
+    RETURN 0;
+  END IF;
+
+  IF NOT p_expired THEN
+    IF v_reason IS NULL THEN
+      RAISE EXCEPTION 'restore_reason_required' USING ERRCODE = '22023';
+    END IF;
+    IF EXISTS (
+      SELECT 1 FROM public.visit_records
+      WHERE patient_id = p_patient_id AND auth_period > p_auth_period
+    ) THEN
+      RAISE EXCEPTION 'expired_period_superseded: period % has a later authorization period', p_auth_period
+        USING ERRCODE = 'P0037';
+    END IF;
+  END IF;
+
+  v_new := CASE WHEN p_expired THEN now() ELSE NULL END;
+
+  PERFORM set_config('app.p4p31_period_expiry_write', 'on', true);
+  UPDATE public.visit_records
+  SET period_expired_at = v_new,
+      updated_by = p_actor_id,
+      updated_by_type = p_actor_type
+  WHERE patient_id = p_patient_id AND auth_period = p_auth_period;
+  GET DIAGNOSTICS v_changed = ROW_COUNT;
+  PERFORM set_config('app.p4p31_period_expiry_write', 'off', true);
+
+  INSERT INTO public.audit_logs (
+    entity_type, entity_id, patient_id, actor_id, actor_type, actor_display,
+    action, before_data, after_data
+  ) VALUES (
+    'visit_record', p_patient_id, p_patient_id, p_actor_id, p_actor_type, p_actor_display,
+    CASE WHEN p_expired THEN 'AUTHORIZATION_PERIOD_EXPIRED' ELSE 'AUTHORIZATION_PERIOD_EXPIRY_RESTORED' END,
+    jsonb_build_object('auth_period', p_auth_period, 'period_expired_at', v_current),
+    jsonb_build_object(
+      'auth_period', p_auth_period,
+      'period_expired_at', v_new,
+      'sessions_authorized', COALESCE(v_authorized, 0),
+      'sessions_completed', v_completed,
+      'sessions_unused', GREATEST(0, COALESCE(v_authorized, 0) - v_completed),
+      'visit_ids', to_jsonb(v_ids),
+      'reason', v_reason
+    )
+  );
 
   RETURN v_changed;
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.set_auth_period_expired_with_audit(uuid, integer, boolean, uuid, text, text) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.set_auth_period_expired_with_audit(uuid, integer, boolean, uuid, text, text) TO service_role;
+REVOKE ALL ON FUNCTION public.set_auth_period_expired_with_audit(uuid, integer, boolean, text, uuid, text, text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.set_auth_period_expired_with_audit(uuid, integer, boolean, text, uuid, text, text) TO service_role;

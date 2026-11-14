@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   AlertDialog,
@@ -281,11 +282,13 @@ export function ApproveAuthorizationDialog({ target, onClose }: { target: Approv
 }
 
 /**
- * P4-P31: Mark Expired / Clear Expired for ONE authorization period (the card
- * it sits in). Always an explicit, confirmed staff action — expiry is never
- * inferred from dates or a zero balance. Only that period's authorization
- * status changes: session counts, dates of service, claims and money are
- * untouched, and each changed row is audited with its before/after status.
+ * P4-P31: Mark Expired / Restore for ONE authorization period (the card it
+ * sits in). Always an explicit, confirmed staff action — expiry is never
+ * inferred from dates or a zero balance. Expiry is a period-level mark: it
+ * never rewrites any session's authorization status, so Restore has nothing
+ * to guess — it only removes the mark, after the user reviews the effect and
+ * gives a reason. Restore is unavailable once a later period exists. Every
+ * change is audited (who, when, counts, reason).
  */
 export function PeriodExpiryControl({
   patientId,
@@ -294,6 +297,7 @@ export function PeriodExpiryControl({
   expired,
   authorized,
   completed,
+  hasLaterPeriod,
   className = '',
 }: {
   patientId: string;
@@ -302,27 +306,35 @@ export function PeriodExpiryControl({
   expired: boolean;
   authorized: number;
   completed: number;
+  hasLaterPeriod: boolean;
   className?: string;
 }) {
   const refresh = useRefreshAfterAuthorizationChange();
   const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
   const guard = useRef(createSingleFlightGuard());
   const mutation = trpc.visits.setPeriodExpired.useMutation({
     onSettled: () => guard.current.exit(),
     onSuccess: (_data, vars) => {
       toast.success(vars.expired
         ? `Authorization Period ${vars.authPeriod} marked Expired`
-        : `Expired cleared for Authorization Period ${vars.authPeriod}`);
+        : `Authorization Period ${vars.authPeriod} restored`);
       setOpen(false);
+      setReason('');
       refresh(vars.patientId);
     },
     onError: (err) => toast.error(err.message || 'Failed to update authorization period'),
   });
   const unused = Math.max(0, authorized - completed);
+  const trimmedReason = reason.trim();
+  const restoreBlocked = expired && hasLaterPeriod;
+  const canConfirm = !mutation.isPending && !restoreBlocked && (!expired || trimmedReason.length > 0);
 
   const confirm = () => {
-    if (!guard.current.tryEnter()) return;
-    mutation.mutate({ patientId, authPeriod: period, expired: !expired });
+    if (!canConfirm || !guard.current.tryEnter()) return;
+    mutation.mutate(expired
+      ? { patientId, authPeriod: period, expired: false, reason: trimmedReason }
+      : { patientId, authPeriod: period, expired: true });
   };
 
   return (
@@ -335,22 +347,37 @@ export function PeriodExpiryControl({
         className={`bg-white text-slate-700 border-slate-300 hover:bg-slate-50 ${className}`}
       >
         {expired ? <RotateCcw className="w-4 h-4" /> : <CalendarX className="w-4 h-4" />}
-        {expired ? 'Clear Expired' : 'Mark Expired'}
+        {expired ? 'Restore Period' : 'Mark Expired'}
       </Button>
-      <AlertDialog open={open} onOpenChange={(next) => { if (!mutation.isPending) setOpen(next); }}>
+      <AlertDialog open={open} onOpenChange={(next) => { if (!mutation.isPending) { setOpen(next); if (!next) setReason(''); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {expired ? `Clear Expired on Authorization Period ${period}?` : `Mark Authorization Period ${period} Expired?`}
+              {expired ? `Restore Authorization Period ${period}?` : `Mark Authorization Period ${period} Expired?`}
             </AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-2 text-sm text-muted-foreground">
                 {expired ? (
-                  <p>
-                    Period {period} for <strong>{patientName}</strong> stops being expired. Its rows marked
-                    Expired go back to no status, so any unused sessions count as available again. The change
-                    is recorded in the history.
-                  </p>
+                  restoreBlocked ? (
+                    <p>
+                      Period {period} for <strong>{patientName}</strong> can&apos;t be restored because a newer
+                      authorization period already exists. It stays expired.
+                    </p>
+                  ) : (
+                    <>
+                      <p>
+                        Removes the Expired mark from Period {period} for <strong>{patientName}</strong>.
+                        Session statuses, dates, counts, claims and amounts were never changed by Mark Expired,
+                        so nothing else changes now.
+                      </p>
+                      <p>
+                        Authorized <strong>{authorized}</strong> · completed <strong>{completed}</strong>
+                        {unused > 0
+                          ? <> · <strong>{unused}</strong> session(s) become available again.</>
+                          : <> · no sessions become available (all were used).</>}
+                      </p>
+                    </>
+                  )
                 ) : (
                   <>
                     <p>
@@ -361,23 +388,38 @@ export function PeriodExpiryControl({
                       {unused > 0 && (
                         <span> The <strong>{unused}</strong> unused session(s) stay visible as history but will no longer be available.</span>
                       )}
-                      <span> No sessions, claims or amounts are changed.</span>
+                      <span> Session statuses, claims and amounts are not changed. Sessions dated after today can&apos;t be recorded on this period.</span>
                     </p>
                   </>
                 )}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {expired && !restoreBlocked && (
+            <div className="space-y-1.5">
+              <Label htmlFor={`restore-reason-${period}`}>Reason for restoring (required)</Label>
+              <Textarea
+                id={`restore-reason-${period}`}
+                value={reason}
+                maxLength={500}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="e.g. Marked expired by mistake — payer confirmed authorization is still valid"
+                disabled={mutation.isPending}
+              />
+            </div>
+          )}
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={mutation.isPending}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={mutation.isPending}
-              onClick={(e) => { e.preventDefault(); confirm(); }}
-              className={expired ? '' : 'bg-slate-700 hover:bg-slate-800 text-white'}
-            >
-              {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-              {expired ? 'Clear Expired' : 'Mark Expired'}
-            </AlertDialogAction>
+            <AlertDialogCancel disabled={mutation.isPending}>{restoreBlocked ? 'Close' : 'Cancel'}</AlertDialogCancel>
+            {!restoreBlocked && (
+              <AlertDialogAction
+                disabled={!canConfirm}
+                onClick={(e) => { e.preventDefault(); confirm(); }}
+                className={expired ? '' : 'bg-slate-700 hover:bg-slate-800 text-white'}
+              >
+                {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+                {expired ? 'Restore Period' : 'Mark Expired'}
+              </AlertDialogAction>
+            )}
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

@@ -86,7 +86,7 @@ describe('deriveAuthorizationOverviewMetrics', () => {
     expect(metrics.critical).toBe(1);
     expect(metrics.exhausted).toBe(1);
     expect(metrics.expiring).toBe(1);
-    expect(metrics.statusDistribution).toEqual({ none: 1, pending: 1, approved: 3, denied: 1, expired: 0 });
+    expect(metrics.statusDistribution).toEqual({ none: 1, pending: 1, approved: 3, denied: 1 });
     expect(metrics.urgencyDistribution).toEqual({
       denied: 1, expired: 0, exhausted: 1, critical: 1, warning: 1, pending: 1, ok: 1,
     });

@@ -73,7 +73,7 @@ export function deriveAuthorizationUrgency(
   // "exhausted" — it shows as expired. Once a new authorization has been
   // requested from it (its status row is pending) it shows as pending, so
   // Approved / Re-request stay reachable.
-  if (periodExpired || authStatus === "expired") {
+  if (periodExpired) {
     urgency = authStatus === "pending" ? "pending" : "expired";
   }
   // Denied is top priority: it overrides every remaining-session tier above,

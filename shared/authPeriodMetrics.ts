@@ -6,19 +6,23 @@
 // whose authorized minus completed is still > 0, or null once every period
 // is exhausted.
 //
-// P4-P31: a period is EXPIRED when any of its rows has auth_status
-// 'expired'. Expired is only ever set manually (never inferred from dates or
-// a zero balance). An expired period keeps its authorized and completed
-// counts as history, reports its leftover sessions as `unusedExpired`, and
-// reports `remaining` 0 — those sessions are no longer available, so an
-// expired period is never the active one.
+// P4-P31: a period is EXPIRED when its rows carry period_expired_at
+// (periodExpiredAt). That mark is period-level — the database trigger
+// visit_records_period_expiry_guard keeps it identical on every row of the
+// period, and only set_auth_period_expired_with_audit can change it — and it
+// is independent of each row's auth_status. Expired is only ever set manually
+// (never inferred from dates or a zero balance). An expired period keeps its
+// authorized and completed counts as history, reports its leftover sessions
+// as `unusedExpired`, and reports `remaining` 0 — those sessions are no
+// longer available, so an expired period is never the active one.
 
 export interface AuthPeriodVisit {
   authPeriod: number | null;
   sessionsAuthorized: number | null;
   dateOfService: unknown;
-  /** Optional so callers that never read status keep compiling; without it a period is never expired. */
-  authStatus?: string | null;
+  /** P4-P31: period-level expiry mark (visit_records.period_expired_at). Optional so
+   *  callers that never read it keep compiling; absent/null means not expired. */
+  periodExpiredAt?: unknown;
 }
 
 export interface AuthPeriodMetrics {
@@ -30,8 +34,6 @@ export interface AuthPeriodMetrics {
   /** Sessions authorized but never used before the period expired (history only, never available). 0 unless expired. */
   unusedExpired: number;
 }
-
-export const EXPIRED_AUTH_STATUS = 'expired';
 
 export interface AuthPeriodSummary {
   periods: number[];
@@ -53,7 +55,7 @@ export function getPeriodMetrics(visits: AuthPeriodVisit[], period: number): Aut
   const authorized = authRow?.sessionsAuthorized ?? 0;
   const completed = periodVisits.filter(v => v.dateOfService != null).length;
   const leftover = Math.max(0, authorized - completed);
-  const expired = periodVisits.some(v => v.authStatus === EXPIRED_AUTH_STATUS);
+  const expired = periodVisits.some(v => v.periodExpiredAt != null);
 
   return {
     authorized,
@@ -65,7 +67,7 @@ export function getPeriodMetrics(visits: AuthPeriodVisit[], period: number): Aut
 }
 
 export function isPeriodExpired(visits: AuthPeriodVisit[], period: number): boolean {
-  return visits.some(v => normalizePeriod(v) === period && v.authStatus === EXPIRED_AUTH_STATUS);
+  return visits.some(v => normalizePeriod(v) === period && v.periodExpiredAt != null);
 }
 
 export function determineActivePeriod(visits: AuthPeriodVisit[]): number | null {
@@ -88,9 +90,12 @@ export function deriveAuthPeriodMetrics(visits: AuthPeriodVisit[]): AuthPeriodSu
   return { periods, activePeriod, activeMetrics };
 }
 
-/** P4-P31: whether the patient's newest period was manually marked Expired. */
-export function isLatestPeriodExpired(visits: AuthPeriodVisit[]): boolean {
-  const periods = getSortedUniquePeriods(visits);
-  if (periods.length === 0) return false;
-  return isPeriodExpired(visits, periods[periods.length - 1]);
+/** "Sessions exhausted" (the Completed Patients metric): every authorized
+ *  session of every period has a date of service. Expiry is deliberately
+ *  ignored — an expired period with unused sessions is not exhausted, and a
+ *  fully used period stays exhausted whether or not it was also marked
+ *  Expired. This is the pre-P4-P31 definition, unchanged. */
+export function areAllAuthorizedSessionsUsed(visits: AuthPeriodVisit[]): boolean {
+  if (visits.length === 0) return false;
+  return determineActivePeriod(visits.map(v => ({ ...v, periodExpiredAt: null }))) === null;
 }

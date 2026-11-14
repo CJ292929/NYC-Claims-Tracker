@@ -10,8 +10,6 @@ export const STATUS_STYLES: Record<string, { className: string; label: string }>
   approved: { className: 'bg-green-100 text-green-800', label: 'Approved' },
   pending: { className: 'bg-yellow-100 text-yellow-800', label: 'Pending' },
   denied: { className: 'bg-red-100 text-red-800', label: 'Denied' },
-  // P4-P31: authorization status only (claims never use it).
-  expired: { className: 'bg-slate-200 text-slate-800', label: 'Expired' },
   pended: { className: 'bg-orange-100 text-orange-800', label: 'Pended' },
   rejected: { className: 'bg-gray-900 text-white', label: 'Rejected' },
   resubmitted: { className: 'bg-violet-100 text-violet-800', label: 'Resubmitted' },

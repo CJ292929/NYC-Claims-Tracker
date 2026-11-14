@@ -84,6 +84,15 @@ import {
 
 // ─── Shared input schemas ─────────────────────────────────────────────────────
 
+// P4-P31: visit_records_period_expiry_guard refuses these on every write
+// path; translate them into user-facing errors instead of a 500.
+function rethrowPeriodExpiryGuard(err: unknown): never {
+  const code = (err as { code?: string })?.code;
+  if (code === "P0035") throw new TRPCError({ code: "BAD_REQUEST", message: "Expiry is set per authorization period. Use Mark Expired / Restore on the period instead." });
+  if (code === "P0036") throw new TRPCError({ code: "CONFLICT", message: "This authorization period is expired. A date of service after the expiry date can't be recorded against it." });
+  throw err;
+}
+
 const visitRecordInput = z.object({
   sessionsAuthorized: z.number().nullable().optional(),
   sessionsRemaining: z.number().nullable().optional(),
@@ -92,7 +101,7 @@ const visitRecordInput = z.object({
   dateOfService: z.string().nullable().optional(),    // ISO date string "YYYY-MM-DD"
   newAuth: z.string().nullable().optional(),
   dateAshSubmitted: z.string().nullable().optional(), // ISO date string "YYYY-MM-DD"
-  authStatus: z.enum(["none", "pending", "approved", "denied", "expired"]).optional(),
+  authStatus: z.enum(["none", "pending", "approved", "denied"]).optional(),
   totalInsuranceReimbursement: z.number().nullable().optional(),
   totalPatientDue: z.number().nullable().optional(),
   totalPatientPaid: z.number().nullable().optional(),
@@ -804,12 +813,17 @@ export const appRouter = router({
       .mutation(async ({ input, ctx }) => {
         assertMayWriteVisitFinancials(ctx.user, input);
         const { patientId, dateOfService, dateAshSubmitted, ...rest } = input;
-        const id = await createVisitRecord({
-          patientId,
-          ...rest,
-          dateOfService: parseDate(dateOfService),
-          dateAshSubmitted: parseDate(dateAshSubmitted),
-        }, getActorContext(ctx.user));
+        let id: string;
+        try {
+          id = await createVisitRecord({
+            patientId,
+            ...rest,
+            dateOfService: parseDate(dateOfService),
+            dateAshSubmitted: parseDate(dateAshSubmitted),
+          }, getActorContext(ctx.user));
+        } catch (err: unknown) {
+          rethrowPeriodExpiryGuard(err);
+        }
         return { id };
       }),
 
@@ -818,11 +832,15 @@ export const appRouter = router({
       .mutation(async ({ input, ctx }) => {
         assertMayWriteVisitFinancials(ctx.user, input);
         const { id, dateOfService, dateAshSubmitted, ...rest } = input;
-        await updateVisitRecord(id, {
-          ...rest,
-          ...(dateOfService !== undefined ? { dateOfService: parseDate(dateOfService) } : {}),
-          ...(dateAshSubmitted !== undefined ? { dateAshSubmitted: parseDate(dateAshSubmitted) } : {}),
-        }, getActorContext(ctx.user));
+        try {
+          await updateVisitRecord(id, {
+            ...rest,
+            ...(dateOfService !== undefined ? { dateOfService: parseDate(dateOfService) } : {}),
+            ...(dateAshSubmitted !== undefined ? { dateAshSubmitted: parseDate(dateAshSubmitted) } : {}),
+          }, getActorContext(ctx.user));
+        } catch (err: unknown) {
+          rethrowPeriodExpiryGuard(err);
+        }
         return { success: true };
       }),
 
@@ -884,7 +902,11 @@ export const appRouter = router({
           dateAshSubmitted: parseDate(r.dateAshSubmitted),
           authStatus: r.authStatus ?? "none" as const,
         }));
-        await bulkCreateVisitRecords(rows, getActorContext(ctx.user));
+        try {
+          await bulkCreateVisitRecords(rows, getActorContext(ctx.user));
+        } catch (err: unknown) {
+          rethrowPeriodExpiryGuard(err);
+        }
         return { success: true };
       }),
 
@@ -937,25 +959,34 @@ export const appRouter = router({
         return { success: true, visitId, date: todayMidnight.toISOString().split("T")[0] };
       }),
 
-    // P4-P31: manually mark one authorization period Expired, or clear a
-    // mistaken Expired. Same gate as visits.update / markAsRequested (every
-    // authenticated dashboard user who can edit authorization sessions).
-    // Never inferred from dates or a zero balance; only that period's
-    // auth_status changes, each changed row audited before/after.
+    // P4-P31: manually mark one authorization period Expired, or restore it
+    // (reason required; refused once a later period exists). Same gate as
+    // visits.update / markAsRequested (every authenticated dashboard user who
+    // can edit authorization sessions). Never inferred from dates or a zero
+    // balance. Only the period's period_expired_at changes — row statuses,
+    // counts, dates, claims and money are untouched — audited once per change.
     setPeriodExpired: normalProtectedProcedure
       .input(z.object({
         patientId: z.string().uuid(),
         authPeriod: z.number().int().min(1),
         expired: z.boolean(),
+        reason: z.string().trim().max(500).optional(),
+      }).refine(v => v.expired || (v.reason ?? "").length > 0, {
+        message: "A reason is required to restore an expired authorization period",
+        path: ["reason"],
       }))
       .mutation(async ({ input, ctx }) => {
         try {
-          const changed = await setAuthPeriodExpired(input.patientId, input.authPeriod, input.expired, getActorContext(ctx.user));
+          const changed = await setAuthPeriodExpired(
+            input.patientId, input.authPeriod, input.expired, input.reason || null, getActorContext(ctx.user),
+          );
           return { success: true, changed };
         } catch (err: unknown) {
           const code = (err as { code?: string })?.code;
           if (code === "P0020") throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
           if (code === "P0034") throw new TRPCError({ code: "NOT_FOUND", message: "Authorization period not found for this patient" });
+          if (code === "P0037") throw new TRPCError({ code: "CONFLICT", message: "This period can't be restored: a newer authorization period already exists." });
+          if (code === "22023") throw new TRPCError({ code: "BAD_REQUEST", message: "A reason (500 characters or fewer) is required to restore an expired period." });
           throw err;
         }
       }),

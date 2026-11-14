@@ -85,7 +85,9 @@ interface DbVisit {
   dateOfService: Date | null;
   newAuth: string | null;
   dateAshSubmitted: Date | null;
-  authStatus: 'none' | 'pending' | 'approved' | 'denied' | 'expired';
+  authStatus: 'none' | 'pending' | 'approved' | 'denied';
+  /** P4-P31: period-level expiry mark (null = not expired). */
+  periodExpiredAt: Date | string | null;
   assignmentOfBenefits: 'yes' | 'no' | null;
   submissionStatus: 'ready_to_file' | 'hold' | 'do_not_file' | null;
   remarks: string | null;
@@ -179,16 +181,14 @@ function authBannerMessage(
 }
 
 /** Compact colored dropdown for a visit's auth status. `onChange` receives the
- *  same '' | 'Pending' | 'Approved' | 'Denied' | 'Expired' shape handleUpdateAuthStatus expects.
- *  P4-P31: Expired set on any row makes that row's period expired (see
- *  shared/authPeriodMetrics.ts); the period header's Mark Expired sets the
- *  whole period at once. */
+ *  same '' | 'Pending' | 'Approved' | 'Denied' shape handleUpdateAuthStatus expects.
+ *  P4-P31: Expired is NOT a row status — it is set per period from the period
+ *  header (Mark Expired / Restore) and never changes this dropdown's value. */
 function VisitAuthStatusSelect({ visit, onChange }: { visit: DbVisit; onChange: (visitId: string, status: string) => void }) {
   const value = visit.authStatus === 'none' ? 'none' : visit.authStatus.charAt(0).toUpperCase() + visit.authStatus.slice(1);
   const colorClass =
     visit.authStatus === 'approved' ? 'bg-green-100 text-green-700' :
     visit.authStatus === 'denied' ? 'bg-red-100 text-red-700' :
-    visit.authStatus === 'expired' ? 'bg-slate-200 text-slate-800' :
     visit.authStatus === 'pending' ? 'bg-yellow-100 text-yellow-700' :
     'bg-gray-100 text-gray-600';
   return (
@@ -205,7 +205,6 @@ function VisitAuthStatusSelect({ visit, onChange }: { visit: DbVisit; onChange: 
         <SelectItem value="Pending">Pending</SelectItem>
         <SelectItem value="Approved">Approved</SelectItem>
         <SelectItem value="Denied">Denied</SelectItem>
-        <SelectItem value="Expired">Expired</SelectItem>
       </SelectContent>
     </Select>
   );
@@ -743,7 +742,7 @@ export default function Dashboard() {
     onSuccess: () => {
       utils.visits.listByPatient.invalidate({ patientId: activePatient?.id });
       utils.visits.completedPatientIds.invalidate();
-      // P4-P31: an auth status edit (e.g. Expired) can change the alerts.
+      // P4-P31: an auth status / date edit can change the alerts.
       utils.visits.authAlerts.invalidate();
     },
     onError: (e) => toast.error(`Failed to update: ${e.message}`),
@@ -1214,7 +1213,7 @@ export default function Dashboard() {
   };
 
   const handleUpdateAuthStatus = (visitId: string, status: string) => {
-    const mapped = status === '' ? 'none' : (status.toLowerCase() as 'none' | 'pending' | 'approved' | 'denied' | 'expired');
+    const mapped = status === '' ? 'none' : (status.toLowerCase() as 'none' | 'pending' | 'approved' | 'denied');
     updateVisit.mutate({ id: visitId, authStatus: mapped });
     toast.success(`Auth status updated to ${mapped}`);
   };
@@ -1841,6 +1840,7 @@ export default function Dashboard() {
                         </div>
                         <div className="flex flex-wrap items-center justify-end gap-2">
                           {/* P4-P31: expiry is set per period, by hand. */}
+                          {periodVisits.length > 0 && (
                           <PeriodExpiryControl
                             patientId={activePatient.id}
                             patientName={activePatient.name}
@@ -1848,7 +1848,9 @@ export default function Dashboard() {
                             expired={periodMetrics.expired}
                             authorized={periodMetrics.authorized}
                             completed={periodMetrics.completed}
+                            hasLaterPeriod={visits.some(v => (v.authPeriod ?? 1) > period)}
                           />
+                          )}
                           {/* Claims access only (P4-P25) */}
                           {canAccessClaims && (
                           <Button

@@ -23,7 +23,7 @@ export interface AuthorizationOverviewRecord {
   unusedExpiredSessions?: number;
 }
 
-export const AUTH_STATUS_VALUES = ['none', 'pending', 'approved', 'denied', 'expired'] as const;
+export const AUTH_STATUS_VALUES = ['none', 'pending', 'approved', 'denied'] as const;
 export type AuthStatusValue = (typeof AUTH_STATUS_VALUES)[number];
 
 export interface AuthorizationOverviewMetrics {
@@ -44,7 +44,7 @@ export interface AuthorizationOverviewMetrics {
 export function deriveAuthorizationOverviewMetrics(
   records: AuthorizationOverviewRecord[],
 ): AuthorizationOverviewMetrics {
-  const statusDistribution: Record<AuthStatusValue, number> = { none: 0, pending: 0, approved: 0, denied: 0, expired: 0 };
+  const statusDistribution: Record<AuthStatusValue, number> = { none: 0, pending: 0, approved: 0, denied: 0 };
   const urgencyDistribution: Record<AuthUrgency, number> = {
     denied: 0, expired: 0, exhausted: 0, critical: 0, warning: 0, pending: 0, ok: 0,
   };

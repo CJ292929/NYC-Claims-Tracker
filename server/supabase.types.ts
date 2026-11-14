@@ -8,8 +8,7 @@
  */
 
 export type UserRole = "user" | "admin";
-// P4-P31: "expired" is set manually per authorization period (see set_auth_period_expired_with_audit).
-export type AuthStatus = "none" | "pending" | "approved" | "denied" | "expired";
+export type AuthStatus = "none" | "pending" | "approved" | "denied";
 export type ClaimsStatus = "submitted" | "approved" | "pending" | "denied" | "pended" | "rejected" | "resubmitted";
 export type ClinicUserRole = "admin" | "staff";
 export type ClinicUserStatus = "active" | "archived";
@@ -93,6 +92,9 @@ export interface VisitRecordRow {
   created_by_type: ActorType | null;
   updated_by: string | null;
   updated_by_type: ActorType | null;
+  // P4-P31: period-level manual expiry. Never written by the app directly —
+  // only set_auth_period_expired_with_audit (trigger-enforced).
+  period_expired_at: string | null;
   created_at: string;
   updated_at: string;
 }

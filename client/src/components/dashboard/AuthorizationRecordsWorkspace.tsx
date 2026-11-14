@@ -22,7 +22,6 @@ const AUTH_STATUS_OPTIONS = [
   { value: 'pending', label: 'Pending' },
   { value: 'approved', label: 'Approved' },
   { value: 'denied', label: 'Denied' },
-  { value: 'expired', label: 'Expired' },
 ];
 
 const URGENCY_OPTIONS = [
