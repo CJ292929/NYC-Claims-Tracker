@@ -156,3 +156,21 @@ describe('derivePatientAlertPresentation: no visits', () => {
     expect(result.label).toBe('No Authorization On File');
   });
 });
+
+// P4-P30: the patient details banner picks Mark Requested vs Approved /
+// Re-request from this, by the same target-period row the Dashboard alert uses.
+describe('derivePatientAlertPresentation: authStatus for the alert actions', () => {
+  it('reports the target period status row', () => {
+    expect(derivePatientAlertPresentation([visit(1, 10, '2026-01-01', 'pending')], 2, null).authStatus).toBe('pending');
+    expect(derivePatientAlertPresentation([visit(1, 10, '2026-01-01', 'approved')], 2, null).authStatus).toBe('approved');
+  });
+
+  it('reads the later period, not an earlier pending row', () => {
+    const visits = [visit(1, 2, '2026-01-01', 'pending'), visit(1, null, '2026-01-02', 'pending'), visit(2, 10, null, 'approved')];
+    expect(derivePatientAlertPresentation(visits, 10, null).authStatus).toBe('approved');
+  });
+
+  it('is null with no visits', () => {
+    expect(derivePatientAlertPresentation([], 0, null).authStatus).toBeNull();
+  });
+});

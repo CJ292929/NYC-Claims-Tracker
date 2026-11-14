@@ -2251,8 +2251,8 @@ async function invokeOpenAI(params) {
     body: JSON.stringify(payload)
   });
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`LLM invoke failed: ${response.status} ${response.statusText} \u2013 ${errorText}`);
+    const errorText2 = await response.text();
+    throw new Error(`LLM invoke failed: ${response.status} ${response.statusText} \u2013 ${errorText2}`);
   }
   return await response.json();
 }
@@ -2395,8 +2395,8 @@ async function invokeAnthropic(params) {
     body: JSON.stringify(payload)
   });
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`LLM invoke failed: ${response.status} ${response.statusText} \u2013 ${errorText}`);
+    const errorText2 = await response.text();
+    throw new Error(`LLM invoke failed: ${response.status} ${response.statusText} \u2013 ${errorText2}`);
   }
   const data = await response.json();
   const blocks = Array.isArray(data.content) ? data.content : [];
@@ -2488,8 +2488,8 @@ async function invokeOpenRouter(params) {
     body: JSON.stringify(payload)
   });
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`LLM invoke failed: ${response.status} ${response.statusText} \u2013 ${errorText}`);
+    const errorText2 = await response.text();
+    throw new Error(`LLM invoke failed: ${response.status} ${response.statusText} \u2013 ${errorText2}`);
   }
   return await response.json();
 }
@@ -4015,6 +4015,97 @@ function eobGroupsFromClaims(groups) {
 // server/cms1500Vision.ts
 import { createRequire } from "node:module";
 import path from "node:path";
+
+// server/pdfjs.ts
+var PdfReaderUnavailableError = class extends Error {
+  constructor(stage, cause) {
+    super(`PDF reader unavailable (${stage}): ${errorText(cause)}`);
+    this.name = "PdfReaderUnavailableError";
+  }
+};
+var loading = null;
+function loadPdfjs() {
+  if (!loading) {
+    loading = load();
+    loading.catch(() => {
+      loading = null;
+    });
+  }
+  return loading;
+}
+async function load() {
+  const g = globalThis;
+  if (!g.DOMMatrix || !g.ImageData || !g.Path2D) {
+    let canvas;
+    try {
+      canvas = await import("@napi-rs/canvas");
+    } catch (err) {
+      throw new PdfReaderUnavailableError("canvas", err);
+    }
+    g.DOMMatrix ??= canvas.DOMMatrix;
+    g.ImageData ??= canvas.ImageData;
+    g.Path2D ??= canvas.Path2D;
+  }
+  if (!g.pdfjsWorker) {
+    try {
+      g.pdfjsWorker = await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
+    } catch (err) {
+      throw new PdfReaderUnavailableError("worker", err);
+    }
+  }
+  try {
+    return await import("pdfjs-dist/legacy/build/pdf.mjs");
+  } catch (err) {
+    throw new PdfReaderUnavailableError("library", err);
+  }
+}
+async function openPdf(buffer) {
+  let pdfjs;
+  try {
+    pdfjs = await loadPdfjs();
+  } catch (err) {
+    return { ok: false, failure: { kind: "reader_unavailable", detail: errorText(err) } };
+  }
+  try {
+    const task = pdfjs.getDocument({ data: new Uint8Array(buffer) });
+    const pageCount = (await task.promise).numPages;
+    await task.destroy().catch(() => {
+    });
+    return { ok: true, pageCount };
+  } catch (err) {
+    return { ok: false, failure: classifyPdfError(err) };
+  }
+}
+function classifyPdfError(err) {
+  const detail = errorText(err);
+  const name = err instanceof Error ? err.name : "";
+  if (err instanceof PdfReaderUnavailableError || /fake worker|Cannot find module|is not defined|ERR_MODULE_NOT_FOUND/i.test(detail)) {
+    return { kind: "reader_unavailable", detail };
+  }
+  if (name === "PasswordException") return { kind: "password", detail };
+  if (name === "InvalidPDFException" || name === "FormatError" || /Invalid PDF structure|No password given|PDF header/i.test(detail)) {
+    return { kind: "invalid", detail };
+  }
+  return { kind: "unreadable", detail };
+}
+function pdfOpenFailureResponse(failure) {
+  switch (failure.kind) {
+    case "reader_unavailable":
+      return { status: 503, error: "The server's PDF reader did not start, so this file was not read. This is a server problem, not a problem with the file. Nothing was saved. Try again later." };
+    case "password":
+      return { status: 422, error: "This PDF is password-protected. Remove the password, then upload it again. Nothing was saved." };
+    case "invalid":
+      return { status: 422, error: "This file is damaged or is not a PDF, so it could not be opened. Re-save or re-scan it and try again. Nothing was saved." };
+    default:
+      return { status: 422, error: `This PDF could not be read (${failure.detail.slice(0, 120)}). Nothing was saved.` };
+  }
+}
+function errorText(err) {
+  const raw = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  return raw.replace(/(?:[A-Za-z]:)?[\\/][^\s"'`]*[\\/][^\s"'`]*/g, "<path>").replace(/\s+/g, " ").slice(0, 300);
+}
+
+// server/cms1500Vision.ts
 init_env();
 
 // shared/nameMatch.ts
@@ -4273,8 +4364,8 @@ async function requestRenderedPage(bands, pageNumber, pageCount) {
 }
 function standardFontDataUrl() {
   try {
-    const pkg = createRequire(import.meta.url).resolve("pdfjs-dist/package.json");
-    return `${path.join(path.dirname(pkg), "standard_fonts").replace(/\\/g, "/")}/`;
+    const lib = createRequire(import.meta.url).resolve("pdfjs-dist/legacy/build/pdf.mjs");
+    return `${path.join(path.dirname(lib), "..", "..", "standard_fonts").replace(/\\/g, "/")}/`;
   } catch {
     console.warn("[CMS1500 Vision] pdfjs standard font data not found; printed text may be missing from rendered pages");
     return void 0;
@@ -4340,7 +4431,7 @@ async function readRenderedPage(bands, pageNumber, pageCount) {
 }
 async function renderPdfPages(buffer) {
   try {
-    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const pdfjsLib = await loadPdfjs();
     const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buffer), standardFontDataUrl: standardFontDataUrl() }).promise;
     const factory = doc.canvasFactory;
     if (!factory) return null;
@@ -4671,7 +4762,7 @@ function formFieldsToPage(fields, pageNumber) {
 }
 async function readCms1500FormPages(buffer) {
   try {
-    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const pdfjsLib = await loadPdfjs();
     const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
     const pages = [];
     for (let i = 1; i <= pdf.numPages; i++) {
@@ -5105,7 +5196,7 @@ Extract claim line items and map each one to these columns (use null if not foun
 - notes: string \u2014 any additional notes or remarks from the document
 `;
 async function extractPdfText(buffer) {
-  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const pdfjsLib = await loadPdfjs();
   const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
   const pdf = await loadingTask.promise;
   const textParts = [];
@@ -5131,7 +5222,7 @@ function extractPdfTextLayout(buffer) {
   }
 }
 async function extractPdfTextLayoutJS(buffer) {
-  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const pdfjsLib = await loadPdfjs();
   const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
   const pdf = await loadingTask.promise;
   const pageTexts = [];
@@ -5187,7 +5278,7 @@ function parseCms1500TextPages(text) {
 }
 async function getPdfPageCount(buffer) {
   try {
-    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const pdfjsLib = await loadPdfjs();
     const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
     return pdf.numPages;
   } catch {
@@ -5221,7 +5312,7 @@ function buildImportDocument(params) {
 }
 async function getPdfPagesWithoutText(buffer) {
   try {
-    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const pdfjsLib = await loadPdfjs();
     const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
     const missing = [];
     for (let i = 1; i <= pdf.numPages; i++) {
@@ -5340,7 +5431,7 @@ function registerClaimUploadRoute(app2) {
         const name = originalname.toLowerCase();
         let extractedText = "";
         const sha256 = sha256Hex(buffer);
-        console.log(`[ClaimUpload] Stage 1/7 \u2014 PDF uploaded: "${originalname}" (${(buffer.length / 1024).toFixed(1)} KB, ${mimetype})`);
+        console.log(`[ClaimUpload] Stage 1/7 \u2014 File uploaded: ${sha256.slice(0, 12)} (${(buffer.length / 1024).toFixed(1)} KB, ${mimetype})`);
         const isXlsx = name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".xlsm") || mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || mimetype === "application/vnd.ms-excel.sheet.macroEnabled.12";
         const isCsv = !isXlsx && (mimetype === "text/csv" || name.endsWith(".csv"));
         if (isXlsx) {
@@ -5357,7 +5448,24 @@ function registerClaimUploadRoute(app2) {
           }
           extractedText = extractCsvText(buffer);
         } else {
-          try {
+          const opened = await openPdf(buffer);
+          if (!opened.ok) {
+            console.error(`[ClaimUpload] PDF open failed (${opened.failure.kind}) for file ${sha256.slice(0, 12)}: ${opened.failure.detail}`);
+            if (opened.failure.kind === "invalid" || opened.failure.kind === "unreadable") {
+              try {
+                extractedText = extractPdfTextLayout(buffer);
+              } catch {
+                extractedText = "";
+              }
+            }
+            if (!hasTextLayer(extractedText)) {
+              const { status, error } = pdfOpenFailureResponse(opened.failure);
+              res.status(status).json({ error, code: `pdf_${opened.failure.kind}` });
+              return;
+            }
+            console.warn("[ClaimUpload] pdfjs could not open the file; continuing with pdftotext text");
+          }
+          if (!extractedText) try {
             extractedText = await extractPdfText(buffer);
           } catch (pdfjsError) {
             console.error("[ClaimUpload] pdfjs-dist extraction failed, falling back to pdftotext:", pdfjsError);
@@ -5504,7 +5612,7 @@ function registerClaimUploadRoute(app2) {
             return;
           }
           if (!pageCount) {
-            res.status(422).json({ error: "This PDF could not be opened. Re-save or re-scan it and try again." });
+            res.status(500).json({ error: "The PDF opened but its pages could not be counted. Nothing was saved. Try again." });
             return;
           }
           if (pageCount > MAX_SCANNED_PAGES) {

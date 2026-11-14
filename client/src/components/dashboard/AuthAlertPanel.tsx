@@ -1,24 +1,17 @@
 import { useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   AlertCircle,
-  CheckCircle2,
   Clock,
-  Loader2,
   BellRing,
   ShieldAlert,
   ShieldCheck,
   AlertTriangle,
   XCircle,
 } from 'lucide-react';
-import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
+import { ApproveAuthorizationDialog, AuthorizationActionButtons, useMarkAuthorizationRequested, type ApproveTarget } from './AuthorizationActions';
 
 const URGENCY_CONFIG = {
   denied: {
@@ -72,71 +65,9 @@ const URGENCY_CONFIG = {
 };
 
 export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => void }) {
-  const utils = trpc.useUtils();
   const { data: alerts = [], isLoading, error } = trpc.visits.authAlerts.useQuery();
-  // Same shared catalog used by the Patient Records / patient forms —
-  // see Dashboard.tsx's insuranceList — so this dialog's choices never
-  // drift out of sync with the rest of the dashboard.
-  const { data: insurerCatalog = [] } = trpc.insurance.list.useQuery();
-  // New Authorization's insurance picker is a new-selection UI — only active
-  // insurers appear (the "(current)" fallback below still preserves the
-  // patient's existing value even if it was since deactivated).
-  const insuranceList = insurerCatalog.filter(entry => entry.isActive).map(entry => entry.name);
-  const [requestingId, setRequestingId] = useState<string | null>(null);
-
-  // New Authorization dialog state
-  const [approveDialogPatient, setApproveDialogPatient] = useState<{ id: string; name: string; insurance: string } | null>(null);
-  const [newSessions, setNewSessions] = useState('');
-  const [newAuthDate, setNewAuthDate] = useState(() => new Date().toISOString().split('T')[0]);
-  const [newInsurance, setNewInsurance] = useState('');
-  const [newAuthValidUntil, setNewAuthValidUntil] = useState('');
-
-  const approveAuthorization = trpc.visits.approveAuthorization.useMutation({
-    onSuccess: (data, { patientId }) => {
-      toast.success(`Authorization approved — ${data.newVisitCount} new session records created`);
-      setApproveDialogPatient(null);
-      setNewSessions('');
-      setNewInsurance('');
-      setNewAuthValidUntil('');
-      utils.visits.authAlerts.invalidate();
-      utils.visits.listByPatient.invalidate({ patientId });
-      utils.patients.list.invalidate();
-    },
-    onError: (err) => {
-      toast.error(err.message || 'Failed to approve authorization');
-    },
-  });
-
-  const handleApproveSubmit = () => {
-    if (!approveDialogPatient) return;
-    const count = parseInt(newSessions, 10);
-    if (!count || count < 1) { toast.error('Please enter a valid session count'); return; }
-    const authValidUntilMs = newAuthValidUntil
-      ? new Date(newAuthValidUntil + 'T00:00:00Z').getTime()
-      : null;
-    approveAuthorization.mutate({
-      patientId: approveDialogPatient.id,
-      sessionsAuthorized: count,
-      authDate: newAuthDate || null,
-      newInsurance: newInsurance || undefined,
-      authValidUntil: authValidUntilMs,
-    });
-  };
-
-  const markAsRequested = trpc.visits.markAsRequested.useMutation({
-    onMutate: ({ patientId }) => setRequestingId(patientId as string),
-    onSuccess: (_data, { patientId }) => {
-      toast.success('Authorization request marked — Authorization date set to today');
-      // Optimistically remove the card if it was 'pending' urgency; otherwise refresh
-      utils.visits.authAlerts.invalidate();
-      // Also refresh the patient's visit list in case it's open
-      utils.visits.listByPatient.invalidate({ patientId });
-    },
-    onError: (err) => {
-      toast.error(err.message || 'Failed to mark as requested');
-    },
-    onSettled: () => setRequestingId(null),
-  });
+  const { requestingId, markRequested } = useMarkAuthorizationRequested();
+  const [approveDialogPatient, setApproveDialogPatient] = useState<ApproveTarget | null>(null);
 
   // Only show patients that need attention (not 'ok')
   const urgent = alerts
@@ -199,45 +130,13 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
                       </div>
                     </div>
                   </button>
-                  <div className="px-3 pb-2.5 flex gap-2">
-                    {!alreadyPending && (
-                      <Button
-                        size="sm"
-                        disabled={isRequesting}
-                        onClick={(e) => { e.stopPropagation(); markAsRequested.mutate({ patientId: alert.patientId }); }}
-                        className="flex-1 h-7 text-xs bg-brand-blue text-white hover:bg-brand-blue-dark"
-                      >
-                        {isRequesting ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
-                        Mark Requested
-                      </Button>
-                    )}
-                    {alreadyPending && (
-                      <>
-                        <Button
-                          size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setApproveDialogPatient({ id: alert.patientId, name: alert.patientName, insurance: alert.insurance ?? '' });
-                            setNewSessions('');
-                            setNewAuthDate(new Date().toISOString().split('T')[0]);
-                            setNewInsurance(alert.insurance ?? '');
-                            setNewAuthValidUntil('');
-                          }}
-                          className="flex-1 h-7 text-xs bg-green-600 text-white hover:bg-green-700"
-                        >
-                          <ShieldCheck className="w-3 h-3" /> Approved
-                        </Button>
-                        <Button
-                          size="sm"
-                          disabled={isRequesting}
-                          onClick={(e) => { e.stopPropagation(); markAsRequested.mutate({ patientId: alert.patientId }); }}
-                          className="flex-1 h-7 text-xs bg-blue-100 text-blue-700 hover:bg-blue-200"
-                        >
-                          <CheckCircle2 className="w-3 h-3" /> Re-request
-                        </Button>
-                      </>
-                    )}
-                  </div>
+                  <AuthorizationActionButtons
+                    className="px-3 pb-2.5 flex gap-2"
+                    authPending={alreadyPending}
+                    requesting={isRequesting}
+                    onMarkRequested={() => markRequested(alert.patientId)}
+                    onApprove={() => setApproveDialogPatient({ id: alert.patientId, name: alert.patientName, insurance: alert.insurance ?? '' })}
+                  />
                 </div>
               );
             })}
@@ -245,112 +144,7 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
         )}
       </CardContent>
 
-      {/* New Authorization Dialog */}
-      <Dialog open={!!approveDialogPatient} onOpenChange={(open) => { if (!open) { setApproveDialogPatient(null); setNewAuthValidUntil(''); } }}>
-        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="text-brand-blue flex items-center gap-2">
-              <ShieldCheck className="w-5 h-5 text-green-600" />
-              New Authorization Approved
-            </DialogTitle>
-            <DialogDescription>
-              Enter the new authorization details for <strong>{approveDialogPatient?.name}</strong>.
-              A fresh batch of session records will be created automatically.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="new-sessions" className="text-brand-blue font-semibold">
-                Sessions Authorized <span className="text-red-500">*</span>
-              </Label>
-              <Input
-                id="new-sessions"
-                type="number"
-                min={1}
-                max={200}
-                placeholder="e.g. 20"
-                value={newSessions}
-                onChange={(e) => setNewSessions(e.target.value)}
-                className="border-brand-blue/30 focus:border-brand-blue"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="new-auth-date" className="text-brand-blue font-semibold">
-                Authorization Date
-              </Label>
-              <Input
-                id="new-auth-date"
-                type="date"
-                value={newAuthDate}
-                onChange={(e) => setNewAuthDate(e.target.value)}
-                className="border-brand-blue/30 focus:border-brand-blue"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="new-insurance" className="text-brand-blue font-semibold">
-                Insurance Company
-              </Label>
-              <Select
-                value={newInsurance}
-                onValueChange={setNewInsurance}
-              >
-                <SelectTrigger id="new-insurance" className="border-brand-blue/30 focus:border-brand-blue">
-                  <SelectValue placeholder="Select insurance company" />
-                </SelectTrigger>
-                <SelectContent>
-                  {/* Show current insurance at top if it's not in the standard list */}
-                  {approveDialogPatient?.insurance &&
-                    !insuranceList.includes(approveDialogPatient.insurance) && (
-                    <SelectItem value={approveDialogPatient.insurance}>{approveDialogPatient.insurance} (current)</SelectItem>
-                  )}
-                  {insuranceList.map(ins => (
-                    <SelectItem key={ins} value={ins}>{ins}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="new-auth-valid-until" className="text-brand-blue font-semibold">
-                Authorization Valid Until <span className="text-gray-400 font-normal">(optional)</span>
-              </Label>
-              <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
-              <Input
-                id="new-auth-valid-until"
-                type="date"
-                value={newAuthValidUntil}
-                onChange={(e) => setNewAuthValidUntil(e.target.value)}
-                className="border-brand-blue/30 focus:border-brand-blue"
-              />
-            </div>
-            <div className="rounded-lg bg-blue-50 border border-blue-200 p-3 text-sm text-blue-800">
-              <strong>{newSessions ? parseInt(newSessions, 10) || 0 : 0}</strong> new session rows will be created,
-              numbered sequentially from the last existing session.
-              Sessions remaining will count down from the authorized total.
-            </div>
-          </div>
-          <div className="flex gap-3 pt-2">
-            <Button
-              variant="outline"
-              className="flex-1"
-              onClick={() => setApproveDialogPatient(null)}
-              disabled={approveAuthorization.isPending}
-            >
-              Cancel
-            </Button>
-            <Button
-              className="flex-1 bg-green-600 hover:bg-green-700 text-white"
-              onClick={handleApproveSubmit}
-              disabled={approveAuthorization.isPending || !newSessions}
-            >
-              {approveAuthorization.isPending ? (
-                <><Loader2 className="w-4 h-4 animate-spin mr-1" /> Creating Records…</>
-              ) : (
-                <><ShieldCheck className="w-4 h-4 mr-1" /> Confirm &amp; Create Records</>
-              )}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ApproveAuthorizationDialog target={approveDialogPatient} onClose={() => setApproveDialogPatient(null)} />
     </Card>
   );
 }

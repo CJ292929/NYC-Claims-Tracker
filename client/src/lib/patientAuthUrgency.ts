@@ -10,6 +10,8 @@ export interface PatientAlertPresentation {
   authExpiryWarning: boolean;
   label: string;
   color: string;
+  /** P4-P30: the target period's status row, as the Dashboard alert reads it — 'pending' shows Approved / Re-request. */
+  authStatus: string | null;
 }
 
 export const URGENCY_LABEL: Record<AuthUrgency, string> = {
@@ -68,7 +70,7 @@ export function derivePatientAlertPresentation(
   // P4-P28: no visit rows means no authorization was ever set up (e.g. a patient
   // created by a claims import), not exhausted sessions. Same as getAuthAlertSummaries.
   if (visits.length === 0) {
-    return { urgency: 'ok', authExpiryWarning: false, label: 'No Authorization On File', color: 'bg-gray-100 text-gray-700' };
+    return { urgency: 'ok', authExpiryWarning: false, label: 'No Authorization On File', color: 'bg-gray-100 text-gray-700', authStatus: null };
   }
   const authStatus = resolveAuthStatus(visits);
   const { urgency, authExpiryWarning } = deriveAuthorizationUrgency({
@@ -83,5 +85,6 @@ export function derivePatientAlertPresentation(
     authExpiryWarning,
     label: authExpiryWarning ? 'Auth Expiring Soon' : URGENCY_LABEL[urgency],
     color: URGENCY_COLOR[urgency],
+    authStatus,
   };
 }
