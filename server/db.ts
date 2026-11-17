@@ -841,6 +841,83 @@ export async function approveAndCreateNewBatch(
   return { newVisitIds: (newVisitIds ?? []) as string[] };
 }
 
+/** P4-P32: records the FIRST approved authorization for a patient who has no
+ * visit rows yet (created while awaiting approval): period 1 with
+ * `sessionsAuthorized` empty session rows, plus the same optional patient
+ * fields as approveAndCreateNewBatch, in one audited transaction
+ * (create_initial_authorization_with_audit). Refused with P0044 once the
+ * patient has any visit row, so a retry can't create a duplicate period and
+ * this can never act as a renewal. */
+export async function createInitialAuthorization(
+  patientId: string,
+  sessionsAuthorized: number,
+  authDate: Date | null,
+  newInsurance: string | undefined,
+  authValidUntil: number | null | undefined,
+  actor: ActorContext,
+): Promise<{ newVisitIds: string[] }> {
+  const { data, error } = await supabase.rpc("create_initial_authorization_with_audit", {
+    p_patient_id: patientId,
+    p_sessions_authorized: sessionsAuthorized,
+    p_auth_date: authDate ? authDate.toISOString().split("T")[0] : null,
+    p_new_insurance: newInsurance ?? null,
+    p_auth_valid_until_provided: authValidUntil !== undefined,
+    p_auth_valid_until: authValidUntil ?? null,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
+  if (error) {
+    console.error("[Supabase] createInitialAuthorization:", error);
+    throw error;
+  }
+  return { newVisitIds: (data ?? []) as string[] };
+}
+
+export interface PeriodSessionCorrectionResult {
+  changed: boolean;
+  sessionsAuthorized: number;
+  added: number;
+  removed: number;
+}
+
+/** P4-P32: corrects ONE authorization period's authorized session count in
+ * one audited transaction (correct_auth_period_sessions_with_audit). Refused
+ * for an Expired period (P0040), below the period's completed sessions
+ * (P0041), when a session row that would be removed holds recorded data
+ * (P0042, `details` names the sessions), or when `expectedCurrent` no longer
+ * matches (P0043). Nothing is changed when refused. */
+export async function correctAuthPeriodSessions(
+  patientId: string,
+  authPeriod: number,
+  sessionsAuthorized: number,
+  expectedCurrent: number,
+  reason: string | null,
+  actor: ActorContext,
+): Promise<PeriodSessionCorrectionResult> {
+  const { data, error } = await supabase.rpc("correct_auth_period_sessions_with_audit", {
+    p_patient_id: patientId,
+    p_auth_period: authPeriod,
+    p_sessions_authorized: sessionsAuthorized,
+    p_expected_current: expectedCurrent,
+    p_reason: reason,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
+  if (error) {
+    console.error("[Supabase] correctAuthPeriodSessions:", error);
+    throw error;
+  }
+  const out = (data ?? {}) as { changed?: boolean; sessions_authorized?: number; added?: number; removed?: number };
+  return {
+    changed: out.changed === true,
+    sessionsAuthorized: out.sessions_authorized ?? sessionsAuthorized,
+    added: out.added ?? 0,
+    removed: out.removed ?? 0,
+  };
+}
+
 /** P4-P31: marks ONE authorization period Expired (expired=true), or restores
  * it (expired=false, reason required), in one transaction via
  * set_auth_period_expired_with_audit. Only that period's period_expired_at

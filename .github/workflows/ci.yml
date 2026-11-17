@@ -71,3 +71,8 @@ jobs:
           # Fail (don't skip) if Docker or the pinned git history is missing.
           REQUIRE_PG_INTEGRATION: "1"
         run: npx vitest run server/expiredAuthorization.pg.integration.test.ts server/expiredPeriodGuard.p4p31r.pg.integration.test.ts
+
+      - name: P4-P32 real-Postgres suite (initial authorization, period count correction)
+        env:
+          REQUIRE_PG_INTEGRATION: "1"
+        run: npx vitest run server/periodSessionCorrection.pg.integration.test.ts
