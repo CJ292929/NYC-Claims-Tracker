@@ -29,6 +29,8 @@ import {
   getAuthAlertSummaries,
   getMarkAsRequestedTargetVisitId,
   approveAndCreateNewBatch,
+  createInitialAuthorization,
+  correctAuthPeriodSessions,
   setAuthPeriodExpired,
   getCompletedPatients,
   getClaimsByPatientAndPeriod,
@@ -93,6 +95,26 @@ export function rethrowPeriodExpiryGuard(err: unknown): never {
   if (code === "P0036") throw new TRPCError({ code: "CONFLICT", message: "This authorization period is expired. A date of service after its expiry date (the New York calendar date it was marked Expired) can't be recorded against it." });
   if (code === "P0038") throw new TRPCError({ code: "CONFLICT", message: "This is the last session of an expired authorization period, so it can't be moved out. Restore the period first, or leave at least one session in it." });
   throw err;
+}
+
+/** P4-P32: maps correct_auth_period_sessions_with_audit's refusals to
+ *  explanations the period-correction dialog can show as-is. */
+export function toPeriodCorrectionError(err: unknown, authPeriod: number): unknown {
+  const e = err as { code?: string; message?: string; details?: string };
+  switch (e?.code) {
+    case "P0020": return new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
+    case "P0034": return new TRPCError({ code: "NOT_FOUND", message: `Authorization Period ${authPeriod} was not found for this patient.` });
+    case "P0033": return new TRPCError({ code: "BAD_REQUEST", message: "Sessions authorized must be between 1 and 200." });
+    case "22023": return new TRPCError({ code: "BAD_REQUEST", message: "The reason must be 500 characters or fewer." });
+    case "P0040": return new TRPCError({ code: "CONFLICT", message: `Authorization Period ${authPeriod} is marked Expired, so its count can't be corrected. Restore the period first (only possible while no newer period exists).` });
+    case "P0041": {
+      const completed = e.message?.match(/below the (\d+) completed/)?.[1];
+      return new TRPCError({ code: "BAD_REQUEST", message: `Sessions authorized can't be lower than the ${completed ?? "already"} completed session(s) in Period ${authPeriod}. Nothing was changed.` });
+    }
+    case "P0042": return new TRPCError({ code: "CONFLICT", message: `Lowering the count would remove session(s) ${e.details ?? ""} of Period ${authPeriod}, which hold recorded data (request date, status, remarks, workflow or payment fields). Clear or move that data first. Nothing was changed.` });
+    case "P0043": return new TRPCError({ code: "CONFLICT", message: `Period ${authPeriod}'s count was changed by someone else. Reload and try again. Nothing was changed.` });
+    default: return err;
+  }
 }
 
 const visitRecordInput = z.object({
@@ -917,26 +939,87 @@ export const appRouter = router({
       return getAuthAlertSummaries();
     }),
 
-    // Approves a pending authorization and creates a new batch of visit records
+    // Approves a pending authorization and creates a new batch of visit records.
+    // P4-P32: `initial: true` records the FIRST approval for a patient created
+    // while awaiting approval (no visit rows): period 1 is created, and the
+    // call is refused once any period exists, so a retry never duplicates it
+    // and it can't act as a renewal. Without `initial`, unchanged: a renewal
+    // that needs an existing period.
     approveAuthorization: normalProtectedProcedure
       .input(z.object({
         patientId: z.string().uuid(),
-        sessionsAuthorized: z.number().min(1).max(200),
+        sessionsAuthorized: z.number().int().min(1).max(200),
         authDate: z.string().nullable().optional(), // ISO date string "YYYY-MM-DD"
         newInsurance: z.string().optional(), // optional insurance change for new period
         authValidUntil: z.number().nullable().optional(), // Unix ms timestamp for expiry
+        initial: z.boolean().optional(),
       }))
       .mutation(async ({ input, ctx }) => {
         const authDate = input.authDate ? new Date(input.authDate + "T00:00:00Z") : null;
-        const { newVisitIds } = await approveAndCreateNewBatch(
-          input.patientId,
-          input.sessionsAuthorized,
-          authDate,
-          input.newInsurance,
-          input.authValidUntil ?? undefined,
-          getActorContext(ctx.user),
-        );
+        if (input.initial) {
+          try {
+            const { newVisitIds } = await createInitialAuthorization(
+              input.patientId,
+              input.sessionsAuthorized,
+              authDate,
+              input.newInsurance,
+              input.authValidUntil ?? undefined,
+              getActorContext(ctx.user),
+            );
+            return { success: true, newVisitCount: newVisitIds.length, authPeriod: 1 };
+          } catch (err: unknown) {
+            const code = (err as { code?: string })?.code;
+            if (code === "P0020") throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
+            if (code === "P0044") throw new TRPCError({ code: "CONFLICT", message: "This patient already has an authorization period, so nothing new was created. Reload to see it, and use Correct Count to change its sessions." });
+            if (code === "P0033") throw new TRPCError({ code: "BAD_REQUEST", message: "Sessions authorized must be between 1 and 200." });
+            throw err;
+          }
+        }
+        let newVisitIds: string[];
+        try {
+          ({ newVisitIds } = await approveAndCreateNewBatch(
+            input.patientId,
+            input.sessionsAuthorized,
+            authDate,
+            input.newInsurance,
+            input.authValidUntil ?? undefined,
+            getActorContext(ctx.user),
+          ));
+        } catch (err: unknown) {
+          // A renewal needs a period to renew; a patient with none records the
+          // first approval through `initial` instead (never inferred here).
+          if ((err as { code?: string })?.code === "P0034") {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This patient has no authorization period yet. Use Record Initial Authorization in Edit Patient to enter the approved sessions." });
+          }
+          throw err;
+        }
         return { success: true, newVisitCount: newVisitIds.length };
+      }),
+
+    // P4-P32: correct ONE authorization period's authorized count. Same gate
+    // as approveAuthorization / setPeriodExpired. Atomic and audited in
+    // correct_auth_period_sessions_with_audit; refused (nothing changed) for
+    // an Expired period, below completed sessions, when a session row that
+    // would be removed holds data, or when the count changed since the
+    // caller loaded it. No financial or claims field is read or written.
+    correctPeriodSessions: normalProtectedProcedure
+      .input(z.object({
+        patientId: z.string().uuid(),
+        authPeriod: z.number().int().min(1),
+        sessionsAuthorized: z.number().int().min(1).max(200),
+        expectedCurrent: z.number().int().min(0),
+        reason: z.string().trim().max(500).optional(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        try {
+          const result = await correctAuthPeriodSessions(
+            input.patientId, input.authPeriod, input.sessionsAuthorized, input.expectedCurrent,
+            input.reason || null, getActorContext(ctx.user),
+          );
+          return { success: true, ...result };
+        } catch (err: unknown) {
+          throw toPeriodCorrectionError(err, input.authPeriod);
+        }
       }),
 
     // Returns IDs of patients whose sessions are fully completed (0 remaining + all dated)

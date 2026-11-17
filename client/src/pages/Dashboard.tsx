@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical, Settings, History, EyeOff, FileStack } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical, Settings, History, EyeOff, FileStack, ShieldCheck } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Switch } from '@/components/ui/switch';
@@ -40,7 +40,8 @@ import type { NavSection } from '@/components/dashboard/DashboardSidebar';
 import { getPatientMetrics } from '@/lib/patientMetrics';
 import { getPatientOverviewMetrics } from '@/lib/patientOverviewMetrics';
 import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
-import { ApproveAuthorizationDialog, AuthorizationActionButtons, PeriodExpiryControl, useMarkAuthorizationRequested, type ApproveTarget } from '@/components/dashboard/AuthorizationActions';
+import { ApproveAuthorizationDialog, AuthorizationActionButtons, CorrectPeriodCountControl, PeriodExpiryControl, useMarkAuthorizationRequested, type ApproveTarget } from '@/components/dashboard/AuthorizationActions';
+import { AuthorizationSessionsSection } from '@/components/dashboard/AuthorizationSessionsSection';
 import { getPeriodMetrics } from '@shared/authPeriodMetrics';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
@@ -1471,6 +1472,22 @@ export default function Dashboard() {
               </Select>
             </div>
             )}
+            {/* P4-P32: counts are owned by authorization periods and saved on
+                their own audited paths — Save Changes below never sends them. */}
+            {selectedPatient && (
+              <AuthorizationSessionsSection
+                patientId={selectedPatient.id}
+                patientName={selectedPatient.name}
+                visits={visits.filter(v => v.patientId === selectedPatient.id)}
+                loading={visitsLoading || activePatient?.id !== selectedPatient.id}
+                onRecordInitial={() => {
+                  // The approval can change the auth date / insurer this form
+                  // holds, so close it rather than leave stale values open.
+                  setIsEditPatientOpen(false);
+                  setApproveAuthPatient({ id: selectedPatient.id, name: selectedPatient.name, insurance: selectedPatient.insurance ?? '', initial: true });
+                }}
+              />
+            )}
           </div>
           <DialogFooter className="flex gap-3 pt-2 sm:justify-start">
             <Button
@@ -1790,7 +1807,16 @@ export default function Dashboard() {
             </div>
           ) : visits.length === 0 && (activeSection !== 'claims' || periods.length === 0) ? (
             <Card className="border-brand-cream-dark shadow-md">
-              <CardContent className="py-12 text-center text-muted-foreground">No visit records yet. Log a session to get started.</CardContent>
+              {/* P4-P32: no period yet = created while awaiting approval. */}
+              <CardContent className="py-12 text-center text-muted-foreground space-y-4">
+                <p>No authorization recorded yet. Sessions Authorized is not set while approval is pending.</p>
+                <Button
+                  onClick={() => setApproveAuthPatient({ id: activePatient.id, name: activePatient.name, insurance: activePatient.insurance ?? '', initial: true })}
+                  className="bg-green-600 hover:bg-green-700 text-white"
+                >
+                  <ShieldCheck className="w-4 h-4" /> Record Initial Authorization
+                </Button>
+              </CardContent>
             </Card>
           ) : (
             <>
@@ -1849,6 +1875,18 @@ export default function Dashboard() {
                             authorized={periodMetrics.authorized}
                             completed={periodMetrics.completed}
                             hasLaterPeriod={visits.some(v => (v.authPeriod ?? 1) > period)}
+                          />
+                          )}
+                          {/* P4-P32: period-level count correction. */}
+                          {periodVisits.length > 0 && (
+                          <CorrectPeriodCountControl
+                            patientId={activePatient.id}
+                            patientName={activePatient.name}
+                            period={period}
+                            authorized={periodMetrics.authorized}
+                            completed={periodMetrics.completed}
+                            sessionRows={periodVisits.length}
+                            expired={periodMetrics.expired}
                           />
                           )}
                           {/* Claims access only (P4-P25) */}
