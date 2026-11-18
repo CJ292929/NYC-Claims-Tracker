@@ -45,10 +45,9 @@ import { AuthorizationSessionsSection } from '@/components/dashboard/Authorizati
 import { getPeriodMetrics } from '@shared/authPeriodMetrics';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
-import { isCompleteSessionDate } from '@/lib/sessionDate';
-import type { FormEvent } from 'react';
 import { ClaimImportDialog } from '@/components/claims/ClaimImportDialog';
 import { ClaimBulkUploadPanel } from '@/components/claims/ClaimBulkUploadPanel';
+import { LogSessionDialog } from '@/components/dashboard/LogSessionDialog';
 import { PatientBulkUploadDialog } from '@/components/dashboard/PatientBulkUploadDialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { sumKnownMoney } from '@shared/claimImport';
@@ -396,19 +395,6 @@ export default function Dashboard() {
   const [newPatientAuthDate, setNewPatientAuthDate] = useState('');
   const [newPatientAuthValidUntil, setNewPatientAuthValidUntil] = useState('');
   const [showUploadDialog, setShowUploadDialog] = useState(false);
-  const [showLogSessionDialog, setShowLogSessionDialog] = useState(false);
-  const [sessionDate, setSessionDate] = useState(new Date().toISOString().split('T')[0]);
-  /** Inline error shown inside the Log New Session dialog (validation or save failure). */
-  const [logSessionError, setLogSessionError] = useState<string | null>(null);
-  const [logSessionPending, setLogSessionPending] = useState(false);
-  /**
-   * Synchronous re-entry guard for Log Session: Enter, a held/repeated Enter,
-   * and a button click can all land before `logSessionPending` re-renders the
-   * button disabled. Released on failure (so the user can retry) and on the
-   * next dialog open after a success — never while a save is in flight.
-   */
-  const logSessionGuardRef = useRef(createSingleFlightGuard());
-  const logSessionInFlightRef = useRef(false);
   /** Delete confirmation dialog */
   const [deletePatientId, setDeletePatientId] = useState<string | null>(null);
   const [deletePatientName, setDeletePatientName] = useState<string>('');
@@ -740,16 +726,6 @@ export default function Dashboard() {
       toast.success('Insurance company reactivated');
     },
     onError: (e) => toast.error(e.message),
-  });
-
-  const createVisit = trpc.visits.create.useMutation({
-    onSuccess: () => {
-      utils.visits.listByPatient.invalidate({ patientId: activePatient?.id });
-      utils.visits.completedPatientIds.invalidate();
-      toast.success('Session logged successfully!');
-      setShowLogSessionDialog(false);
-    },
-    onError: (e) => toast.error(`Failed to log session: ${e.message}`),
   });
 
   const updateVisit = trpc.visits.update.useMutation({
@@ -1181,85 +1157,6 @@ export default function Dashboard() {
       setNewPatientInsurance('');
     } catch (e: any) {
       toast.error(`Failed to add patient: ${e.message}`);
-    }
-  };
-
-  const handleLogSessionOpenChange = (open: boolean) => {
-    setShowLogSessionDialog(open);
-    if (open) {
-      setLogSessionError(null);
-      // A previous successful save keeps the guard locked until the dialog is
-      // reopened; never release it while a save is still in flight.
-      if (!logSessionInFlightRef.current) logSessionGuardRef.current.exit();
-    }
-  };
-
-  /** Shared by the Confirm Session button and Enter (form submit). */
-  const handleLogSession = (e?: FormEvent<HTMLFormElement>) => {
-    e?.preventDefault();
-    if (!activePatient) return;
-    if (activeMetrics.remaining <= 0) {
-      toast.error('No sessions remaining for this patient');
-      return;
-    }
-    if (!isCompleteSessionDate(sessionDate)) {
-      setLogSessionError('Enter a complete, valid date of service.');
-      return;
-    }
-    if (!logSessionGuardRef.current.tryEnter()) return;
-    logSessionInFlightRef.current = true;
-    setLogSessionPending(true);
-    setLogSessionError(null);
-    const settleLogSession = (failureMessage?: string) => {
-      logSessionInFlightRef.current = false;
-      setLogSessionPending(false);
-      if (failureMessage !== undefined) {
-        // Keep the dialog open with the entered date so the user can retry.
-        logSessionGuardRef.current.exit();
-        setLogSessionError(failureMessage);
-      }
-    };
-    const newRemaining = activeMetrics.remaining - 1;
-    // Target the active period (oldest with remaining sessions)
-    const targetPeriod = activeMetrics.activePeriod;
-    // Find the first undated session row in the active period to fill in
-    const activePeriodVisits = visits.filter(v => (v.authPeriod ?? 1) === targetPeriod);
-    const firstUndated = activePeriodVisits.find(v => !v.dateOfService);
-    if (firstUndated) {
-      // Update the existing pre-created row with the date of service
-      updateVisit.mutate({
-        id: firstUndated.id,
-        dateOfService: sessionDate,
-        sessionsRemaining: newRemaining,
-        authStatus: firstUndated.authStatus === 'none' ? 'none' : firstUndated.authStatus,
-      }, {
-        onSuccess: () => {
-          settleLogSession();
-          toast.success('Session logged successfully!');
-          setShowLogSessionDialog(false);
-          setSessionDate(new Date().toISOString().split('T')[0]);
-        },
-        onError: (err) => {
-          toast.error(`Failed to log session: ${err.message}`);
-          settleLogSession(`Failed to log session: ${err.message}`);
-        },
-      });
-    } else {
-      // Fallback: create a new row if no pre-created rows exist
-      const nextSessionNumber = activePeriodVisits.length + 1;
-      createVisit.mutate({
-        patientId: activePatient.id,
-        sessionsRemaining: newRemaining,
-        sessionNumber: nextSessionNumber,
-        authPeriod: targetPeriod ?? undefined,
-        dateOfService: sessionDate,
-        newAuth: 'NO',
-        authStatus: 'none',
-      }, {
-        // The hook-level callbacks still toast, refresh and close the dialog.
-        onSuccess: () => settleLogSession(),
-        onError: (err) => settleLogSession(`Failed to log session: ${err.message}`),
-      });
     }
   };
 
@@ -1951,68 +1848,13 @@ export default function Dashboard() {
                           )}
                           {/* Log Session button only on active period (oldest with remaining sessions) */}
                           {isActive && (
-                          <Dialog open={showLogSessionDialog} onOpenChange={handleLogSessionOpenChange}>
-                            <DialogTrigger asChild>
-                              <Button className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold px-5 py-2.5 rounded-lg inline-flex items-center gap-2 transition-all shadow-sm hover:shadow-md">
-                                <Plus className="w-4 h-4" strokeWidth={2.5} />
-                                Log Session
-                              </Button>
-                            </DialogTrigger>
-                            <DialogContent className="bg-white">
-                              <DialogHeader>
-                                <DialogTitle className="text-brand-blue">Log New Session</DialogTitle>
-                                <DialogDescription>Record a therapy session for {activePatient.name}</DialogDescription>
-                              </DialogHeader>
-                              <form
-                                className="space-y-4"
-                                noValidate
-                                onSubmit={handleLogSession}
-                                onKeyDown={e => {
-                                  // Ignore auto-repeat from a held Enter and IME composition;
-                                  // the single-flight guard covers everything else.
-                                  if (e.key === 'Enter' && (e.repeat || e.nativeEvent.isComposing)) e.preventDefault();
-                                }}
-                              >
-                                <div>
-                                  <Label htmlFor="log-session-date" className="text-brand-blue font-semibold">Date of Service</Label>
-                                  <Input
-                                    id="log-session-date"
-                                    type="date"
-                                    value={sessionDate}
-                                    onChange={e => {
-                                      setSessionDate(e.target.value);
-                                      setLogSessionError(null);
-                                    }}
-                                    aria-invalid={logSessionError !== null}
-                                    aria-describedby={logSessionError ? 'log-session-error' : undefined}
-                                    className="border-brand-cream-dark mt-2"
-                                  />
-                                  {logSessionError && (
-                                    <p id="log-session-error" role="alert" className="mt-2 text-sm text-red-600">
-                                      {logSessionError}
-                                    </p>
-                                  )}
-                                </div>
-                                <div className="bg-brand-cream rounded-lg p-4 text-sm text-brand-blue">
-                                  <p><strong>Sessions remaining:</strong> {activeMetrics.remaining}</p>
-                                  <p><strong>After this session:</strong> {Math.max(0, activeMetrics.remaining - 1)}</p>
-                                </div>
-                                <div className="flex gap-3">
-                                  <Button
-                                    type="submit"
-                                    disabled={logSessionPending}
-                                    className="flex-1 bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
-                                  >
-                                    {logSessionPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <CheckCircle2 className="w-4 h-4 mr-2" />}
-                                    Confirm Session
-                                  </Button>
-                                  <Button type="button" onClick={() => setShowLogSessionDialog(false)} variant="outline" className="flex-1">
-                                    Cancel
-                                  </Button>
-                                </div>
-                              </form>
-                            </DialogContent>
-                          </Dialog>
+                          <LogSessionDialog
+                            patientId={activePatient.id}
+                            patientName={activePatient.name}
+                            remaining={activeMetrics.remaining}
+                            activePeriod={activeMetrics.activePeriod}
+                            visits={visits}
+                          />
                           )}
                         </div>
                       </CardHeader>
