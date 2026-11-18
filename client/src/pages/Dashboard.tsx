@@ -47,6 +47,7 @@ import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
 import { ClaimImportDialog } from '@/components/claims/ClaimImportDialog';
 import { ClaimBulkUploadPanel } from '@/components/claims/ClaimBulkUploadPanel';
+import { LogSessionDialog } from '@/components/dashboard/LogSessionDialog';
 import { PatientBulkUploadDialog } from '@/components/dashboard/PatientBulkUploadDialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { sumKnownMoney } from '@shared/claimImport';
@@ -394,8 +395,6 @@ export default function Dashboard() {
   const [newPatientAuthDate, setNewPatientAuthDate] = useState('');
   const [newPatientAuthValidUntil, setNewPatientAuthValidUntil] = useState('');
   const [showUploadDialog, setShowUploadDialog] = useState(false);
-  const [showLogSessionDialog, setShowLogSessionDialog] = useState(false);
-  const [sessionDate, setSessionDate] = useState(new Date().toISOString().split('T')[0]);
   /** Delete confirmation dialog */
   const [deletePatientId, setDeletePatientId] = useState<string | null>(null);
   const [deletePatientName, setDeletePatientName] = useState<string>('');
@@ -727,16 +726,6 @@ export default function Dashboard() {
       toast.success('Insurance company reactivated');
     },
     onError: (e) => toast.error(e.message),
-  });
-
-  const createVisit = trpc.visits.create.useMutation({
-    onSuccess: () => {
-      utils.visits.listByPatient.invalidate({ patientId: activePatient?.id });
-      utils.visits.completedPatientIds.invalidate();
-      toast.success('Session logged successfully!');
-      setShowLogSessionDialog(false);
-    },
-    onError: (e) => toast.error(`Failed to log session: ${e.message}`),
   });
 
   const updateVisit = trpc.visits.update.useMutation({
@@ -1168,48 +1157,6 @@ export default function Dashboard() {
       setNewPatientInsurance('');
     } catch (e: any) {
       toast.error(`Failed to add patient: ${e.message}`);
-    }
-  };
-
-  const handleLogSession = () => {
-    if (!activePatient) return;
-    if (activeMetrics.remaining <= 0) {
-      toast.error('No sessions remaining for this patient');
-      return;
-    }
-    const newRemaining = activeMetrics.remaining - 1;
-    // Target the active period (oldest with remaining sessions)
-    const targetPeriod = activeMetrics.activePeriod;
-    // Find the first undated session row in the active period to fill in
-    const activePeriodVisits = visits.filter(v => (v.authPeriod ?? 1) === targetPeriod);
-    const firstUndated = activePeriodVisits.find(v => !v.dateOfService);
-    if (firstUndated) {
-      // Update the existing pre-created row with the date of service
-      updateVisit.mutate({
-        id: firstUndated.id,
-        dateOfService: sessionDate,
-        sessionsRemaining: newRemaining,
-        authStatus: firstUndated.authStatus === 'none' ? 'none' : firstUndated.authStatus,
-      }, {
-        onSuccess: () => {
-          toast.success('Session logged successfully!');
-          setShowLogSessionDialog(false);
-          setSessionDate(new Date().toISOString().split('T')[0]);
-        },
-        onError: (err) => toast.error(`Failed to log session: ${err.message}`),
-      });
-    } else {
-      // Fallback: create a new row if no pre-created rows exist
-      const nextSessionNumber = activePeriodVisits.length + 1;
-      createVisit.mutate({
-        patientId: activePatient.id,
-        sessionsRemaining: newRemaining,
-        sessionNumber: nextSessionNumber,
-        authPeriod: targetPeriod ?? undefined,
-        dateOfService: sessionDate,
-        newAuth: 'NO',
-        authStatus: 'none',
-      });
     }
   };
 
@@ -1901,48 +1848,13 @@ export default function Dashboard() {
                           )}
                           {/* Log Session button only on active period (oldest with remaining sessions) */}
                           {isActive && (
-                          <Dialog open={showLogSessionDialog} onOpenChange={setShowLogSessionDialog}>
-                            <DialogTrigger asChild>
-                              <Button className="bg-brand-gold hover:bg-brand-gold-dark text-brand-blue font-semibold px-5 py-2.5 rounded-lg inline-flex items-center gap-2 transition-all shadow-sm hover:shadow-md">
-                                <Plus className="w-4 h-4" strokeWidth={2.5} />
-                                Log Session
-                              </Button>
-                            </DialogTrigger>
-                            <DialogContent className="bg-white">
-                              <DialogHeader>
-                                <DialogTitle className="text-brand-blue">Log New Session</DialogTitle>
-                                <DialogDescription>Record a therapy session for {activePatient.name}</DialogDescription>
-                              </DialogHeader>
-                              <div className="space-y-4">
-                                <div>
-                                  <Label className="text-brand-blue font-semibold">Date of Service</Label>
-                                  <Input
-                                    type="date"
-                                    value={sessionDate}
-                                    onChange={e => setSessionDate(e.target.value)}
-                                    className="border-brand-cream-dark mt-2"
-                                  />
-                                </div>
-                                <div className="bg-brand-cream rounded-lg p-4 text-sm text-brand-blue">
-                                  <p><strong>Sessions remaining:</strong> {activeMetrics.remaining}</p>
-                                  <p><strong>After this session:</strong> {Math.max(0, activeMetrics.remaining - 1)}</p>
-                                </div>
-                                <div className="flex gap-3">
-                                  <Button
-                                    onClick={handleLogSession}
-                                    disabled={createVisit.isPending}
-                                    className="flex-1 bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold"
-                                  >
-                                    {createVisit.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <CheckCircle2 className="w-4 h-4 mr-2" />}
-                                    Confirm Session
-                                  </Button>
-                                  <Button onClick={() => setShowLogSessionDialog(false)} variant="outline" className="flex-1">
-                                    Cancel
-                                  </Button>
-                                </div>
-                              </div>
-                            </DialogContent>
-                          </Dialog>
+                          <LogSessionDialog
+                            patientId={activePatient.id}
+                            patientName={activePatient.name}
+                            remaining={activeMetrics.remaining}
+                            activePeriod={activeMetrics.activePeriod}
+                            visits={visits}
+                          />
                           )}
                         </div>
                       </CardHeader>
