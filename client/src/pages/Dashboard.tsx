@@ -41,6 +41,8 @@ import { getPatientMetrics } from '@/lib/patientMetrics';
 import { getPatientOverviewMetrics } from '@/lib/patientOverviewMetrics';
 import { derivePatientAlertPresentation } from '@/lib/patientAuthUrgency';
 import { ApproveAuthorizationDialog, AuthorizationActionButtons, CorrectPeriodCountControl, PeriodExpiryControl, useMarkAuthorizationRequested, type ApproveTarget } from '@/components/dashboard/AuthorizationActions';
+import { VisitAuthStatusSelect, type RowAuthStatus } from '@/components/dashboard/VisitAuthStatusSelect';
+import { ClearDateOfServiceDialog } from '@/components/dashboard/ClearDateOfServiceDialog';
 import { AuthorizationSessionsSection } from '@/components/dashboard/AuthorizationSessionsSection';
 import { getPeriodMetrics } from '@shared/authPeriodMetrics';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
@@ -182,36 +184,6 @@ function authBannerMessage(
   }
 }
 
-/** Compact colored dropdown for a visit's auth status. `onChange` receives the
- *  same '' | 'Pending' | 'Approved' | 'Denied' shape handleUpdateAuthStatus expects.
- *  P4-P31: Expired is NOT a row status — it is set per period from the period
- *  header (Mark Expired / Restore) and never changes this dropdown's value. */
-function VisitAuthStatusSelect({ visit, onChange }: { visit: DbVisit; onChange: (visitId: string, status: string) => void }) {
-  const value = visit.authStatus === 'none' ? 'none' : visit.authStatus.charAt(0).toUpperCase() + visit.authStatus.slice(1);
-  const colorClass =
-    visit.authStatus === 'approved' ? 'bg-green-100 text-green-700' :
-    visit.authStatus === 'denied' ? 'bg-red-100 text-red-700' :
-    visit.authStatus === 'pending' ? 'bg-yellow-100 text-yellow-700' :
-    'bg-gray-100 text-gray-600';
-  return (
-    <Select value={value} onValueChange={(v) => onChange(visit.id, v === 'none' ? '' : v)}>
-      <SelectTrigger
-        size="sm"
-        aria-label="Auth status"
-        className={`h-auto w-auto border-0 rounded-full px-3 py-1 text-xs font-medium shadow-none ${colorClass}`}
-      >
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem value="none">— None —</SelectItem>
-        <SelectItem value="Pending">Pending</SelectItem>
-        <SelectItem value="Approved">Approved</SelectItem>
-        <SelectItem value="Denied">Denied</SelectItem>
-      </SelectContent>
-    </Select>
-  );
-}
-
 /** Generic click-to-edit cell for a single date/number field on a visit row.
  *  Manages its own open/closed state so every correctable field (session #,
  *  date of service, # authorized, # remaining, date auth submitted) can share
@@ -227,6 +199,7 @@ function EditableCell({
   min,
   step,
   emptyLabel = 'Click to set',
+  extraActions,
 }: {
   type: 'date' | 'number';
   value: string;
@@ -236,6 +209,8 @@ function EditableCell({
   min?: number;
   step?: number;
   emptyLabel?: string;
+  /** Extra buttons shown beside Save / Cancel while editing. */
+  extraActions?: React.ReactNode;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -271,6 +246,7 @@ function EditableCell({
         >
           Cancel
         </Button>
+        {extraActions}
       </div>
     );
   }
@@ -282,6 +258,73 @@ function EditableCell({
     >
       {display ?? <span className="text-gray-300 italic font-normal">{emptyLabel}</span>}
     </button>
+  );
+}
+
+/** Inline Date of Service editor for one session row, with an explicit,
+ *  confirmed "Clear date" (ClearDateOfServiceDialog). Saving an emptied date
+ *  input also goes through that confirmation instead of clearing silently.
+ *  The editor stays open with its unsaved input while the dialog is open and
+ *  after Cancel; it closes only once the server confirmed the clear. */
+function DateOfServiceEditor({
+  visit,
+  patientId,
+  period,
+  completed,
+  periodExpired,
+  isSaving,
+  onSaveDate,
+}: {
+  visit: DbVisit;
+  patientId: string;
+  period: number;
+  completed: number;
+  periodExpired: boolean;
+  isSaving: boolean;
+  onSaveDate: (raw: string | null) => Promise<boolean>;
+}) {
+  const [clearOpen, setClearOpen] = useState(false);
+  const [resetKey, setResetKey] = useState(0);
+  const stored = visit.dateOfService;
+  return (
+    <>
+      <EditableCell
+        key={resetKey}
+        type="date"
+        value={toInputDate(stored)}
+        display={stored ? formatDate(stored) : null}
+        isSaving={isSaving}
+        onSave={(raw) => {
+          if (!raw && stored) { setClearOpen(true); return false; }
+          return onSaveDate(raw || null);
+        }}
+        extraActions={stored ? (
+          <Button
+            size="sm"
+            variant="secondary"
+            aria-label="Clear Date of Service"
+            onClick={() => setClearOpen(true)}
+            className="h-auto min-h-[32px] text-red-600 hover:text-red-800 font-bold text-xs px-2 py-1 bg-red-50 hover:bg-red-100"
+          >
+            Clear date
+          </Button>
+        ) : null}
+      />
+      {stored && (
+        <ClearDateOfServiceDialog
+          open={clearOpen}
+          onOpenChange={setClearOpen}
+          onCleared={() => setResetKey(k => k + 1)}
+          visitId={visit.id}
+          patientId={patientId}
+          period={period}
+          sessionNumber={visit.sessionNumber}
+          dateLabel={formatDate(stored)}
+          completed={completed}
+          periodExpired={periodExpired}
+        />
+      )}
+    </>
   );
 }
 
@@ -378,6 +421,9 @@ export default function Dashboard() {
 
   // ── State ──────────────────────────────────────────────────────────────────
   const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null);
+  // Which period's Mark Expired / Restore dialog is open — shared by the
+  // period header button and every session's Auth Status dropdown.
+  const [expiryDialogPeriod, setExpiryDialogPeriod] = useState<number | null>(null);
   const [showAddPatient, setShowAddPatient] = useState(false);
   const [showAddInsurance, setShowAddInsurance] = useState(false);
   const [newInsuranceName, setNewInsuranceName] = useState('');
@@ -1160,10 +1206,11 @@ export default function Dashboard() {
     }
   };
 
-  const handleUpdateAuthStatus = (visitId: string, status: string) => {
-    const mapped = status === '' ? 'none' : (status.toLowerCase() as 'none' | 'pending' | 'approved' | 'denied');
-    updateVisit.mutate({ id: visitId, authStatus: mapped });
-    toast.success(`Auth status updated to ${mapped}`);
+  // Writes ONE session row's auth_status. Never 'expired' — expiry is the
+  // period-level mark, set only through the period's Mark Expired dialog.
+  const handleUpdateAuthStatus = (visitId: string, status: RowAuthStatus) => {
+    updateVisit.mutate({ id: visitId, authStatus: status });
+    toast.success(`Auth status updated to ${status}`);
   };
 
   /** Shared save path for every correctable visit field (backs each EditableCell
@@ -1822,6 +1869,8 @@ export default function Dashboard() {
                             authorized={periodMetrics.authorized}
                             completed={periodMetrics.completed}
                             hasLaterPeriod={visits.some(v => (v.authPeriod ?? 1) > period)}
+                            open={expiryDialogPeriod === period}
+                            onOpenChange={(next) => setExpiryDialogPeriod(next ? period : null)}
                           />
                           )}
                           {/* P4-P32: period-level count correction. */}
@@ -1882,19 +1931,27 @@ export default function Dashboard() {
                                     />
                                   </span>
                                 </div>
-                                <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
+                                <VisitAuthStatusSelect
+                                  rowStatus={visit.authStatus}
+                                  period={period}
+                                  periodExpired={periodMetrics.expired}
+                                  onSetRowStatus={(status) => handleUpdateAuthStatus(visit.id, status)}
+                                  onRequestPeriodExpiry={() => setExpiryDialogPeriod(period)}
+                                />
                               </div>
 
                               <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
                                 <div>
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Date of Service</p>
                                   <p className="text-brand-blue">
-                                    <EditableCell
-                                      type="date"
-                                      value={toInputDate(visit.dateOfService)}
-                                      display={visit.dateOfService ? formatDate(visit.dateOfService) : null}
+                                    <DateOfServiceEditor
+                                      visit={visit}
+                                      patientId={activePatient.id}
+                                      period={period}
+                                      completed={periodMetrics.completed}
+                                      periodExpired={periodMetrics.expired}
                                       isSaving={updateVisit.isPending}
-                                      onSave={(raw) => saveVisitField(visit.id, { dateOfService: raw || null }, 'Date of Service saved')}
+                                      onSaveDate={(raw) => saveVisitField(visit.id, { dateOfService: raw }, 'Date of Service saved')}
                                     />
                                   </p>
                                 </div>
@@ -2075,13 +2132,15 @@ export default function Dashboard() {
                           </td>
                           {/* Date of Service — EDITABLE */}
                           <td className="px-4 py-2.5 text-sm text-muted-foreground whitespace-nowrap">
-                            <EditableCell
-                              type="date"
-                              value={toInputDate(visit.dateOfService)}
-                              display={visit.dateOfService ? formatDate(visit.dateOfService) : null}
-                              isSaving={updateVisit.isPending}
-                              onSave={(raw) => saveVisitField(visit.id, { dateOfService: raw || null }, 'Date of Service saved')}
-                            />
+                            <DateOfServiceEditor
+                                      visit={visit}
+                                      patientId={activePatient.id}
+                                      period={period}
+                                      completed={periodMetrics.completed}
+                                      periodExpired={periodMetrics.expired}
+                                      isSaving={updateVisit.isPending}
+                                      onSaveDate={(raw) => saveVisitField(visit.id, { dateOfService: raw }, 'Date of Service saved')}
+                                    />
                           </td>
                           {/* Date Authorization Submitted — EDITABLE */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
@@ -2099,7 +2158,13 @@ export default function Dashboard() {
                           </td>
                           {/* Auth Status */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
-                            <VisitAuthStatusSelect visit={visit} onChange={handleUpdateAuthStatus} />
+                            <VisitAuthStatusSelect
+                                  rowStatus={visit.authStatus}
+                                  period={period}
+                                  periodExpired={periodMetrics.expired}
+                                  onSetRowStatus={(status) => handleUpdateAuthStatus(visit.id, status)}
+                                  onRequestPeriodExpiry={() => setExpiryDialogPeriod(period)}
+                                />
                           </td>
                           {/* Assignment of Benefits — EDITABLE (P4-P23) */}
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">

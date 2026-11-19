@@ -8756,6 +8756,31 @@ var appRouter = router({
       }
       return { success: true };
     }),
+    // Clear Date of Service on ONE session row (a wrong session date). Same
+    // gate as visits.update. Writes only date_of_service = null through the
+    // atomic audited RPC, with the patient as an ownership guard, so the row,
+    // its period/authorization, claims and money are never touched and the
+    // date is never moved to another period. Completed/remaining derive from
+    // dates, so they recompute on read; an Expired period stays expired with
+    // 0 available (the expiry mark is period-level, not a row field). A
+    // repeat call on an already-empty date is a no-op (no audit row).
+    clearDateOfService: normalProtectedProcedure.input(z7.object({
+      id: z7.string().uuid(),
+      patientId: z7.string().uuid()
+    })).mutation(async ({ input, ctx }) => {
+      try {
+        await updateVisitRecord(input.id, { dateOfService: null }, getActorContext(ctx.user), {
+          action: "SESSION_DATE_OF_SERVICE_CLEARED",
+          patientId: input.patientId
+        });
+      } catch (err) {
+        const code = err?.code;
+        if (code === "P0030") throw new TRPCError3({ code: "NOT_FOUND", message: "Session not found. It may have been removed \u2014 reload and try again." });
+        if (code === "P0031") throw new TRPCError3({ code: "BAD_REQUEST", message: "This session does not belong to the selected patient." });
+        rethrowPeriodExpiryGuard(err);
+      }
+      return { success: true };
+    }),
     // P4-P23: per-session workflow fields (Assignment of Benefits, Submission
     // Status, Remarks). Same gate as visits.update — every authenticated
     // Admin/Staff who can edit authorization sessions can edit these.

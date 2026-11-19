@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { useState } from "react";
 
 const h = vi.hoisted(() => {
   const invalidations: Array<[string, unknown]> = [];
@@ -106,5 +107,55 @@ describe("PeriodExpiryControl", () => {
     fireEvent.click(screen.getByRole("button", { name: /mark expired/i }));
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
     expect(h.expire.inputs).toHaveLength(0);
+  });
+
+  // The session Auth Status dropdown opens this same dialog (controlled mode)
+  // instead of a copy, so both entry points behave identically.
+  describe("controlled by the Auth Status dropdown", () => {
+    function Harness({ initialOpen = true }: { initialOpen?: boolean }) {
+      const [open, setOpen] = useState(initialOpen);
+      return (
+        <>
+          <span data-testid="open-state">{String(open)}</span>
+          <PeriodExpiryControl patientId={PATIENT} patientName="Synthetic Patient" period={3} expired={false}
+            authorized={12} completed={7} hasLaterPeriod={false} open={open} onOpenChange={setOpen} />
+        </>
+      );
+    }
+
+    it("opens without the header click, explains the ENTIRE period expires, and only confirm writes, for that period", () => {
+      render(<Harness />);
+      const dialog = screen.getByRole("alertdialog");
+      expect(dialog.textContent).toMatch(/This expires the entire Authorization Period 3/);
+      expect(h.expire.inputs).toHaveLength(0);
+      fireEvent.click(within(dialog).getByRole("button", { name: /mark expired/i }));
+      expect(h.expire.inputs).toEqual([{ patientId: PATIENT, authPeriod: 3, expired: true }]);
+      act(() => {
+        h.expire.opts.onSettled();
+        h.expire.opts.onSuccess({ success: true, changed: 12 }, h.expire.inputs[0]);
+      });
+      expect(screen.getByTestId("open-state").textContent).toBe("false");
+    });
+
+    it("cancel closes it and writes nothing", () => {
+      render(<Harness />);
+      fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+      expect(h.expire.inputs).toHaveLength(0);
+      expect(screen.getByTestId("open-state").textContent).toBe("false");
+    });
+
+    it("a failure keeps the dialog open and a retry sends again", () => {
+      render(<Harness />);
+      const dialog = screen.getByRole("alertdialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: /mark expired/i }));
+      act(() => {
+        h.expire.opts.onError({ message: "Authorization period not found for this patient" });
+        h.expire.opts.onSettled();
+      });
+      expect(screen.getByTestId("open-state").textContent).toBe("true");
+      fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: /mark expired/i }));
+      expect(h.expire.inputs).toHaveLength(2);
+      expect(h.expire.inputs[1]).toEqual({ patientId: PATIENT, authPeriod: 3, expired: true });
+    });
   });
 });
