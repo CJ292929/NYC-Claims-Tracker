@@ -42,7 +42,7 @@ export interface ApproveTarget {
 const today = () => new Date().toISOString().split('T')[0];
 
 /** Refreshes everything an authorization change can move: alerts, the patient's sessions and totals, completion, the patient list. */
-function useRefreshAfterAuthorizationChange() {
+export function useRefreshAfterAuthorizationChange() {
   const utils = trpc.useUtils();
   return (patientId: string) => {
     utils.visits.authAlerts.invalidate();
@@ -339,6 +339,8 @@ export function PeriodExpiryControl({
   completed,
   hasLaterPeriod,
   className = '',
+  open: controlledOpen,
+  onOpenChange,
 }: {
   patientId: string;
   patientName: string;
@@ -348,9 +350,18 @@ export function PeriodExpiryControl({
   completed: number;
   hasLaterPeriod: boolean;
   className?: string;
+  /** Optional controlled dialog state, so other entry points (the session
+   *  Auth Status dropdown) open this same confirmation instead of a copy. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
   const refresh = useRefreshAfterAuthorizationChange();
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const setOpen = (next: boolean) => {
+    if (controlledOpen === undefined) setUncontrolledOpen(next);
+    onOpenChange?.(next);
+  };
   const [reason, setReason] = useState('');
   const guard = useRef(createSingleFlightGuard());
   const mutation = trpc.visits.setPeriodExpired.useMutation({
@@ -420,6 +431,10 @@ export function PeriodExpiryControl({
                   )
                 ) : (
                   <>
+                    <p>
+                      This expires the <strong>entire</strong> Authorization Period {period} — every session in it,
+                      not just one row.
+                    </p>
                     <p>
                       Only Period {period} for <strong>{patientName}</strong> changes. Other periods are not touched.
                     </p>
