@@ -14,6 +14,8 @@ import {
 import { trpc } from '@/lib/trpc';
 import { URGENCY_SORT_ORDER } from '@/lib/authorizationRecordFilters';
 import { ApproveAuthorizationDialog, AuthorizationActionButtons, useMarkAuthorizationRequested, type ApproveTarget } from './AuthorizationActions';
+import { HoldAuthorizationRequestDialog, HoldRequestButton, type HoldTarget } from './AuthorizationHold';
+import { classifyAuthorizationAlert } from '@shared/authRequestHold';
 
 const URGENCY_CONFIG = {
   denied: {
@@ -79,10 +81,12 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
   const { data: alerts = [], isLoading, error } = trpc.visits.authAlerts.useQuery();
   const { requestingId, markRequested } = useMarkAuthorizationRequested();
   const [approveDialogPatient, setApproveDialogPatient] = useState<ApproveTarget | null>(null);
+  const [holdTarget, setHoldTarget] = useState<HoldTarget | null>(null);
 
-  // Only show patients that need attention (not 'ok')
+  // Only actionable rows: needs attention and not on hold (the same
+  // classification the Authorization Attention count uses).
   const urgent = alerts
-    .filter(a => a.urgency !== 'ok')
+    .filter(a => classifyAuthorizationAlert(a) === 'attention')
     .sort((a, b) => {
       return URGENCY_SORT_ORDER[a.urgency] - URGENCY_SORT_ORDER[b.urgency];
     });
@@ -145,12 +149,18 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
                     </div>
                   </button>
                   <AuthorizationActionButtons
-                    className="px-3 pb-2.5 flex gap-2"
+                    className="px-3 pb-1.5 flex gap-2"
                     authPending={alreadyPending}
                     requesting={isRequesting}
                     onMarkRequested={() => markRequested(alert.patientId)}
                     onApprove={() => setApproveDialogPatient({ id: alert.patientId, name: alert.patientName, insurance: alert.insurance ?? '' })}
                   />
+                  <div className="px-3 pb-2.5">
+                    <HoldRequestButton
+                      className="h-7 text-xs w-full"
+                      onClick={() => setHoldTarget({ patientId: alert.patientId, patientName: alert.patientName, authPeriod: alert.authPeriod })}
+                    />
+                  </div>
                 </div>
               );
             })}
@@ -159,6 +169,7 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
       </CardContent>
 
       <ApproveAuthorizationDialog target={approveDialogPatient} onClose={() => setApproveDialogPatient(null)} />
+      <HoldAuthorizationRequestDialog target={holdTarget} onClose={() => setHoldTarget(null)} />
     </Card>
   );
 }

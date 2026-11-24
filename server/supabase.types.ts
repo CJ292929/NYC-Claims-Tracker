@@ -168,6 +168,24 @@ export interface AuditLogRow {
   created_at: string;
 }
 
+// Temporary manual hold on one patient's authorization request for one
+// period (20261124000000_authorization_request_holds.sql). Written only by
+// hold_/release_authorization_request_hold_with_audit.
+export interface AuthorizationRequestHoldRow {
+  id: string;                           // uuid
+  patient_id: string;                   // uuid → patients.id
+  auth_period: number | null;           // period held; null = no period yet
+  reason: string;
+  held_at: string;
+  held_by: string;
+  held_by_type: ActorType;
+  held_by_display: string;
+  released_at: string | null;
+  released_by: string | null;
+  released_by_type: ActorType | null;
+  released_by_display: string | null;
+}
+
 export interface InsurerCatalogRow {
   id: string;                // uuid
   name: string;
@@ -332,6 +350,11 @@ export interface Database {
         Row: AuditLogRow;
         Insert: InsertAuditLog;
         Update: Partial<InsertAuditLog>;
+      };
+      authorization_request_holds: {
+        Row: AuthorizationRequestHoldRow;
+        Insert: never; // RPC-only
+        Update: never;
       };
       insurer_catalog: {
         Row: InsurerCatalogRow;

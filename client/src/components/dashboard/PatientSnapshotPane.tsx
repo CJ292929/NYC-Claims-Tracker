@@ -1,6 +1,6 @@
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Switch } from '@/components/ui/switch';
+import { PatientActiveToggle } from '@/components/dashboard/PatientActiveToggle';
 import { RecordAttributionLine, RecordHistoryButton } from '@/components/dashboard/RecordHistoryDialog';
 
 interface SnapshotPatient {
@@ -55,17 +55,12 @@ export function PatientSnapshotPane({
           </button>
           <div className="mt-1.5 flex items-center gap-3 flex-wrap text-sm text-muted-foreground">
             <span>Insurance: {patient.insurance}</span>
-            <span className="flex items-center gap-2">
-              <span className={patient.isActive !== false ? 'text-green-700 font-semibold' : 'text-gray-500 font-semibold'}>
-                {patient.isActive !== false ? 'Active' : 'Discharged'}
-              </span>
-              <Switch
-                checked={patient.isActive !== false}
-                onCheckedChange={onToggleActive}
-                disabled={togglePending}
-                aria-label="Toggle patient active status"
-              />
-            </span>
+            <PatientActiveToggle
+              id={`snapshot-active-${patient.id}`}
+              isActive={patient.isActive !== false}
+              onToggle={onToggleActive}
+              disabled={togglePending}
+            />
           </div>
         </div>
         {alertStatus && (

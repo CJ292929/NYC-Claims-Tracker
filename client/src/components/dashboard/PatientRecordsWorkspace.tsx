@@ -24,6 +24,7 @@ interface RecordsPatient {
 export function PatientRecordsWorkspace({
   insuranceList,
   historicalInsuranceList,
+  insuranceAliases,
   insuranceCounts,
   selectedInsurance,
   onSelectInsurance,
@@ -51,6 +52,7 @@ export function PatientRecordsWorkspace({
 }: {
   insuranceList: string[];
   historicalInsuranceList?: string[];
+  insuranceAliases?: Record<string, string[]>;
   insuranceCounts: Record<string, number>;
   selectedInsurance: string;
   onSelectInsurance: (insurance: string) => void;
@@ -80,6 +82,7 @@ export function PatientRecordsWorkspace({
     <PatientFilters
       insuranceList={insuranceList}
       historicalInsuranceList={historicalInsuranceList}
+      insuranceAliases={insuranceAliases}
       insuranceCounts={insuranceCounts}
       selectedInsurance={selectedInsurance}
       onSelectInsurance={onSelectInsurance}

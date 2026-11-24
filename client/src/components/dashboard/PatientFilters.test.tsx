@@ -71,3 +71,80 @@ describe("PatientFilters — historical insurers (P4-P22)", () => {
     expect(screen.queryByRole("button", { name: /Synthetic Unreferenced Co/ })).toBeNull();
   });
 });
+
+describe("PatientFilters — insurer search", () => {
+  const catalog = ["Aetna", "United Healthcare Medicare Advantage", "Cigna"];
+  const counts = { Aetna: 3, "United Healthcare Medicare Advantage": 2, Cigna: 0, "Legacy Free Text Ins": 1 };
+
+  function renderSearch(selectedInsurance = "", onSelectInsurance = vi.fn()) {
+    return render(
+      <PatientFilters
+        insuranceList={catalog}
+        historicalInsuranceList={["Legacy Free Text Ins"]}
+        insuranceAliases={{ "United Healthcare Medicare Advantage": ["United Healthcare Medicare"] }}
+        insuranceCounts={counts}
+        selectedInsurance={selectedInsurance}
+        onSelectInsurance={onSelectInsurance}
+        claimStatusFilters={[]}
+        claimStatusCounts={{}}
+        selectedClaimsFilter="all"
+        onSelectClaimsFilter={() => {}}
+      />
+    );
+  }
+  const search = () => screen.getByRole("searchbox", { name: "Search insurance companies" });
+  const options = () => screen.queryAllByRole("button", { pressed: false }).concat(screen.queryAllByRole("button", { pressed: true }))
+    .filter(b => b.hasAttribute("data-insurance-option")).map(b => b.textContent);
+
+  it("filters by name case-insensitively, keeping counts", () => {
+    renderSearch();
+    fireEvent.change(search(), { target: { value: "  aet " } });
+    expect(options()).toEqual(["Aetna3"]);
+  });
+
+  it("matches catalog aliases (pre-rename names)", () => {
+    renderSearch();
+    fireEvent.change(search(), { target: { value: "healthcare medicare" } });
+    expect(options()).toEqual(["United Healthcare Medicare Advantage2"]);
+  });
+
+  it("searches historical insurers too, under their own heading", () => {
+    renderSearch();
+    fireEvent.change(search(), { target: { value: "legacy" } });
+    expect(screen.getByText("Historical insurers")).toBeTruthy();
+    expect(options()).toEqual(["Legacy Free Text Ins1"]);
+  });
+
+  it("never clears or hides the current selection, and never calls onSelectInsurance", () => {
+    const onSelect = vi.fn();
+    renderSearch("Cigna", onSelect);
+    fireEvent.change(search(), { target: { value: "aetna" } });
+    expect(options().sort()).toEqual(["Aetna3", "Cigna0"]);
+    expect(screen.getByRole("button", { name: /Cigna/ }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.keyDown(search(), { key: "Escape" });
+    expect((search() as HTMLInputElement).value).toBe("");
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("shows a clear empty state that can reset the search", () => {
+    renderSearch();
+    fireEvent.change(search(), { target: { value: "zzz" } });
+    expect(screen.getByRole("status").textContent).toContain("No insurers match “zzz”");
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(options()).toHaveLength(4);
+  });
+
+  it("keyboard: ArrowDown moves from search into the options, arrows move between them, ArrowUp returns", () => {
+    const onSelect = vi.fn();
+    renderSearch("", onSelect);
+    fireEvent.keyDown(search(), { key: "ArrowDown" });
+    expect(document.activeElement?.textContent).toBe("Aetna3");
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+    expect(document.activeElement?.textContent).toBe("United Healthcare Medicare Advantage2");
+    fireEvent.keyDown(document.activeElement!, { key: "End" });
+    expect(document.activeElement?.textContent).toBe("Legacy Free Text Ins1");
+    fireEvent.keyDown(document.activeElement!, { key: "Home" });
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(search());
+  });
+});

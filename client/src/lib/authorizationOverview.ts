@@ -1,4 +1,5 @@
 import type { AuthUrgency } from '@shared/authUrgency';
+import { classifyAuthorizationAlert, type AuthorizationRequestHoldInfo } from '@shared/authRequestHold';
 import { URGENCY_SORT_ORDER, sortAuthorizationRecords } from '@/lib/authorizationRecordFilters';
 
 /**
@@ -21,6 +22,8 @@ export interface AuthorizationOverviewRecord {
   /** P4-P31 */
   periodExpired?: boolean;
   unusedExpiredSessions?: number;
+  /** Active authorization-request hold (see shared/authRequestHold.ts). */
+  hold?: AuthorizationRequestHoldInfo | null;
 }
 
 export const AUTH_STATUS_VALUES = ['none', 'pending', 'approved', 'denied'] as const;
@@ -29,6 +32,8 @@ export type AuthStatusValue = (typeof AUTH_STATUS_VALUES)[number];
 export interface AuthorizationOverviewMetrics {
   totalRecords: number;
   needsAttention: number;
+  /** Rows whose hold applies to their current period (excluded from needsAttention). */
+  onHold: number;
   pending: number;
   denied: number;
   expired: number;
@@ -50,6 +55,7 @@ export function deriveAuthorizationOverviewMetrics(
   };
 
   let needsAttention = 0;
+  let onHold = 0;
   let pending = 0;
   let denied = 0;
   let expired = 0;
@@ -62,7 +68,9 @@ export function deriveAuthorizationOverviewMetrics(
     if ((AUTH_STATUS_VALUES as readonly string[]).includes(record.authStatus)) {
       statusDistribution[record.authStatus as AuthStatusValue]++;
     }
-    if (record.urgency !== 'ok') needsAttention++;
+    const category = classifyAuthorizationAlert(record);
+    if (category === 'attention') needsAttention++;
+    if (category === 'on_hold') onHold++;
     if (record.urgency === 'pending') pending++;
     if (record.urgency === 'denied') denied++;
     if (record.urgency === 'expired') expired++;
@@ -74,6 +82,7 @@ export function deriveAuthorizationOverviewMetrics(
   return {
     totalRecords: records.length,
     needsAttention,
+    onHold,
     pending,
     denied,
     expired,
@@ -89,11 +98,11 @@ export function deriveAuthorizationOverviewMetrics(
  *  sortAuthorizationRecords/URGENCY_SORT_ORDER the Records workspace already
  *  established (denied, exhausted, critical, warning, pending, ok, then
  *  alphabetical) so the two pages can never silently drift apart. */
-export function getTopAuthorizationAttention<T extends { patientName: string; urgency: AuthUrgency }>(
+export function getTopAuthorizationAttention<T extends { patientName: string; urgency: AuthUrgency; authPeriod: number | null; hold?: AuthorizationRequestHoldInfo | null }>(
   records: T[],
   limit = 5,
 ): T[] {
-  const attention = records.filter(r => r.urgency !== 'ok');
+  const attention = records.filter(r => classifyAuthorizationAlert(r) === 'attention');
   return sortAuthorizationRecords(attention).slice(0, limit);
 }
 

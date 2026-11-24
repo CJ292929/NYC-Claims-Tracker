@@ -111,6 +111,24 @@ export interface InsurerCatalogEntry {
   reactivatedAt: Date | null;
 }
 
+// ─── AuthorizationRequestHold ────────────────────────────────────────────────
+
+/** Mirror of public.authorization_request_holds (see server/supabase.types.ts). */
+export interface AuthorizationRequestHold {
+  id: string;
+  patientId: string;
+  authPeriod: number | null;   // the period held; null = no period yet
+  reason: string;
+  heldAt: Date;
+  heldBy: string;
+  heldByType: 'clinic_user' | 'owner';
+  heldByDisplay: string;
+  releasedAt: Date | null;
+  releasedBy: string | null;
+  releasedByType: 'clinic_user' | 'owner' | null;
+  releasedByDisplay: string | null;
+}
+
 // ─── ClaimRecord ──────────────────────────────────────────────────────────────
 
 export interface ClaimRecord {

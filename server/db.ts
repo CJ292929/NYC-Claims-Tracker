@@ -11,6 +11,8 @@ import { normalizeUsername, escapeLikePattern } from "./_core/username";
 import type { User, Patient, VisitRecord, ClinicUser, InsertVisitRecord, InsurerCatalogEntry } from "../drizzle/schema";
 import { determineActivePeriod, deriveAuthPeriodMetrics, getPeriodMetrics, areAllAuthorizedSessionsUsed } from "@shared/authPeriodMetrics";
 import { deriveAuthorizationUrgency } from "@shared/authUrgency";
+import type { AuthorizationRequestHoldInfo } from "@shared/authRequestHold";
+import type { AuthorizationRequestHoldRow } from "./supabase.types";
 import type { DismissedEobLine, ExistingClaimLine, SavedDocumentLine } from "@shared/claimImport";
 import type { ActorContext } from "./actorIdentity";
 
@@ -629,27 +631,55 @@ export async function bulkCreateVisitRecords(
 
 // ─── Authorization alert helpers ──────────────────────────────────────────────
 
-export async function getAuthAlertSummaries() {
-  const { data: allPatients, error: pErr } = await supabase
+/** Active (unreleased) authorization-request holds, keyed by patient. Fails
+ *  open: if holds can't be read, nothing is treated as held, so every alert
+ *  stays visible rather than being silently suppressed. */
+async function getActiveAuthorizationHolds(patientId?: string): Promise<Map<string, AuthorizationRequestHoldInfo>> {
+  let query = supabase
+    .from("authorization_request_holds")
+    .select("id, patient_id, auth_period, reason, held_at, held_by_display")
+    .is("released_at", null);
+  if (patientId) query = query.eq("patient_id", patientId);
+  const { data, error } = await query;
+  const holds = new Map<string, AuthorizationRequestHoldInfo>();
+  if (error) { console.error("[Supabase] getActiveAuthorizationHolds:", error); return holds; }
+  for (const row of (data ?? []) as Pick<AuthorizationRequestHoldRow, "id" | "patient_id" | "auth_period" | "reason" | "held_at" | "held_by_display">[]) {
+    holds.set(row.patient_id, {
+      holdId: row.id, authPeriod: row.auth_period, reason: row.reason,
+      heldAt: row.held_at, heldByDisplay: row.held_by_display,
+    });
+  }
+  return holds;
+}
+
+/** Optional patientId narrows every query to that one patient (same rules). */
+export async function getAuthAlertSummaries(patientId?: string) {
+  let patientsQuery = supabase
     .from("patients")
     .select("*")
     .order("name", { ascending: true });
+  if (patientId) patientsQuery = patientsQuery.eq("id", patientId);
+  const { data: allPatients, error: pErr } = await patientsQuery;
 
   if (pErr) { console.error("[Supabase] getAuthAlertSummaries patients:", pErr); return []; }
   if (!allPatients || allPatients.length === 0) return [];
 
-  const { data: allVisits, error: vErr } = await supabase
+  let visitsQuery = supabase
     .from("visit_records")
     .select("*")
     .order("auth_period", { ascending: true })
     .order("session_number", { ascending: true });
+  if (patientId) visitsQuery = visitsQuery.eq("patient_id", patientId);
+  const { data: allVisits, error: vErr } = await visitsQuery;
 
   if (vErr) { console.error("[Supabase] getAuthAlertSummaries visits:", vErr); return []; }
   const visits = (allVisits ?? []).map(toVisitRecord);
+  const holds = await getActiveAuthorizationHolds(patientId);
 
   return allPatients.map(patientRow => {
     const patient = toPatient(patientRow);
     const pVisits = visits.filter(v => v.patientId === patient.id);
+    const hold = holds.get(patient.id) ?? null;
 
     if (pVisits.length === 0) {
       return {
@@ -658,8 +688,11 @@ export async function getAuthAlertSummaries() {
         authStatus: "none" as const, dateAshSubmitted: null, urgency: "ok" as const,
         authValidUntil: patient.authValidUntil ?? null,
         authPeriod: null,
+        latestAuthPeriod: null,
         periodExpired: false,
         unusedExpiredSessions: 0,
+        isActive: patient.isActive !== false,
+        hold,
       };
     }
 
@@ -702,10 +735,58 @@ export async function getAuthAlertSummaries() {
       authValidUntil,
       authExpiryWarning,
       authPeriod: targetPeriod,
+      latestAuthPeriod: latestPeriod,
       periodExpired: targetMetrics.expired,
       unusedExpiredSessions: targetMetrics.unusedExpired,
+      isActive: patient.isActive !== false,
+      hold,
     };
   });
+}
+
+/** Thrown by holdAuthorizationRequest / releaseAuthorizationRequestHold with the Postgres error code. */
+function rpcError(label: string, error: { code?: string; message?: string }) {
+  console.error(`[Supabase] ${label}:`, error);
+  return Object.assign(new Error(error.message ?? label), { code: error.code });
+}
+
+/** Atomic + audited (hold_authorization_request_with_audit). changed=false: already held (retry), no audit row. */
+export async function holdAuthorizationRequest(
+  patientId: string,
+  authPeriod: number | null,
+  expectedLatestPeriod: number | null,
+  reason: string,
+  actor: ActorContext,
+): Promise<{ holdId: string; changed: boolean }> {
+  const { data, error } = await supabase.rpc("hold_authorization_request_with_audit", {
+    p_patient_id: patientId,
+    p_auth_period: authPeriod,
+    p_expected_latest_period: expectedLatestPeriod,
+    p_reason: reason,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
+  if (error) throw rpcError("holdAuthorizationRequest", error);
+  const out = data as { hold_id: string; changed: boolean };
+  return { holdId: out.hold_id, changed: out.changed === true };
+}
+
+/** Atomic + audited. Returns false when the hold was already released (retry / concurrent resume), no audit row. */
+export async function releaseAuthorizationRequestHold(
+  patientId: string,
+  holdId: string,
+  actor: ActorContext,
+): Promise<boolean> {
+  const { data, error } = await supabase.rpc("release_authorization_request_hold_with_audit", {
+    p_patient_id: patientId,
+    p_hold_id: holdId,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
+  if (error) throw rpcError("releaseAuthorizationRequestHold", error);
+  return data === 1;
 }
 
 export async function getLatestVisitIdForPatient(patientId: string): Promise<string | null> {
