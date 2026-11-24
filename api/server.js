@@ -608,10 +608,21 @@ async function bulkCreateVisitRecords(records, actor) {
     throw error;
   }
 }
+async function selectAllRows(page) {
+  const rows = [];
+  for (; ; ) {
+    const { data, error } = await page(rows.length, rows.length + BULK_PAGE_SIZE - 1);
+    if (error) return { data: rows, error };
+    if (!data || data.length === 0) return { data: rows, error: null };
+    rows.push(...data);
+  }
+}
 async function getActiveAuthorizationHolds(patientId) {
-  let query = supabase.from("authorization_request_holds").select("id, patient_id, auth_period, reason, held_at, held_by_display").is("released_at", null);
-  if (patientId) query = query.eq("patient_id", patientId);
-  const { data, error } = await query;
+  const { data, error } = await selectAllRows((from, to) => {
+    let query = supabase.from("authorization_request_holds").select("id, patient_id, auth_period, reason, held_at, held_by_display").is("released_at", null);
+    if (patientId) query = query.eq("patient_id", patientId);
+    return query.order("id", { ascending: true }).range(from, to);
+  });
   const holds = /* @__PURE__ */ new Map();
   if (error) {
     console.error("[Supabase] getActiveAuthorizationHolds:", error);
@@ -629,17 +640,21 @@ async function getActiveAuthorizationHolds(patientId) {
   return holds;
 }
 async function getAuthAlertSummaries(patientId) {
-  let patientsQuery = supabase.from("patients").select("*").order("name", { ascending: true });
-  if (patientId) patientsQuery = patientsQuery.eq("id", patientId);
-  const { data: allPatients, error: pErr } = await patientsQuery;
+  const { data: allPatients, error: pErr } = await selectAllRows((from, to) => {
+    let patientsQuery = supabase.from("patients").select("*");
+    if (patientId) patientsQuery = patientsQuery.eq("id", patientId);
+    return patientsQuery.order("name", { ascending: true }).order("id", { ascending: true }).range(from, to);
+  });
   if (pErr) {
     console.error("[Supabase] getAuthAlertSummaries patients:", pErr);
     return [];
   }
   if (!allPatients || allPatients.length === 0) return [];
-  let visitsQuery = supabase.from("visit_records").select("*").order("auth_period", { ascending: true }).order("session_number", { ascending: true });
-  if (patientId) visitsQuery = visitsQuery.eq("patient_id", patientId);
-  const { data: allVisits, error: vErr } = await visitsQuery;
+  const { data: allVisits, error: vErr } = await selectAllRows((from, to) => {
+    let visitsQuery = supabase.from("visit_records").select("*");
+    if (patientId) visitsQuery = visitsQuery.eq("patient_id", patientId);
+    return visitsQuery.order("auth_period", { ascending: true }).order("session_number", { ascending: true }).order("id", { ascending: true }).range(from, to);
+  });
   if (vErr) {
     console.error("[Supabase] getAuthAlertSummaries visits:", vErr);
     return [];
@@ -861,13 +876,13 @@ async function setAuthPeriodExpired(patientId, authPeriod, expired, reason, acto
   return typeof data === "number" ? data : 0;
 }
 async function getCompletedPatients() {
-  const { data: allPatients, error: pErr } = await supabase.from("patients").select("id").order("name", { ascending: true });
+  const { data: allPatients, error: pErr } = await selectAllRows((from, to) => supabase.from("patients").select("id").order("name", { ascending: true }).order("id", { ascending: true }).range(from, to));
   if (pErr) {
     console.error("[Supabase] getCompletedPatients:", pErr);
     return [];
   }
   if (!allPatients || allPatients.length === 0) return [];
-  const { data: allVisits, error: vErr } = await supabase.from("visit_records").select("id, patient_id, date_of_service, sessions_authorized, auth_period");
+  const { data: allVisits, error: vErr } = await selectAllRows((from, to) => supabase.from("visit_records").select("id, patient_id, date_of_service, sessions_authorized, auth_period").order("id", { ascending: true }).range(from, to));
   if (vErr) {
     console.error("[Supabase] getCompletedPatients visits:", vErr);
     return [];
@@ -1553,7 +1568,7 @@ async function permanentlyDeleteInsurerCatalogEntry(id, actor) {
     throw new Error(`permanentlyDeleteInsurerCatalogEntry: DB did not confirm deleting ${id}`);
   }
 }
-var LastActiveAccountManagerError, ClinicUserConflictError, FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, dateOnly, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, EXISTING_LINE_COLUMNS, numOrNull, IMPORT_RPC_REASONS, ClaimImportRuleError, PENDING_EOB_LIST_LIMIT, InsurerCatalogEntryNotFoundError, InsurerDeletedError, InsurerCatalogHasForeignKeysError;
+var BULK_PAGE_SIZE, LastActiveAccountManagerError, ClinicUserConflictError, FOLLOW_UP_STALE_DAYS, FOLLOW_UP_URGENCY_RANK, FOLLOW_UP_REASONS, CLAIM_STATUS_KEYS, dateOnly, ClaimRecordNotFoundError, ClaimRecordPatientMismatchError, EXISTING_LINE_COLUMNS, numOrNull, IMPORT_RPC_REASONS, ClaimImportRuleError, PENDING_EOB_LIST_LIMIT, InsurerCatalogEntryNotFoundError, InsurerDeletedError, InsurerCatalogHasForeignKeysError;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
@@ -1562,6 +1577,7 @@ var init_db = __esm({
     init_username();
     init_authPeriodMetrics();
     init_authUrgency();
+    BULK_PAGE_SIZE = 1e3;
     LastActiveAccountManagerError = class extends Error {
       constructor() {
         super("This is the only active admin account \u2014 it cannot be demoted or deactivated.");
@@ -8242,6 +8258,28 @@ function toPeriodCorrectionError(err, authPeriod) {
       return err;
   }
 }
+function holdScopeConflict(seen, current, latest) {
+  const seenLabel = seen === null ? "the initial authorization request" : `Period ${seen}`;
+  let what;
+  if (seen === null && current !== null) what = `An authorization (Period ${current}) was approved for this patient after you opened this alert.`;
+  else if (latest !== null && (seen === null || latest > seen) && current === latest) what = `A newer authorization period (Period ${latest}) was approved for this patient after you opened this alert.`;
+  else what = `This patient's current authorization period is now ${current === null ? "none" : `Period ${current}`}, not ${seenLabel}.`;
+  return new TRPCError3({ code: "CONFLICT", message: `${what} The hold was not applied to ${seenLabel} or any other period. Your reason is kept \u2014 close this dialog to review the current alert.` });
+}
+function toHoldRpcError(err) {
+  switch (err?.code) {
+    case "P0020":
+      return new TRPCError3({ code: "NOT_FOUND", message: "Patient not found" });
+    case "P0050":
+      return new TRPCError3({ code: "CONFLICT", message: "This patient's authorization periods changed while the hold was being saved. The hold was not applied. Your reason is kept \u2014 close this dialog to review the current alert." });
+    case "P0051":
+      return new TRPCError3({ code: "CONFLICT", message: "This patient already has a hold on an earlier authorization period. Remove that hold first." });
+    case "22023":
+      return new TRPCError3({ code: "BAD_REQUEST", message: "A reason (500 characters or fewer) is required to hold an authorization request." });
+    default:
+      return err;
+  }
+}
 var visitRecordInput = z7.object({
   sessionsAuthorized: z7.number().nullable().optional(),
   sessionsRemaining: z7.number().nullable().optional(),
@@ -9030,27 +9068,31 @@ var appRouter = router({
       authPeriod: z7.number().int().min(1).nullable(),
       reason: z7.string().trim().min(1, "A reason is required to hold an authorization request").max(HOLD_REASON_MAX)
     })).mutation(async ({ input, ctx }) => {
-      const [summary] = await getAuthAlertSummaries(input.patientId);
-      if (!summary) throw new TRPCError3({ code: "NOT_FOUND", message: "Patient not found" });
-      if (summary.authPeriod !== input.authPeriod) {
-        throw new TRPCError3({ code: "CONFLICT", message: "This patient's authorization changed since you loaded it. Reload and try again." });
-      }
-      try {
-        const result = await holdAuthorizationRequest(
-          input.patientId,
-          summary.authPeriod,
-          summary.latestAuthPeriod,
-          input.reason,
-          getActorContext(ctx.user)
-        );
-        return { success: true, ...result };
-      } catch (err) {
-        const code = err?.code;
-        if (code === "P0020") throw new TRPCError3({ code: "NOT_FOUND", message: "Patient not found" });
-        if (code === "P0050") throw new TRPCError3({ code: "CONFLICT", message: "This patient's authorization changed since you loaded it. Reload and try again." });
-        if (code === "P0051") throw new TRPCError3({ code: "CONFLICT", message: "This patient already has a hold on an earlier authorization period. Remove that hold first." });
-        if (code === "22023") throw new TRPCError3({ code: "BAD_REQUEST", message: "A reason (500 characters or fewer) is required to hold an authorization request." });
-        throw err;
+      const actor = getActorContext(ctx.user);
+      const currentScope = async () => {
+        const [summary2] = await getAuthAlertSummaries(input.patientId);
+        if (!summary2) throw new TRPCError3({ code: "NOT_FOUND", message: "Patient not found" });
+        if (summary2.authPeriod !== input.authPeriod) throw holdScopeConflict(input.authPeriod, summary2.authPeriod, summary2.latestAuthPeriod);
+        return summary2;
+      };
+      let summary = await currentScope();
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const result = await holdAuthorizationRequest(
+            input.patientId,
+            summary.authPeriod,
+            summary.latestAuthPeriod,
+            input.reason,
+            actor
+          );
+          return { success: true, ...result };
+        } catch (err) {
+          if (err?.code === "P0050" && attempt === 0) {
+            summary = await currentScope();
+            continue;
+          }
+          throw toHoldRpcError(err);
+        }
       }
     }),
     // Remove Hold / Resume. Releases the hold (audited; a retry or a

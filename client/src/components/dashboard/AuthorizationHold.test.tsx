@@ -7,7 +7,7 @@
  * Also the Active/Discharged toggle (PatientActiveToggle).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 const h = vi.hoisted(() => ({
   invalidated: [] as string[],
@@ -72,6 +72,24 @@ describe("HoldAuthorizationRequestDialog", () => {
     h.hold.opts.onSuccess({ changed: true }, { patientId: P1 });
     expect(onClose).toHaveBeenCalled();
     expect(h.invalidated).toContain("authAlerts");
+  });
+
+  it("on failure: stays open, keeps the reason, explains the conflict inline, and the same reason can be retried", () => {
+    const onClose = vi.fn();
+    render(<HoldAuthorizationRequestDialog target={target} onClose={onClose} />);
+    fireEvent.change(screen.getByLabelText("Reason (required)"), { target: { value: "Waiting on referral" } });
+    fireEvent.click(screen.getByRole("button", { name: "Hold Request" }));
+    const conflict = "A newer authorization period (Period 3) was approved for this patient after you opened this alert.";
+    act(() => { h.hold.opts.onError({ message: conflict }, { patientId: P1 }); h.hold.opts.onSettled(); });
+    expect(onClose).not.toHaveBeenCalled();
+    expect((screen.getByLabelText("Reason (required)") as HTMLTextAreaElement).value).toBe("Waiting on referral");
+    expect(screen.getByRole("alert").textContent).toBe(conflict);
+    expect(h.invalidated).toContain("authAlerts");
+    fireEvent.click(screen.getByRole("button", { name: "Hold Request" }));
+    expect(h.hold.inputs).toEqual([
+      { patientId: P1, authPeriod: 2, reason: "Waiting on referral" },
+      { patientId: P1, authPeriod: 2, reason: "Waiting on referral" },
+    ]);
   });
 
   it("Cancel sends nothing", () => {

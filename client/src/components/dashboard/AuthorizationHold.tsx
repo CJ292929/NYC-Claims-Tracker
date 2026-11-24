@@ -58,18 +58,24 @@ export function HoldRequestButton({ onClick, className = 'h-7 text-xs' }: { onCl
 export function HoldAuthorizationRequestDialog({ target, onClose }: { target: HoldTarget | null; onClose: () => void }) {
   const refresh = useRefreshAfterAuthorizationChange();
   const [reason, setReason] = useState('');
-  useEffect(() => { if (target) setReason(''); }, [target?.patientId, target?.authPeriod]);
+  // Why the last attempt failed. The dialog stays open with the reason kept.
+  const [failure, setFailure] = useState<string | null>(null);
+  useEffect(() => { if (target) { setReason(''); setFailure(null); } }, [target?.patientId, target?.authPeriod]);
 
   const guard = useRef(createSingleFlightGuard());
   const hold = trpc.visits.holdAuthorizationRequest.useMutation({
     onSettled: () => guard.current.exit(),
+    // Only after the server confirms the hold (and its audit row) is saved.
     onSuccess: (data, { patientId }) => {
       toast.success(data.changed ? 'Authorization request put on hold' : 'This authorization request was already on hold');
       onClose();
       refresh(patientId);
     },
+    // Nothing was held: keep the dialog and the typed reason, say why.
     onError: (err, { patientId }) => {
-      toast.error(err.message || 'Failed to hold authorization request');
+      const message = err.message || 'Failed to hold authorization request. Your reason is kept — try again.';
+      setFailure(message);
+      toast.error(message);
       refresh(patientId);
     },
   });
@@ -78,6 +84,7 @@ export function HoldAuthorizationRequestDialog({ target, onClose }: { target: Ho
   const submit = () => {
     if (!target || !normalized) return;
     if (!guard.current.tryEnter()) return;
+    setFailure(null);
     hold.mutate({ patientId: target.patientId, authPeriod: target.authPeriod, reason: normalized });
   };
 
@@ -105,6 +112,9 @@ export function HoldAuthorizationRequestDialog({ target, onClose }: { target: Ho
           <p id="hold-reason-help" className="text-xs text-muted-foreground">
             {reason.length > 0 && !normalized ? 'Enter a reason, not just spaces.' : `${reason.trim().length}/${HOLD_REASON_MAX}`}
           </p>
+          {failure && (
+            <p role="alert" className="text-xs font-medium text-red-700 bg-red-50 rounded px-2 py-1.5">{failure}</p>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={hold.isPending}>Cancel</Button>

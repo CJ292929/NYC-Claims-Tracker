@@ -120,6 +120,28 @@ export function toPeriodCorrectionError(err: unknown, authPeriod: number): unkno
   }
 }
 
+/** A hold refused because the patient's target period is no longer the one
+ *  the caller saw. Says what actually changed; nothing was held. */
+export function holdScopeConflict(seen: number | null, current: number | null, latest: number | null): TRPCError {
+  const seenLabel = seen === null ? "the initial authorization request" : `Period ${seen}`;
+  let what: string;
+  if (seen === null && current !== null) what = `An authorization (Period ${current}) was approved for this patient after you opened this alert.`;
+  else if (latest !== null && (seen === null || latest > seen) && current === latest) what = `A newer authorization period (Period ${latest}) was approved for this patient after you opened this alert.`;
+  else what = `This patient's current authorization period is now ${current === null ? "none" : `Period ${current}`}, not ${seenLabel}.`;
+  return new TRPCError({ code: "CONFLICT", message: `${what} The hold was not applied to ${seenLabel} or any other period. Your reason is kept — close this dialog to review the current alert.` });
+}
+
+/** Maps hold_authorization_request_with_audit's refusals (other than a revalidated P0050). */
+export function toHoldRpcError(err: unknown): unknown {
+  switch ((err as { code?: string })?.code) {
+    case "P0020": return new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
+    case "P0050": return new TRPCError({ code: "CONFLICT", message: "This patient's authorization periods changed while the hold was being saved. The hold was not applied. Your reason is kept — close this dialog to review the current alert." });
+    case "P0051": return new TRPCError({ code: "CONFLICT", message: "This patient already has a hold on an earlier authorization period. Remove that hold first." });
+    case "22023": return new TRPCError({ code: "BAD_REQUEST", message: "A reason (500 characters or fewer) is required to hold an authorization request." });
+    default: return err;
+  }
+}
+
 const visitRecordInput = z.object({
   sessionsAuthorized: z.number().nullable().optional(),
   sessionsRemaining: z.number().nullable().optional(),
@@ -1089,23 +1111,34 @@ export const appRouter = router({
         reason: z.string().trim().min(1, "A reason is required to hold an authorization request").max(HOLD_REASON_MAX),
       }))
       .mutation(async ({ input, ctx }) => {
-        const [summary] = await getAuthAlertSummaries(input.patientId);
-        if (!summary) throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
-        if (summary.authPeriod !== input.authPeriod) {
-          throw new TRPCError({ code: "CONFLICT", message: "This patient's authorization changed since you loaded it. Reload and try again." });
-        }
-        try {
-          const result = await holdAuthorizationRequest(
-            input.patientId, summary.authPeriod, summary.latestAuthPeriod, input.reason, getActorContext(ctx.user),
-          );
-          return { success: true, ...result };
-        } catch (err: unknown) {
-          const code = (err as { code?: string })?.code;
-          if (code === "P0020") throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
-          if (code === "P0050") throw new TRPCError({ code: "CONFLICT", message: "This patient's authorization changed since you loaded it. Reload and try again." });
-          if (code === "P0051") throw new TRPCError({ code: "CONFLICT", message: "This patient already has a hold on an earlier authorization period. Remove that hold first." });
-          if (code === "22023") throw new TRPCError({ code: "BAD_REQUEST", message: "A reason (500 characters or fewer) is required to hold an authorization request." });
-          throw err;
+        const actor = getActorContext(ctx.user);
+        // The hold is scoped to the period the caller saw; it is never moved
+        // to a different (newer) period. Re-read the patient's current target
+        // period from the database and refuse if it is not that period.
+        const currentScope = async () => {
+          const [summary] = await getAuthAlertSummaries(input.patientId);
+          if (!summary) throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
+          if (summary.authPeriod !== input.authPeriod) throw holdScopeConflict(input.authPeriod, summary.authPeriod, summary.latestAuthPeriod);
+          return summary;
+        };
+        let summary = await currentScope();
+        // P0050 = the RPC (under the patient lock) saw a different newest
+        // period than our read a moment ago. Revalidate once: if the period
+        // the caller saw is STILL the target, hold it with the fresh scope —
+        // no second click needed. If it moved, currentScope refuses it.
+        for (let attempt = 0; ; attempt++) {
+          try {
+            const result = await holdAuthorizationRequest(
+              input.patientId, summary.authPeriod, summary.latestAuthPeriod, input.reason, actor,
+            );
+            return { success: true, ...result };
+          } catch (err: unknown) {
+            if ((err as { code?: string })?.code === "P0050" && attempt === 0) {
+              summary = await currentScope();
+              continue;
+            }
+            throw toHoldRpcError(err);
+          }
         }
       }),
 
