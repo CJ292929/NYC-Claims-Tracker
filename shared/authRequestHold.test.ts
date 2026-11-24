@@ -101,3 +101,41 @@ describe("counts and lists agree (Authorization Attention, Needs Attention, On H
     expect(m.needsAttention).toBe(4); // pending + expired back, superseded + critical unchanged
   });
 });
+
+// Regression: discharged patients stayed in Authorization Alerts and the
+// Authorization Attention count — nothing in the classifier read isActive.
+describe("discharged patients are never actionable", () => {
+  it("discharged → inactive whatever the urgency; absent isActive = active", () => {
+    for (const urgency of ["pending", "critical", "exhausted", "denied", "expired", "warning", "ok"] as const) {
+      expect(classifyAuthorizationAlert({ urgency, authPeriod: 1, isActive: false })).toBe("inactive");
+    }
+    expect(classifyAuthorizationAlert({ urgency: "critical", authPeriod: 1 })).toBe("attention");
+    expect(classifyAuthorizationAlert({ urgency: "critical", authPeriod: 1, isActive: true })).toBe("attention");
+  });
+
+  it("an effective hold wins (still On Hold and counted); a superseded hold on a discharged row is inactive", () => {
+    expect(classifyAuthorizationAlert({ urgency: "critical", authPeriod: 2, hold: hold(2), isActive: false })).toBe("on_hold");
+    expect(classifyAuthorizationAlert({ urgency: "critical", authPeriod: 3, hold: hold(2), isActive: false })).toBe("inactive");
+    // Still listed under Authorization Requests on Hold.
+    expect(heldAuthorizationAlerts([{ urgency: "ok" as const, authPeriod: 3, hold: hold(2), isActive: false }])).toHaveLength(1);
+  });
+
+  it("counts, list and KPI exclude discharged rows; reactivation restores only eligible ones", () => {
+    const rows = [
+      row("Active Critical", { urgency: "critical" }),
+      row("Discharged Critical", { urgency: "critical", isActive: false }),
+      row("Discharged Denied", { urgency: "denied", authStatus: "denied", isActive: false }),
+      row("Discharged Held", { urgency: "pending", authStatus: "pending", hold: hold(1), isActive: false }),
+      row("Discharged On Track", { urgency: "ok", isActive: false }),
+    ];
+    const m = deriveAuthorizationOverviewMetrics(rows);
+    expect(m).toMatchObject({ needsAttention: 1, onHold: 1, critical: 1, denied: 0, pending: 0, totalRecords: 1, discharged: 4 });
+    expect(getTopAuthorizationAttention(rows, 10).map(r => r.patientName)).toEqual(["Active Critical"]);
+    const kpis = deriveDashboardKpis({ activePatientCount: 1, authAlerts: rows, followUpClaimCount: 3, completedPatientCount: 0 });
+    expect(kpis).toMatchObject({ authorizationAttention: 1, pendingAuthorizationRequest: 1, claimsFollowUp: 3 });
+
+    const reactivated = rows.map(r => ({ ...r, isActive: true }));
+    expect(getTopAuthorizationAttention(reactivated, 10).map(r => r.patientName).sort())
+      .toEqual(["Active Critical", "Discharged Critical", "Discharged Denied"]); // On Track + Held stay out
+  });
+});

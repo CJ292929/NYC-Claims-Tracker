@@ -10,6 +10,14 @@
 // exists (or the patient's target period otherwise moves), the hold is
 // "superseded": it stops suppressing anything, and the row is classified
 // from its current data exactly as if there were no hold.
+//
+// A discharged patient (isActive === false) is never actionable: their row is
+// "inactive" — out of Authorization Alerts and every attention count — while
+// all period/session/history data is untouched. An effective hold still wins
+// (the row stays "on_hold"), so a held patient remains findable and counted
+// on the On Hold page whatever their activity; discharge never creates,
+// resumes or deletes a hold. Reactivating simply re-derives the category
+// from current data. Claims are not classified here and are unaffected.
 import type { AuthUrgency } from "./authUrgency";
 
 export interface AuthorizationRequestHoldInfo {
@@ -22,13 +30,15 @@ export interface AuthorizationRequestHoldInfo {
   heldByDisplay: string;
 }
 
-export type AuthorizationAlertCategory = "on_hold" | "attention" | "ok";
+export type AuthorizationAlertCategory = "on_hold" | "attention" | "inactive" | "ok";
 
 export interface ClassifiableAlert {
   urgency: AuthUrgency;
   /** The row's current target period (null = no period yet). */
   authPeriod: number | null;
   hold?: AuthorizationRequestHoldInfo | null;
+  /** false = discharged. Absent is treated as active (older callers / fixtures). */
+  isActive?: boolean;
 }
 
 /** True when the row's hold still applies to its current target period. */
@@ -43,6 +53,7 @@ export function isHoldSuperseded(alert: ClassifiableAlert): boolean {
 
 export function classifyAuthorizationAlert(alert: ClassifiableAlert): AuthorizationAlertCategory {
   if (isHoldEffective(alert)) return "on_hold";
+  if (alert.isActive === false) return "inactive";
   return alert.urgency !== "ok" ? "attention" : "ok";
 }
 

@@ -28,6 +28,7 @@ import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { MetricCard } from '@/components/dashboard/MetricCard';
 import { FilterChips } from '@/components/dashboard/FilterChips';
 import { AuthAlertPanel } from '@/components/dashboard/AuthAlertPanel';
+import { AUTH_INSURANCE_PARAM } from '@/lib/authAlertInsuranceFilter';
 import { AuthorizationOverview } from '@/components/dashboard/AuthorizationOverview';
 import { AuthorizationRecordsWorkspace } from '@/components/dashboard/AuthorizationRecordsWorkspace';
 import { ClaimsFollowUpPanel } from '@/components/dashboard/ClaimsFollowUpPanel';
@@ -428,6 +429,16 @@ export default function Dashboard() {
   const recordsScopeAll = activeSection === 'patients-records' && urlParams.get('scope') === 'all';
   const recordsCompletedView = activeSection === 'patients-records' && urlParams.get('view') === 'completed';
   const followUpInsurance = activeSection === 'claims-follow-up' ? (urlParams.get('insurance') ?? '') : '';
+  //   /dashboard?authInsurance=<name>, /authorizations/attention?authInsurance=<name>
+  //   Authorization Alerts queue only (own key, so it never scopes the Claims
+  //   Follow-Up panel or the clinic-wide KPI cards).
+  const authAlertInsurance = urlParams.get(AUTH_INSURANCE_PARAM) ?? '';
+  const setAuthAlertInsurance = (insurance: string) => {
+    const next = new URLSearchParams(search);
+    if (insurance) next.set(AUTH_INSURANCE_PARAM, insurance); else next.delete(AUTH_INSURANCE_PARAM);
+    const qs = next.toString();
+    navigate(`${location}${qs ? `?${qs}` : ''}`, { replace: true });
+  };
   // Derived (not stateful): true only on the per-patient detail routes.
   const showDetailView = activeSection === 'visits' || activeSection === 'claims';
 
@@ -818,6 +829,8 @@ export default function Dashboard() {
   const updatePatient = trpc.patients.update.useMutation({
     onSuccess: () => {
       utils.patients.list.invalidate();
+      // Insurance shown/filtered on authorization alerts comes from the patient.
+      utils.visits.authAlerts.invalidate();
       // A patient's insurance (or claims_status) may have changed — both the
       // Claims Status counts and the Follow-Up panel are scoped by insurance.
       if (canAccessClaims) {
@@ -832,6 +845,10 @@ export default function Dashboard() {
   const setPatientActive = trpc.patients.setActive.useMutation({
     onSuccess: (_, vars) => {
       utils.patients.list.invalidate();
+      // Authorization alerts carry isActive: discharge drops the row from
+      // Authorization Alerts / Attention counts, reactivation re-derives it.
+      // Without this they stayed stale until a manual reload.
+      utils.visits.authAlerts.invalidate();
       const wasDischarging = !vars.isActive;
       if (wasDischarging) {
         toast.success('Patient moved to Discharged Patients');
@@ -884,6 +901,7 @@ export default function Dashboard() {
   const deletePatient = trpc.patients.delete.useMutation({
     onSuccess: () => {
       utils.patients.list.invalidate();
+      utils.visits.authAlerts.invalidate();
       utils.visits.completedPatientIds.invalidate();
       // If we just deleted the active patient, clear the selection
       if (selectedPatientId === deletePatientId) {
@@ -3674,7 +3692,7 @@ export default function Dashboard() {
         topbarSubtitle="Review patients requiring authorization action."
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6">
-          <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
+          <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} insurance={authAlertInsurance} onInsuranceChange={setAuthAlertInsurance} />
           {/* Held requests are excluded above and live on their own page. */}
           <Button variant="outline" size="sm" onClick={() => navigate('/authorizations/on-hold')}>
             <PauseCircle className="w-4 h-4 text-amber-600" />
@@ -3815,7 +3833,7 @@ export default function Dashboard() {
         <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 ${canAccessClaims ? 'xl:grid-cols-5' : 'xl:grid-cols-4'} gap-4`}>
           {[
             { icon: <Users className="w-4 h-4 text-brand-blue" />, label: 'Active Patients', value: dashboardKpis.activePatients, sub: 'Currently active, all insurances', tone: 'navy' as const, href: '/patients/records?scope=all' },
-            { icon: <AlertTriangle className="w-4 h-4 text-destructive" />, label: 'Authorization Attention', value: dashboardKpis.authorizationAttention, sub: 'Needs authorization action', tone: 'destructive' as const, href: '/authorizations/attention' },
+            { icon: <AlertTriangle className="w-4 h-4 text-destructive" />, label: 'Authorization Attention', value: dashboardKpis.authorizationAttention, sub: 'Needs action, all insurances', tone: 'destructive' as const, href: '/authorizations/attention' },
             { icon: <PauseCircle className="w-4 h-4 text-amber-600" />, label: 'Pending Authorization Request', value: dashboardKpis.pendingAuthorizationRequest, sub: 'On hold — request deferred', tone: 'gold' as const, href: '/authorizations/on-hold' },
             // Claims KPI requires Claims access (P4-P25).
             ...(canAccessClaims ? [{ icon: <AlertCircle className="w-4 h-4 text-brand-gold-dark" />, label: 'Claims Follow-Up', value: dashboardKpis.claimsFollowUp, sub: 'Unresolved, all insurances', tone: 'gold' as const, href: '/claims/follow-up' }] : []),
@@ -3830,7 +3848,7 @@ export default function Dashboard() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-3">Needs Attention</h2>
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 xl:gap-6">
             <div className={`${canAccessClaims ? 'lg:col-span-4' : 'lg:col-span-12'} space-y-4`}>
-              <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
+              <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} insurance={authAlertInsurance} onInsuranceChange={setAuthAlertInsurance} />
               <AuthorizationHoldsPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
             </div>
             {canAccessClaims && (

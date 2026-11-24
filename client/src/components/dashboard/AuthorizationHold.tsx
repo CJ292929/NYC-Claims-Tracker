@@ -137,7 +137,9 @@ export function ReleaseAuthorizationHoldDialog({ target, onClose }: { target: Re
       if (!data.changed) toast.info('This hold was already removed');
       else toast.success(data.category === 'attention'
         ? 'Hold removed — back in Authorization Alerts'
-        : 'Hold removed — no authorization action needed right now');
+        : data.category === 'inactive'
+          ? 'Hold removed — patient is discharged, so no authorization alert'
+          : 'Hold removed — no authorization action needed right now');
       onClose();
       refresh(patientId);
     },
@@ -227,7 +229,7 @@ export function AuthorizationHoldsPanel({ onSelectPatient }: { onSelectPatient: 
                       <p className="font-semibold text-sm text-brand-blue truncate">{a.patientName}</p>
                       <p className="text-xs text-muted-foreground truncate">
                         {a.insurance || '—'} · {hold.authPeriod === null ? 'Initial request' : `Period ${hold.authPeriod}`}
-                        {!a.isActive && ' · Discharged'}
+                        {' · '}{a.isActive ? 'Active' : <span className="font-semibold text-red-700">Discharged</span>}
                       </p>
                     </button>
                     <Button

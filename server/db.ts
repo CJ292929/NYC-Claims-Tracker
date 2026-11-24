@@ -162,10 +162,15 @@ export async function getUserByOpenId(openId: string): Promise<User | undefined>
 // ─── Patient helpers ──────────────────────────────────────────────────────────
 
 export async function getAllPatients(): Promise<Patient[]> {
-  const { data, error } = await supabase
+  // Paged (selectAllRows): an unpaginated read is capped at PostgREST's
+  // max-rows, which would silently drop patients — and their Active /
+  // Discharged state — from every list and count built on patients.list.
+  const { data, error } = await selectAllRows<any>((from, to) => supabase
     .from("patients")
     .select("*")
-    .order("name", { ascending: true });
+    .order("name", { ascending: true })
+    .order("id", { ascending: true })
+    .range(from, to));
 
   if (error) {
     console.error("[Supabase] getAllPatients:", error);
