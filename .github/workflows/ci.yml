@@ -76,3 +76,10 @@ jobs:
         env:
           REQUIRE_PG_INTEGRATION: "1"
         run: npx vitest run server/periodSessionCorrection.pg.integration.test.ts
+
+      # Separate step: runs after the suites above, each with its own container,
+      # so the suites never compete for Docker/CPU. Needs full history (8f82c43).
+      - name: Authorization-request hold real-Postgres suite
+        env:
+          REQUIRE_PG_INTEGRATION: "1"
+        run: npx vitest run server/authRequestHold.pg.integration.test.ts

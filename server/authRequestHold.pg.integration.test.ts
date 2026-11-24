@@ -260,6 +260,37 @@ describe.skipIf(!HAS_DOCKER || !PRE_SCHEMA)("Authorization requests on hold (rea
         expect((await hold(db, p, 1, 1)).changed).toBe(true);
       });
 
+      it("audit rollback: if the audit insert fails, the hold / release is not written either", async () => {
+        const p = await seed(db);
+        const fn = `pg_hold_fail_audit_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+        // Test-only trigger, scoped to this synthetic patient, so no other test is affected.
+        await q(db, `CREATE FUNCTION public.${fn}() RETURNS trigger LANGUAGE plpgsql AS $f$
+                     BEGIN
+                       IF NEW.patient_id = '${p}'::uuid THEN RAISE EXCEPTION 'synthetic_audit_failure' USING ERRCODE = 'P0099'; END IF;
+                       RETURN NEW;
+                     END $f$`);
+        const addTrigger = () => q(db, `CREATE TRIGGER ${fn} BEFORE INSERT ON public.audit_logs FOR EACH ROW EXECUTE FUNCTION public.${fn}()`);
+        const dropTrigger = () => q(db, `DROP TRIGGER IF EXISTS ${fn} ON public.audit_logs`);
+        try {
+          await addTrigger();
+          await expect(hold(db, p, 1, 1)).rejects.toMatchObject({ code: "P0099" });
+          expect(await activeHolds(db, p)).toHaveLength(0);
+          const [{ n }] = await q<{ n: number }>(db, `SELECT count(*)::int AS n FROM authorization_request_holds WHERE patient_id = $1`, [p]);
+          expect(n).toBe(0);
+          await dropTrigger();
+
+          const { hold_id } = await hold(db, p, 1, 1);
+          await addTrigger();
+          await expect(release(db, p, hold_id)).rejects.toMatchObject({ code: "P0099" });
+          expect(await activeHolds(db, p)).toEqual([{ id: hold_id, auth_period: 1 }]);
+          await dropTrigger();
+          expect((await audits(db, p)).map(r => r.action)).toEqual(["AUTHORIZATION_REQUEST_HELD"]);
+        } finally {
+          await dropTrigger();
+          await q(db, `DROP FUNCTION IF EXISTS public.${fn}()`);
+        }
+      });
+
       it("concurrency: parallel duplicate holds → one hold, one audit row; parallel resumes → one release", async () => {
         const p = await seed(db);
         const results = await Promise.all(Array.from({ length: 5 }, () => hold(db, p, 1, 1)));
