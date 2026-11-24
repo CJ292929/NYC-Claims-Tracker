@@ -631,16 +631,36 @@ export async function bulkCreateVisitRecords(
 
 // ─── Authorization alert helpers ──────────────────────────────────────────────
 
+/** PostgREST (Supabase) silently caps every response at its max-rows setting
+ *  (1000 by default) — an unpaginated read of a whole table drops whatever
+ *  sorts last. Reads that need EVERY row page through with .range() until an
+ *  empty page, so the result is complete whatever the server's cap is. The
+ *  caller's query must have a total order (end with a unique column). */
+const BULK_PAGE_SIZE = 1000;
+async function selectAllRows<T>(
+  page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>,
+): Promise<{ data: T[]; error: unknown }> {
+  const rows: T[] = [];
+  for (;;) {
+    const { data, error } = await page(rows.length, rows.length + BULK_PAGE_SIZE - 1);
+    if (error) return { data: rows, error };
+    if (!data || data.length === 0) return { data: rows, error: null };
+    rows.push(...data);
+  }
+}
+
 /** Active (unreleased) authorization-request holds, keyed by patient. Fails
  *  open: if holds can't be read, nothing is treated as held, so every alert
  *  stays visible rather than being silently suppressed. */
 async function getActiveAuthorizationHolds(patientId?: string): Promise<Map<string, AuthorizationRequestHoldInfo>> {
-  let query = supabase
-    .from("authorization_request_holds")
-    .select("id, patient_id, auth_period, reason, held_at, held_by_display")
-    .is("released_at", null);
-  if (patientId) query = query.eq("patient_id", patientId);
-  const { data, error } = await query;
+  const { data, error } = await selectAllRows((from, to) => {
+    let query = supabase
+      .from("authorization_request_holds")
+      .select("id, patient_id, auth_period, reason, held_at, held_by_display")
+      .is("released_at", null);
+    if (patientId) query = query.eq("patient_id", patientId);
+    return query.order("id", { ascending: true }).range(from, to);
+  });
   const holds = new Map<string, AuthorizationRequestHoldInfo>();
   if (error) { console.error("[Supabase] getActiveAuthorizationHolds:", error); return holds; }
   for (const row of (data ?? []) as Pick<AuthorizationRequestHoldRow, "id" | "patient_id" | "auth_period" | "reason" | "held_at" | "held_by_display">[]) {
@@ -654,23 +674,27 @@ async function getActiveAuthorizationHolds(patientId?: string): Promise<Map<stri
 
 /** Optional patientId narrows every query to that one patient (same rules). */
 export async function getAuthAlertSummaries(patientId?: string) {
-  let patientsQuery = supabase
-    .from("patients")
-    .select("*")
-    .order("name", { ascending: true });
-  if (patientId) patientsQuery = patientsQuery.eq("id", patientId);
-  const { data: allPatients, error: pErr } = await patientsQuery;
+  // Paged: an unpaginated read is capped at PostgREST's max-rows, which once
+  // made this list show an older period than the per-patient re-read in
+  // visits.holdAuthorizationRequest (a false "changed since you loaded it").
+  const { data: allPatients, error: pErr } = await selectAllRows<any>((from, to) => {
+    let patientsQuery = supabase.from("patients").select("*");
+    if (patientId) patientsQuery = patientsQuery.eq("id", patientId);
+    return patientsQuery.order("name", { ascending: true }).order("id", { ascending: true }).range(from, to);
+  });
 
   if (pErr) { console.error("[Supabase] getAuthAlertSummaries patients:", pErr); return []; }
   if (!allPatients || allPatients.length === 0) return [];
 
-  let visitsQuery = supabase
-    .from("visit_records")
-    .select("*")
-    .order("auth_period", { ascending: true })
-    .order("session_number", { ascending: true });
-  if (patientId) visitsQuery = visitsQuery.eq("patient_id", patientId);
-  const { data: allVisits, error: vErr } = await visitsQuery;
+  const { data: allVisits, error: vErr } = await selectAllRows<any>((from, to) => {
+    let visitsQuery = supabase.from("visit_records").select("*");
+    if (patientId) visitsQuery = visitsQuery.eq("patient_id", patientId);
+    return visitsQuery
+      .order("auth_period", { ascending: true })
+      .order("session_number", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to);
+  });
 
   if (vErr) { console.error("[Supabase] getAuthAlertSummaries visits:", vErr); return []; }
   const visits = (allVisits ?? []).map(toVisitRecord);
@@ -1030,17 +1054,21 @@ export async function setAuthPeriodExpired(
 }
 
 export async function getCompletedPatients(): Promise<string[]> {
-  const { data: allPatients, error: pErr } = await supabase
+  const { data: allPatients, error: pErr } = await selectAllRows<{ id: string }>((from, to) => supabase
     .from("patients")
     .select("id")
-    .order("name", { ascending: true });
+    .order("name", { ascending: true })
+    .order("id", { ascending: true })
+    .range(from, to));
 
   if (pErr) { console.error("[Supabase] getCompletedPatients:", pErr); return []; }
   if (!allPatients || allPatients.length === 0) return [];
 
-  const { data: allVisits, error: vErr } = await supabase
+  const { data: allVisits, error: vErr } = await selectAllRows<any>((from, to) => supabase
     .from("visit_records")
-    .select("id, patient_id, date_of_service, sessions_authorized, auth_period");
+    .select("id, patient_id, date_of_service, sessions_authorized, auth_period")
+    .order("id", { ascending: true })
+    .range(from, to));
 
   if (vErr) { console.error("[Supabase] getCompletedPatients visits:", vErr); return []; }
   const visits = (allVisits ?? []).map(toVisitRecord);

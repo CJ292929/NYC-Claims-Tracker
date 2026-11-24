@@ -113,6 +113,40 @@ describe("visits.holdAuthorizationRequest", () => {
     expect(dbMock.holdAuthorizationRequest).not.toHaveBeenCalled();
   });
 
+  it("stale screen after an approval: says which newer period exists and that nothing was held", async () => {
+    dbMock.getAuthAlertSummaries.mockResolvedValue([summary({ authPeriod: 3, latestAuthPeriod: 3 })]);
+    await expect(callerFor(STAFF).visits.holdAuthorizationRequest({ patientId: PATIENT_ID, authPeriod: 2, reason: "r" }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: expect.stringMatching(/newer authorization period \(Period 3\).*not applied to Period 2.*reason is kept/) });
+  });
+
+  it("stale newest-period metadata while the SAME period is still the target: revalidates and holds on the first confirm", async () => {
+    dbMock.getAuthAlertSummaries
+      .mockResolvedValueOnce([summary({ authPeriod: 2, latestAuthPeriod: 2 })])
+      .mockResolvedValueOnce([summary({ authPeriod: 2, latestAuthPeriod: 3 })]);
+    dbMock.holdAuthorizationRequest.mockRejectedValueOnce(pgError("P0050"));
+    const out = await callerFor(STAFF).visits.holdAuthorizationRequest({ patientId: PATIENT_ID, authPeriod: 2, reason: "r" });
+    expect(out).toEqual({ success: true, holdId: HOLD_ID, changed: true });
+    expect(dbMock.holdAuthorizationRequest).toHaveBeenCalledTimes(2);
+    expect(dbMock.holdAuthorizationRequest).toHaveBeenLastCalledWith(PATIENT_ID, 2, 3, "r", expect.anything());
+  });
+
+  it("P0050 and the target period actually moved: refused with the specific conflict, never re-aimed at the new period", async () => {
+    dbMock.getAuthAlertSummaries
+      .mockResolvedValueOnce([summary({ authPeriod: 2, latestAuthPeriod: 2 })])
+      .mockResolvedValueOnce([summary({ authPeriod: 3, latestAuthPeriod: 3 })]);
+    dbMock.holdAuthorizationRequest.mockRejectedValueOnce(pgError("P0050"));
+    await expect(callerFor(STAFF).visits.holdAuthorizationRequest({ patientId: PATIENT_ID, authPeriod: 2, reason: "r" }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: expect.stringMatching(/Period 3/) });
+    expect(dbMock.holdAuthorizationRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("revalidates at most once (no blind retry loop)", async () => {
+    dbMock.holdAuthorizationRequest.mockRejectedValue(pgError("P0050"));
+    await expect(callerFor(STAFF).visits.holdAuthorizationRequest({ patientId: PATIENT_ID, authPeriod: 2, reason: "r" }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(dbMock.holdAuthorizationRequest).toHaveBeenCalledTimes(2);
+  });
+
   it("a retry is reported as unchanged (the RPC writes no second audit row)", async () => {
     dbMock.holdAuthorizationRequest.mockResolvedValue({ holdId: HOLD_ID, changed: false });
     const out = await callerFor(STAFF).visits.holdAuthorizationRequest({ patientId: PATIENT_ID, authPeriod: 2, reason: "r" });
@@ -123,6 +157,7 @@ describe("visits.holdAuthorizationRequest", () => {
     const input = { patientId: PATIENT_ID, authPeriod: 2, reason: "r" };
     for (const [pg, trpc] of [["P0020", "NOT_FOUND"], ["P0050", "CONFLICT"], ["P0051", "CONFLICT"], ["22023", "BAD_REQUEST"]] as const) {
       dbMock.holdAuthorizationRequest.mockRejectedValueOnce(pgError(pg));
+      if (pg === "P0050") dbMock.holdAuthorizationRequest.mockRejectedValueOnce(pgError(pg)); // still stale after the one revalidation
       await expect(callerFor(STAFF).visits.holdAuthorizationRequest(input)).rejects.toMatchObject({ code: trpc });
     }
     dbMock.getAuthAlertSummaries.mockResolvedValue([]);
