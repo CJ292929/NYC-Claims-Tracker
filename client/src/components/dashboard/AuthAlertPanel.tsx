@@ -15,7 +15,13 @@ import { trpc } from '@/lib/trpc';
 import { URGENCY_SORT_ORDER } from '@/lib/authorizationRecordFilters';
 import { ApproveAuthorizationDialog, AuthorizationActionButtons, useMarkAuthorizationRequested, type ApproveTarget } from './AuthorizationActions';
 import { HoldAuthorizationRequestDialog, HoldRequestButton, type HoldTarget } from './AuthorizationHold';
-import { classifyAuthorizationAlert } from '@shared/authRequestHold';
+import { AuthAlertInsuranceFilter } from './AuthAlertInsuranceFilter';
+import {
+  actionableAuthorizationAlerts,
+  authAlertInsuranceOptions,
+  canonicalInsurerSelection,
+  matchesInsurerSelection,
+} from '@/lib/authAlertInsuranceFilter';
 
 const URGENCY_CONFIG = {
   denied: {
@@ -77,19 +83,34 @@ const URGENCY_CONFIG = {
   },
 };
 
-export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: string) => void }) {
+export function AuthAlertPanel({
+  onSelectPatient,
+  insurance = '',
+  onInsuranceChange,
+}: {
+  onSelectPatient: (id: string) => void;
+  /** URL-held insurance selection ('' = All Insurances). */
+  insurance?: string;
+  /** Present = show the insurance selector; receives the new selection. */
+  onInsuranceChange?: (insurance: string) => void;
+}) {
   const { data: alerts = [], isLoading, error } = trpc.visits.authAlerts.useQuery();
+  // Same shared catalog query the Dashboard uses (react-query dedupes it).
+  const { data: insurerCatalog = [] } = trpc.insurance.list.useQuery(undefined, { enabled: !!onInsuranceChange });
   const { requestingId, markRequested } = useMarkAuthorizationRequested();
   const [approveDialogPatient, setApproveDialogPatient] = useState<ApproveTarget | null>(null);
   const [holdTarget, setHoldTarget] = useState<HoldTarget | null>(null);
 
-  // Only actionable rows: needs attention and not on hold (the same
-  // classification the Authorization Attention count uses).
-  const urgent = alerts
-    .filter(a => classifyAuthorizationAlert(a) === 'attention')
+  // Only actionable rows: needs attention, not on hold, not discharged (the
+  // same classification the Authorization Attention count uses).
+  const actionable = actionableAuthorizationAlerts(alerts);
+  const selected = onInsuranceChange ? canonicalInsurerSelection(insurance, insurerCatalog) : '';
+  const urgent = actionable
+    .filter(a => matchesInsurerSelection(a.insurance, selected, insurerCatalog))
     .sort((a, b) => {
       return URGENCY_SORT_ORDER[a.urgency] - URGENCY_SORT_ORDER[b.urgency];
     });
+  const filtered = selected !== '';
 
   return (
     <Card className="border-border shadow-sm rounded-xl h-full flex flex-col py-0 gap-0 overflow-hidden">
@@ -99,11 +120,31 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
           Authorization Alerts
         </CardTitle>
         {urgent.length > 0 && (
-          <Badge variant="destructive" className="rounded-full min-w-5 h-5 px-1.5 justify-center">
+          <Badge
+            variant="destructive"
+            className="rounded-full min-w-5 h-5 px-1.5 justify-center"
+            aria-label={filtered ? `${urgent.length} alerts for ${selected}` : `${urgent.length} alerts`}
+          >
             {urgent.length}
           </Badge>
         )}
       </CardHeader>
+      {onInsuranceChange && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 border-b border-border px-4 py-2 shrink-0">
+          <AuthAlertInsuranceFilter
+            options={authAlertInsuranceOptions(alerts, insurerCatalog, selected)}
+            selected={selected}
+            totalCount={actionable.length}
+            onSelect={onInsuranceChange}
+          />
+          {/* Filtered count is labelled apart from the global (all insurances) total. */}
+          <p role="status" className="text-xs text-muted-foreground">
+            {filtered
+              ? `Showing ${urgent.length} of ${actionable.length} alerts (filtered: ${selected})`
+              : `${actionable.length} alerts, all insurances`}
+          </p>
+        </div>
+      )}
       <CardContent className="p-0 flex-1 min-h-0 overflow-y-auto max-h-[350px]">
         {error ? (
           <div className="flex items-start gap-2.5 p-4 text-sm">
@@ -113,6 +154,16 @@ export function AuthAlertPanel({ onSelectPatient }: { onSelectPatient: (id: stri
         ) : isLoading ? (
           <div className="p-3 space-y-2">
             {[1, 2].map(i => <div key={i} className="h-16 rounded-lg bg-gray-100 animate-pulse" />)}
+          </div>
+        ) : urgent.length === 0 && filtered ? (
+          <div className="flex items-start gap-2.5 p-4 text-sm">
+            <ShieldCheck className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="text-muted-foreground">No authorization alerts for {selected}.</p>
+              <button type="button" className="text-xs underline text-brand-blue" onClick={() => onInsuranceChange?.('')}>
+                Show all insurances ({actionable.length})
+              </button>
+            </div>
           </div>
         ) : urgent.length === 0 ? (
           <div className="flex items-start gap-2.5 p-4 text-sm">

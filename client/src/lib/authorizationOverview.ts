@@ -24,13 +24,19 @@ export interface AuthorizationOverviewRecord {
   unusedExpiredSessions?: number;
   /** Active authorization-request hold (see shared/authRequestHold.ts). */
   hold?: AuthorizationRequestHoldInfo | null;
+  /** false = discharged: not actionable (see classifyAuthorizationAlert). */
+  isActive?: boolean;
 }
 
 export const AUTH_STATUS_VALUES = ['none', 'pending', 'approved', 'denied'] as const;
 export type AuthStatusValue = (typeof AUTH_STATUS_VALUES)[number];
 
 export interface AuthorizationOverviewMetrics {
+  /** Active (not discharged) patients' rows — the population every
+   *  urgency/status count below is taken over. */
   totalRecords: number;
+  /** Discharged rows left out of every count except onHold. */
+  discharged: number;
   needsAttention: number;
   /** Rows whose hold applies to their current period (excluded from needsAttention). */
   onHold: number;
@@ -63,14 +69,20 @@ export function deriveAuthorizationOverviewMetrics(
   let exhausted = 0;
   let expiring = 0;
 
+  let discharged = 0;
+
   for (const record of records) {
+    const category = classifyAuthorizationAlert(record);
+    if (category === 'on_hold') onHold++;
+    // A discharged patient's authorization isn't actionable — keep them out
+    // of every urgency/status count (an effective hold is still counted
+    // above, so the On Hold count matches its list).
+    if (record.isActive === false) { discharged++; continue; }
     urgencyDistribution[record.urgency]++;
     if ((AUTH_STATUS_VALUES as readonly string[]).includes(record.authStatus)) {
       statusDistribution[record.authStatus as AuthStatusValue]++;
     }
-    const category = classifyAuthorizationAlert(record);
     if (category === 'attention') needsAttention++;
-    if (category === 'on_hold') onHold++;
     if (record.urgency === 'pending') pending++;
     if (record.urgency === 'denied') denied++;
     if (record.urgency === 'expired') expired++;
@@ -80,7 +92,8 @@ export function deriveAuthorizationOverviewMetrics(
   }
 
   return {
-    totalRecords: records.length,
+    totalRecords: records.length - discharged,
+    discharged,
     needsAttention,
     onHold,
     pending,
@@ -98,7 +111,7 @@ export function deriveAuthorizationOverviewMetrics(
  *  sortAuthorizationRecords/URGENCY_SORT_ORDER the Records workspace already
  *  established (denied, exhausted, critical, warning, pending, ok, then
  *  alphabetical) so the two pages can never silently drift apart. */
-export function getTopAuthorizationAttention<T extends { patientName: string; urgency: AuthUrgency; authPeriod: number | null; hold?: AuthorizationRequestHoldInfo | null }>(
+export function getTopAuthorizationAttention<T extends { patientName: string; urgency: AuthUrgency; authPeriod: number | null; hold?: AuthorizationRequestHoldInfo | null; isActive?: boolean }>(
   records: T[],
   limit = 5,
 ): T[] {

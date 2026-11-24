@@ -85,7 +85,7 @@ export function AuthorizationOverview({ onNavigate }: { onNavigate: (route: stri
           icon={<AlertTriangle className="w-4 h-4 text-destructive" />}
           label="Needs Attention"
           value={metrics.needsAttention}
-          sub={`of ${metrics.totalRecords} patients`}
+          sub={`of ${metrics.totalRecords} active patients`}
           tone="destructive"
         />
         <MetricCard
