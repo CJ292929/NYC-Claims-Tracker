@@ -20,7 +20,7 @@ import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
 import { formatTimestamp } from '@/lib/date';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
-import { HOLD_REASON_MAX, heldAuthorizationAlerts, isHoldSuperseded, normalizeHoldReason, type AuthorizationRequestHoldInfo } from '@shared/authRequestHold';
+import { HOLD_REASON_MAX, heldAuthorizationAlerts, isHoldEffective, isHoldSuperseded, normalizeHoldReason, type AuthorizationRequestHoldInfo } from '@shared/authRequestHold';
 import { useRefreshAfterAuthorizationChange } from './AuthorizationActions';
 
 export interface HoldTarget {
@@ -175,6 +175,12 @@ export function AuthorizationHoldsPanel({ onSelectPatient }: { onSelectPatient: 
   const { data: alerts = [], isLoading, error } = trpc.visits.authAlerts.useQuery();
   const [releaseTarget, setReleaseTarget] = useState<ReleaseTarget | null>(null);
   const held = heldAuthorizationAlerts(alerts).sort((a, b) => a.patientName.localeCompare(b.patientName));
+  // The badge counts holds that actually defer a request (effective on the
+  // current period) — the same number as the Dashboard's "Pending
+  // Authorization Request" card. Superseded holds are still listed so they
+  // can be removed, but they no longer hide anything, so they are not counted.
+  const effectiveCount = held.filter(isHoldEffective).length;
+  const supersededCount = held.length - effectiveCount;
 
   return (
     <Card className="border-border shadow-sm rounded-xl flex flex-col py-0 gap-0 overflow-hidden">
@@ -183,10 +189,15 @@ export function AuthorizationHoldsPanel({ onSelectPatient }: { onSelectPatient: 
           <PauseCircle className="w-4 h-4 text-amber-600" />
           Authorization Requests on Hold
         </CardTitle>
-        <Badge variant="secondary" className="rounded-full min-w-5 h-5 px-1.5 justify-center" aria-label={`${held.length} on hold`}>
-          {held.length}
+        <Badge variant="secondary" className="rounded-full min-w-5 h-5 px-1.5 justify-center" aria-label={`${effectiveCount} on hold`}>
+          {effectiveCount}
         </Badge>
       </CardHeader>
+      {supersededCount > 0 && (
+        <p className="px-4 py-1.5 text-xs text-muted-foreground border-b border-border">
+          Also listed: {supersededCount} superseded {supersededCount === 1 ? 'hold' : 'holds'} (not counted — a newer period exists).
+        </p>
+      )}
       <CardContent className="p-0 max-h-[350px] overflow-y-auto">
         {error ? (
           <p className="p-4 text-sm text-red-700">Could not load holds. Please refresh.</p>

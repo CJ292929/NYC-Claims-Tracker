@@ -13,6 +13,7 @@ import {
   Loader2,
   ChevronDown,
   History,
+  AlertCircle,
 } from 'lucide-react';
 import logoIcon from '@/assets/logos/logo-icon.png';
 
@@ -24,8 +25,10 @@ export type NavSection =
   | 'authorizations-overview'
   | 'authorizations-attention'
   | 'authorizations-records'
+  | 'authorizations-on-hold'
   | 'visits'
   | 'claims'
+  | 'claims-follow-up'
   | 'bulk-upload'
   | 'staff'
   | 'activity-log';
@@ -79,6 +82,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
           leaf('authorizations-overview', 'Overview'),
           leaf('authorizations-attention', 'Needs Attention'),
           leaf('authorizations-records', 'Records'),
+          leaf('authorizations-on-hold', 'On Hold'),
         ],
       },
     ],
@@ -88,6 +92,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
     items: [
       leaf('visits', 'Visits', CalendarCheck),
       leaf('claims', 'Claims', FileStack),
+      leaf('claims-follow-up', 'Claims Follow-Up', AlertCircle),
     ],
   },
   {
@@ -108,7 +113,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavEntry[] }> = [
 const ADMIN_ONLY_GROUP_LABELS = new Set(['Management']);
 
 /** Items gated to Claims-access roles (P4-P25: Owner/Super Admin, Clinic Admin) — see canAccessClaims. */
-const CLAIMS_ACCESS_SECTIONS = new Set<NavSection>(['claims', 'bulk-upload']);
+const CLAIMS_ACCESS_SECTIONS = new Set<NavSection>(['claims', 'claims-follow-up', 'bulk-upload']);
 
 /** Group keys whose children include the given section. */
 function parentKeysContaining(activeSection: NavSection): string[] {

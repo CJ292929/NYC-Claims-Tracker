@@ -27,6 +27,7 @@ describe('deriveDashboardKpis', () => {
     expect(kpis).toEqual({
       activePatients: 0,
       authorizationAttention: 0,
+      pendingAuthorizationRequest: 0,
       claimsFollowUp: 0,
       completedPatients: 0,
     });
@@ -92,6 +93,7 @@ describe('deriveDashboardKpis', () => {
     expect(kpis).toEqual({
       activePatients: 42,
       authorizationAttention: 2,
+      pendingAuthorizationRequest: 0,
       claimsFollowUp: 6,
       completedPatients: 9,
     });
@@ -111,5 +113,28 @@ describe('deriveDashboardKpis', () => {
       completedPatientCount: 1,
     };
     expect(deriveDashboardKpis(input)).toEqual(deriveDashboardKpis(input));
+  });
+});
+
+describe('Pending Authorization Request KPI (held requests)', () => {
+  const hold = (authPeriod: number | null) => ({ holdId: 'h', authPeriod, reason: 'Waiting on referral', heldAt: '2026-11-20T15:00:00Z', heldByDisplay: 'Synthetic Staff' });
+  const base = { activePatientCount: 0, followUpClaimCount: 0, completedPatientCount: 0 };
+
+  it('a hold moves a row from Authorization Attention into Pending Authorization Request', () => {
+    const before = deriveDashboardKpis({ ...base, authAlerts: [alert({ urgency: 'pending' })] });
+    expect([before.authorizationAttention, before.pendingAuthorizationRequest]).toEqual([1, 0]);
+    const held = deriveDashboardKpis({ ...base, authAlerts: [alert({ urgency: 'pending', hold: hold(1) })] });
+    expect([held.authorizationAttention, held.pendingAuthorizationRequest]).toEqual([0, 1]);
+  });
+
+  it('resume (hold removed) recalculates: back in Attention only while still eligible', () => {
+    expect(deriveDashboardKpis({ ...base, authAlerts: [alert({ urgency: 'pending', hold: null })] }).authorizationAttention).toBe(1);
+    const ok = deriveDashboardKpis({ ...base, authAlerts: [alert({ urgency: 'ok', hold: null })] });
+    expect([ok.authorizationAttention, ok.pendingAuthorizationRequest]).toEqual([0, 0]);
+  });
+
+  it('a superseded hold (newer period) is not counted as pending and no longer hides the alert', () => {
+    const k = deriveDashboardKpis({ ...base, authAlerts: [alert({ authPeriod: 2, urgency: 'critical', hold: hold(1) })] });
+    expect([k.authorizationAttention, k.pendingAuthorizationRequest]).toEqual([1, 0]);
   });
 });

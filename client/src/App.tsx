@@ -134,8 +134,10 @@ export const DASHBOARD_ROUTE_PATHS = [
   "/authorizations",
   "/authorizations/attention",
   "/authorizations/records",
+  "/authorizations/on-hold",
   "/visits",
   "/claims",
+  "/claims/follow-up",
 ] as const;
 
 /** Stable component reference shared by every Dashboard-backed route, so cross-route

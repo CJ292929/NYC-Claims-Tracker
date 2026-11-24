@@ -68,8 +68,10 @@ describe('Dashboard-backed route wiring', () => {
       '/authorizations',
       '/authorizations/attention',
       '/authorizations/records',
+      '/authorizations/on-hold',
       '/visits',
       '/claims',
+      '/claims/follow-up',
     ]);
   });
 

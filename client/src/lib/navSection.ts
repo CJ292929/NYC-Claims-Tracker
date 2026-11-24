@@ -10,8 +10,10 @@ export function routeToNavSection(location: string): NavSection {
     case '/authorizations': return 'authorizations-overview';
     case '/authorizations/attention': return 'authorizations-attention';
     case '/authorizations/records': return 'authorizations-records';
+    case '/authorizations/on-hold': return 'authorizations-on-hold';
     case '/visits': return 'visits';
     case '/claims': return 'claims';
+    case '/claims/follow-up': return 'claims-follow-up';
     case '/staff': return 'staff';
     case '/activity-log': return 'activity-log';
     default: return 'dashboard';
@@ -30,8 +32,10 @@ export function navSectionToRoute(section: NavSection): string | null {
     case 'authorizations-overview': return '/authorizations';
     case 'authorizations-attention': return '/authorizations/attention';
     case 'authorizations-records': return '/authorizations/records';
+    case 'authorizations-on-hold': return '/authorizations/on-hold';
     case 'visits': return '/visits';
     case 'claims': return '/claims';
+    case 'claims-follow-up': return '/claims/follow-up';
     case 'bulk-upload': return null;
     case 'staff': return '/staff';
     case 'activity-log': return '/activity-log';
