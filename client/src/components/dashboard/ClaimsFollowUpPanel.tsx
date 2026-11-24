@@ -53,6 +53,9 @@ export function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?
         <CardTitle className="flex items-center gap-2 text-sm font-semibold text-brand-blue">
           <AlertCircle className="w-4 h-4 text-amber-500" />
           Claims Follow-Up Needed
+          {/* Always name the scope: this list follows the Insurance filter,
+              while the Dashboard KPI counts all insurances. */}
+          <span className="font-normal text-muted-foreground">· {insurance ? insurance : 'All insurances'}</span>
         </CardTitle>
         {viewState === 'data' && (
           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800">

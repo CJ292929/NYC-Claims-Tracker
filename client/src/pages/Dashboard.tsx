@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { useLocation } from 'wouter';
+import { useLocation, useSearch } from 'wouter';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -418,6 +418,16 @@ export default function Dashboard() {
   // parallel activeNavSection state to drift out of sync with it.
   const [location, navigate] = useLocation();
   const activeSection: NavSection = useMemo(() => routeToNavSection(location), [location]);
+  // Explicit, URL-held list filters set by the Dashboard KPI cards, so a
+  // card's destination survives reload and browser Back/Forward:
+  //   /patients/records?scope=all                 every active patient (Active Patients)
+  //   /patients/records?scope=all&view=completed  sessions exhausted (Completed Patients)
+  //   /claims/follow-up?insurance=<name>          one insurer (omitted = all insurances)
+  const search = useSearch();
+  const urlParams = useMemo(() => new URLSearchParams(search), [search]);
+  const recordsScopeAll = activeSection === 'patients-records' && urlParams.get('scope') === 'all';
+  const recordsCompletedView = activeSection === 'patients-records' && urlParams.get('view') === 'completed';
+  const followUpInsurance = activeSection === 'claims-follow-up' ? (urlParams.get('insurance') ?? '') : '';
   // Derived (not stateful): true only on the per-patient detail routes.
   const showDetailView = activeSection === 'visits' || activeSection === 'claims';
 
@@ -703,6 +713,24 @@ export default function Dashboard() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPatient?.id]);
+
+  // ?scope=all (from an Active/Completed Patients KPI card) clears the
+  // Insurance / Claims Status / search filters so the list matches the
+  // clinic-wide count. Declared after the sync effect above and re-run when
+  // the selection changes, so auto-select cannot narrow it back to one insurer.
+  useEffect(() => {
+    if (!recordsScopeAll) return;
+    setSelectedInsurance('');
+    setSelectedClaimsFilter('all');
+    setSearchQuery('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordsScopeAll, selectedPatient?.id]);
+
+  /** Choosing a filter by hand replaces the card's ?scope=all (keeping ?view). */
+  const dropRecordsScopeParam = () => {
+    if (!recordsScopeAll) return;
+    navigate(recordsCompletedView ? '/patients/records?view=completed' : '/patients/records', { replace: true });
+  };
 
   // ── Mutations ──────────────────────────────────────────────────────────────
   const createPatient = trpc.patients.create.useMutation({
@@ -1114,10 +1142,12 @@ export default function Dashboard() {
   );
 
   const handleSelectInsurance = (insurance: string) => {
+    dropRecordsScopeParam();
     setSelectedInsurance(insurance);
   };
 
   const handleSelectClaimsStatus = (status: string) => {
+    dropRecordsScopeParam();
     setSelectedClaimsFilter(status);
   };
 
@@ -1155,6 +1185,9 @@ export default function Dashboard() {
   // The open patient's row of the same query — drives the hold banner and Hold Request scope.
   const activeAuthSummary = activePatient ? dashboardAuthAlerts.find(a => a.patientId === activePatient.id) ?? null : null;
   const { data: dashboardFollowUpClaims = [] } = trpc.claims.getFollowUpClaims.useQuery({}, { enabled: canAccessClaims });
+  // Rows shown on /patients/records: the Completed Patients card's view
+  // narrows to the same completedSet the KPI counts.
+  const recordsListPatients = recordsCompletedView ? filteredPatients.filter(p => completedSet.has(p.id)) : filteredPatients;
   const dashboardKpis = useMemo(() => deriveDashboardKpis({
     activePatientCount: activePatients.length,
     authAlerts: dashboardAuthAlerts,
@@ -3147,6 +3180,9 @@ export default function Dashboard() {
   const filterChipsElement = (
     <FilterChips
       chips={[
+        ...(recordsCompletedView
+          ? [{ key: 'view', label: 'Showing: Completed patients (sessions exhausted)', onRemove: () => navigate(recordsScopeAll ? '/patients/records?scope=all' : '/patients/records') }]
+          : []),
         ...(selectedInsurance
           ? [{ key: 'insurance', label: `Filtered by: ${selectedInsurance}`, onRemove: () => setSelectedInsurance('') }]
           : []),
@@ -3158,7 +3194,7 @@ export default function Dashboard() {
             }]
           : []),
       ]}
-      onClearAll={handleClearFilters}
+      onClearAll={() => { handleClearFilters(); if (recordsCompletedView) navigate('/patients/records?scope=all'); }}
     />
   );
 
@@ -3521,7 +3557,7 @@ export default function Dashboard() {
             onShowMobileFiltersChange={setShowMobileFilters}
             activeFilterCount={activeFilterCount}
             onClearFilters={handleClearFilters}
-            filteredPatients={filteredPatients}
+            filteredPatients={recordsListPatients}
             completedPatients={completedPatients}
             selectedPatientId={selectedRecordsPatientId}
             onSelectPatient={setSelectedRecordsPatientId}
@@ -3639,8 +3675,81 @@ export default function Dashboard() {
       >
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6">
           <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
+          {/* Held requests are excluded above and live on their own page. */}
+          <Button variant="outline" size="sm" onClick={() => navigate('/authorizations/on-hold')}>
+            <PauseCircle className="w-4 h-4 text-amber-600" />
+            View requests on hold ({dashboardKpis.pendingAuthorizationRequest})
+          </Button>
+        </div>
+        {bulkUploadDialog}
+          {claimImportDialog}
+      </DashboardShell>
+    );
+  }
+
+  // ── /authorizations/on-hold ──
+  // Destination of the "Pending Authorization Request" KPI: the existing
+  // hold list (reasons + Remove Hold / Resume), same authAlerts source.
+
+  if (activeSection === 'authorizations-on-hold') {
+    return (
+      <DashboardShell
+        activeSection={activeSection}
+        onNavigate={handleNavigate}
+        onSignOut={handleSignOut}
+        signingOut={logoutMutation.isPending}
+        canManageStaff={canManageStaff}
+        canAccessClaims={canAccessClaims}
+        topbarTitle="Pending Authorization Requests"
+        topbarSubtitle="On hold — request deferred. Remove the hold to resume."
+      >
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6">
           <AuthorizationHoldsPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
         </div>
+        {bulkUploadDialog}
+          {claimImportDialog}
+      </DashboardShell>
+    );
+  }
+
+  // ── /claims/follow-up ──
+  // Destination of the Claims Follow-Up KPI. Same getFollowUpClaims query;
+  // the insurer scope lives in the URL (omitted = all insurances, which is
+  // exactly what the KPI counts). Claims access only (P4-P25).
+
+  if (activeSection === 'claims-follow-up') {
+    return (
+      <DashboardShell
+        activeSection={activeSection}
+        onNavigate={handleNavigate}
+        onSignOut={handleSignOut}
+        signingOut={logoutMutation.isPending}
+        canManageStaff={canManageStaff}
+        canAccessClaims={canAccessClaims}
+        topbarTitle="Claims Follow-Up"
+        topbarSubtitle="Unresolved claims that need insurer follow-up"
+      >
+        {canAccessClaims ? (
+          <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <label htmlFor="follow-up-insurance" className="text-sm font-medium text-brand-blue">Insurance</label>
+              <select
+                id="follow-up-insurance"
+                value={followUpInsurance}
+                onChange={(e) => navigate(e.target.value ? `/claims/follow-up?insurance=${encodeURIComponent(e.target.value)}` : '/claims/follow-up')}
+                className="h-9 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-blue"
+              >
+                <option value="">All insurances</option>
+                {Array.from(new Set([...insuranceList, ...historicalInsuranceList, ...(followUpInsurance ? [followUpInsurance] : [])])).map(name => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+            </div>
+            <ClaimsFollowUpPanel insurance={followUpInsurance} onSelectPatient={(id) => selectPatient(id, '/claims')} />
+          </div>
+        ) : (
+          <ClaimsAccessDenied onGoToPatientRecords={() => navigate('/patients/records')} />
+        )}
         {bulkUploadDialog}
           {claimImportDialog}
       </DashboardShell>
@@ -3701,15 +3810,18 @@ export default function Dashboard() {
       <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6 xl:space-y-8">
 
         {/* KPI Cards — clinic-wide only; see dashboardKpis above */}
-        <div className={`grid grid-cols-1 sm:grid-cols-2 ${canAccessClaims ? 'xl:grid-cols-4' : 'xl:grid-cols-3'} gap-4`}>
+        {/* Every card links to the list its number counts (same source and
+            classification) - navigation only, never a state change. */}
+        <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 ${canAccessClaims ? 'xl:grid-cols-5' : 'xl:grid-cols-4'} gap-4`}>
           {[
-            { icon: <Users className="w-4 h-4 text-brand-blue" />, label: 'Active Patients', value: dashboardKpis.activePatients, sub: 'Currently active, all insurances', tone: 'navy' as const },
-            { icon: <AlertTriangle className="w-4 h-4 text-destructive" />, label: 'Authorization Attention', value: dashboardKpis.authorizationAttention, sub: 'Needs authorization action', tone: 'destructive' as const },
+            { icon: <Users className="w-4 h-4 text-brand-blue" />, label: 'Active Patients', value: dashboardKpis.activePatients, sub: 'Currently active, all insurances', tone: 'navy' as const, href: '/patients/records?scope=all' },
+            { icon: <AlertTriangle className="w-4 h-4 text-destructive" />, label: 'Authorization Attention', value: dashboardKpis.authorizationAttention, sub: 'Needs authorization action', tone: 'destructive' as const, href: '/authorizations/attention' },
+            { icon: <PauseCircle className="w-4 h-4 text-amber-600" />, label: 'Pending Authorization Request', value: dashboardKpis.pendingAuthorizationRequest, sub: 'On hold — request deferred', tone: 'gold' as const, href: '/authorizations/on-hold' },
             // Claims KPI requires Claims access (P4-P25).
-            ...(canAccessClaims ? [{ icon: <AlertCircle className="w-4 h-4 text-brand-gold-dark" />, label: 'Claims Follow-Up', value: dashboardKpis.claimsFollowUp, sub: 'Unresolved, all insurances', tone: 'gold' as const }] : []),
-            { icon: <CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />, label: 'Completed Patients', value: dashboardKpis.completedPatients, sub: 'Sessions exhausted', tone: 'gold' as const },
-          ].map(({ icon, label, value, sub, tone }) => (
-            <MetricCard key={label} icon={icon} label={label} value={value} sub={sub} tone={tone} />
+            ...(canAccessClaims ? [{ icon: <AlertCircle className="w-4 h-4 text-brand-gold-dark" />, label: 'Claims Follow-Up', value: dashboardKpis.claimsFollowUp, sub: 'Unresolved, all insurances', tone: 'gold' as const, href: '/claims/follow-up' }] : []),
+            { icon: <CheckCircle2 className="w-4 h-4 text-brand-gold-dark" />, label: 'Completed Patients', value: dashboardKpis.completedPatients, sub: 'Sessions exhausted', tone: 'gold' as const, href: '/patients/records?scope=all&view=completed' },
+          ].map(({ icon, label, value, sub, tone, href }) => (
+            <MetricCard key={label} icon={icon} label={label} value={value} sub={sub} tone={tone} href={href} />
           ))}
         </div>
 

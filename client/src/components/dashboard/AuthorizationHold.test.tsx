@@ -92,7 +92,9 @@ describe("AuthorizationHoldsPanel", () => {
       { patientId: "p3", patientName: "Not Held", insurance: "X", urgency: "critical", authStatus: "approved", authPeriod: 1, isActive: true, hold: null },
     ];
     render(<AuthorizationHoldsPanel onSelectPatient={() => {}} />);
-    expect(screen.getByLabelText("2 on hold")).toBeTruthy();
+    // Badge counts only the hold that still defers a request; the superseded one is listed, not counted.
+    expect(screen.getByLabelText("1 on hold")).toBeTruthy();
+    expect(screen.getByText(/Also listed: 1 superseded hold/)).toBeTruthy();
     const items = screen.getAllByRole("listitem");
     expect(items).toHaveLength(2);
     const first = within(items[0]);

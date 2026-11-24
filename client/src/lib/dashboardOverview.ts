@@ -4,6 +4,10 @@ import { deriveAuthorizationOverviewMetrics } from './authorizationOverview';
 export interface DashboardKpis {
   activePatients: number;
   authorizationAttention: number;
+  /** "Pending Authorization Request": requests deliberately put on hold
+   *  (hold effective on the current period) — the exact rows Authorization
+   *  Attention excludes. Same classifier, so the two never overlap. */
+  pendingAuthorizationRequest: number;
   claimsFollowUp: number;
   completedPatients: number;
 }
@@ -23,9 +27,11 @@ export function deriveDashboardKpis(params: {
   followUpClaimCount: number;
   completedPatientCount: number;
 }): DashboardKpis {
+  const auth = deriveAuthorizationOverviewMetrics(params.authAlerts);
   return {
     activePatients: params.activePatientCount,
-    authorizationAttention: deriveAuthorizationOverviewMetrics(params.authAlerts).needsAttention,
+    authorizationAttention: auth.needsAttention,
+    pendingAuthorizationRequest: auth.onHold,
     claimsFollowUp: params.followUpClaimCount,
     completedPatients: params.completedPatientCount,
   };
