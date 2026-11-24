@@ -80,3 +80,26 @@ export function historicalInsurerNames(
   }
   return Array.from(historical).sort((a, b) => a.localeCompare(b));
 }
+
+/**
+ * Insurance filter option search (display only). Case/space-insensitive
+ * substring match on the option name OR any of its catalog aliases, so a
+ * patient's pre-rename insurer still finds the renamed entry. The selected
+ * option is always kept so searching never hides — or clears — the active
+ * selection. Order of `options` is preserved.
+ */
+export function searchInsuranceOptions(
+  options: ReadonlyArray<string>,
+  query: string,
+  aliasesByName: Readonly<Record<string, ReadonlyArray<string>>> = {},
+  selected = '',
+): string[] {
+  const needle = query.trim().toLocaleLowerCase().replace(/\s+/g, ' ');
+  if (!needle) return [...options];
+  const norm = (v: string) => v.toLocaleLowerCase().replace(/\s+/g, ' ');
+  return options.filter(name =>
+    name === selected ||
+    norm(name).includes(needle) ||
+    (aliasesByName[name] ?? []).some(alias => norm(alias).includes(needle))
+  );
+}

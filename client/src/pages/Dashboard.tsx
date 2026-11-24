@@ -6,10 +6,12 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical, Settings, History, EyeOff, FileStack, ShieldCheck } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Users, Plus, ChevronLeft, Calendar, Upload, Download, Loader2, RefreshCw, Trash2, UserX, UserCheck, Columns3, AlertTriangle, Pencil, FileText, MoreVertical, Settings, History, EyeOff, FileStack, ShieldCheck, PauseCircle, PlayCircle } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Switch } from '@/components/ui/switch';
+import { PatientActiveToggle } from '@/components/dashboard/PatientActiveToggle';
+import { AuthorizationHoldsPanel, HoldAuthorizationRequestDialog, HoldDetails, HoldRequestButton, ReleaseAuthorizationHoldDialog, type HoldTarget, type ReleaseTarget } from '@/components/dashboard/AuthorizationHold';
+import { isHoldEffective, isHoldSuperseded } from '@shared/authRequestHold';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
@@ -561,6 +563,7 @@ export default function Dashboard() {
   // Filters/counts use the FULL catalog (active + inactive) — a deactivated
   // insurer's existing patients must stay filterable/countable (P4-P13).
   const insuranceList = useMemo(() => insurerCatalog.map(entry => entry.name), [insurerCatalog]);
+  const insuranceAliases = useMemo(() => Object.fromEntries(insurerCatalog.map(entry => [entry.name, entry.aliases])), [insurerCatalog]);
   // Insurers patients still record that aren't in the catalog — notably a
   // permanently deleted one (P4-P22), whose records keep their insurer text.
   // Filter-only "Historical insurers" group; never offered for new selection.
@@ -971,6 +974,8 @@ export default function Dashboard() {
   // P4-P30: authorization actions on the patient details alert (shared with AuthAlertPanel).
   const { requestingId: authRequestingId, markRequested: markAuthorizationRequested } = useMarkAuthorizationRequested();
   const [approveAuthPatient, setApproveAuthPatient] = useState<ApproveTarget | null>(null);
+  const [holdAuthTarget, setHoldAuthTarget] = useState<HoldTarget | null>(null);
+  const [releaseHoldTarget, setReleaseHoldTarget] = useState<ReleaseTarget | null>(null);
   const alertStatus = activePatient
     ? derivePatientAlertPresentation(visits, activeMetrics.remaining, activePatient.authValidUntil)
     : null;
@@ -1147,6 +1152,8 @@ export default function Dashboard() {
   // clinic-wide count); react-query dedupes the authAlerts call against
   // AuthAlertPanel's own identical query below.
   const { data: dashboardAuthAlerts = [] } = trpc.visits.authAlerts.useQuery();
+  // The open patient's row of the same query — drives the hold banner and Hold Request scope.
+  const activeAuthSummary = activePatient ? dashboardAuthAlerts.find(a => a.patientId === activePatient.id) ?? null : null;
   const { data: dashboardFollowUpClaims = [] } = trpc.claims.getFollowUpClaims.useQuery({}, { enabled: canAccessClaims });
   const dashboardKpis = useMemo(() => deriveDashboardKpis({
     activePatientCount: activePatients.length,
@@ -1676,20 +1683,17 @@ export default function Dashboard() {
         topbarSubtitle={`Insurance: ${activePatient.insurance}`}
         topbarActions={
           <>
-            <div className="hidden sm:flex items-center gap-2 rounded-lg border border-border px-3 py-1.5">
+            <div className={`flex items-center gap-2 rounded-lg border px-2.5 sm:px-3 py-1.5 ${activePatient.isActive !== false ? 'border-green-300 bg-green-50' : 'border-red-300 bg-red-50'}`}>
               {activePatient.isActive !== false ? (
-                <UserCheck className="w-4 h-4 text-green-600" />
+                <UserCheck className="hidden sm:block w-4 h-4 text-green-700" aria-hidden />
               ) : (
-                <UserX className="w-4 h-4 text-gray-400" />
+                <UserX className="hidden sm:block w-4 h-4 text-red-700" aria-hidden />
               )}
-              <span className={`text-xs font-semibold ${activePatient.isActive !== false ? 'text-green-700' : 'text-gray-500'}`}>
-                {activePatient.isActive !== false ? 'Active' : 'Discharged'}
-              </span>
-              <Switch
-                checked={activePatient.isActive !== false}
-                onCheckedChange={(checked) => handleToggleActive(activePatient.id, checked)}
+              <PatientActiveToggle
+                id={`details-active-${activePatient.id}`}
+                isActive={activePatient.isActive !== false}
+                onToggle={(checked) => handleToggleActive(activePatient.id, checked)}
                 disabled={setPatientActive.isPending}
-                aria-label="Toggle patient active status"
               />
             </div>
             <Button
@@ -1747,8 +1751,42 @@ export default function Dashboard() {
             </div>
           )}
 
+          {/* Authorization request on hold — replaces the actionable alert while
+              the hold matches the current period (shared/authRequestHold.ts). */}
+          {activeAuthSummary?.hold && (() => {
+            const hold = activeAuthSummary.hold;
+            const superseded = isHoldSuperseded(activeAuthSummary);
+            return (
+              <div role="status" className="mb-6 rounded-xl border-2 border-amber-300 bg-amber-50 p-4 flex items-start gap-3">
+                <PauseCircle className="w-6 h-6 mt-0.5 shrink-0 text-amber-700" />
+                <div className="flex-1 min-w-0 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0 space-y-1">
+                    <h3 className="font-bold text-base text-amber-900">
+                      {superseded ? 'Superseded authorization hold' : 'Authorization request on hold'}
+                    </h3>
+                    <p className="text-sm text-amber-900">
+                      {hold.authPeriod === null ? 'Initial request' : `Period ${hold.authPeriod}`}
+                      {superseded ? ' — a newer authorization period exists, so this hold no longer hides any alert.' : ' — not shown in Authorization Alerts until the hold is removed.'}
+                    </p>
+                    <HoldDetails hold={hold} />
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs shrink-0"
+                    onClick={() => setReleaseHoldTarget({ patientId: activePatient.id, patientName: activePatient.name, holdId: hold.holdId })}
+                  >
+                    <PlayCircle className="w-3.5 h-3.5" /> Remove Hold / Resume
+                  </Button>
+                </div>
+              </div>
+            );
+          })()}
+          <ReleaseAuthorizationHoldDialog target={releaseHoldTarget} onClose={() => setReleaseHoldTarget(null)} />
+          <HoldAuthorizationRequestDialog target={holdAuthTarget} onClose={() => setHoldAuthTarget(null)} />
+
           {/* Auth Alert */}
-          {alertStatus && alertStatus.urgency !== 'ok' && (() => {
+          {alertStatus && alertStatus.urgency !== 'ok' && !(activeAuthSummary && isHoldEffective(activeAuthSummary)) && (() => {
             const style = AUTH_BANNER_STYLE[alertStatus.urgency];
             const message = authBannerMessage(alertStatus.urgency, activeMetrics.remaining, activePatient.insurance, alertStatus.authExpiryWarning, activeMetrics.unusedExpired);
             return (
@@ -1764,14 +1802,23 @@ export default function Dashboard() {
                     </p>
                   </div>
                   {/* P4-P30: the same actions as this patient's Dashboard alert. */}
-                  <AuthorizationActionButtons
-                    className="flex gap-2 shrink-0"
-                    buttonClassName="h-8 text-xs flex-1 sm:flex-none"
-                    authPending={alertStatus.authStatus === 'pending'}
-                    requesting={authRequestingId === activePatient.id}
-                    onMarkRequested={() => markAuthorizationRequested(activePatient.id)}
-                    onApprove={() => setApproveAuthPatient({ id: activePatient.id, name: activePatient.name, insurance: activePatient.insurance ?? '' })}
-                  />
+                  <div className="flex flex-col gap-2 shrink-0">
+                    <AuthorizationActionButtons
+                      className="flex gap-2"
+                      buttonClassName="h-8 text-xs flex-1 sm:flex-none"
+                      authPending={alertStatus.authStatus === 'pending'}
+                      requesting={authRequestingId === activePatient.id}
+                      onMarkRequested={() => markAuthorizationRequested(activePatient.id)}
+                      onApprove={() => setApproveAuthPatient({ id: activePatient.id, name: activePatient.name, insurance: activePatient.insurance ?? '' })}
+                    />
+                    {/* Scoped to the period the server's alert row is about; hidden until it loads, and while another hold exists. */}
+                    {activeAuthSummary && !activeAuthSummary.hold && (
+                      <HoldRequestButton
+                        className="h-8 text-xs"
+                        onClick={() => setHoldAuthTarget({ patientId: activePatient.id, patientName: activePatient.name, authPeriod: activeAuthSummary.authPeriod })}
+                      />
+                    )}
+                  </div>
                 </div>
               </div>
             );
@@ -3460,6 +3507,7 @@ export default function Dashboard() {
           <PatientRecordsWorkspace
             insuranceList={insuranceList}
             historicalInsuranceList={historicalInsuranceList}
+            insuranceAliases={insuranceAliases}
             insuranceCounts={insuranceCounts}
             selectedInsurance={selectedInsurance}
             onSelectInsurance={handleSelectInsurance}
@@ -3517,6 +3565,7 @@ export default function Dashboard() {
             onSearchQueryChange={setDischargedSearchQuery}
             insuranceList={insuranceList}
             historicalInsuranceList={historicalInsuranceList}
+            insuranceAliases={insuranceAliases}
             insuranceCounts={insuranceCounts}
             selectedInsurance={selectedInsurance}
             onSelectInsurance={handleSelectInsurance}
@@ -3588,8 +3637,9 @@ export default function Dashboard() {
         topbarTitle="Needs Attention"
         topbarSubtitle="Review patients requiring authorization action."
       >
-        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 xl:px-8 py-6 space-y-6">
           <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
+          <AuthorizationHoldsPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
         </div>
         {bulkUploadDialog}
           {claimImportDialog}
@@ -3667,8 +3717,9 @@ export default function Dashboard() {
         <section>
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-3">Needs Attention</h2>
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 xl:gap-6">
-            <div className={canAccessClaims ? 'lg:col-span-4' : 'lg:col-span-12'}>
+            <div className={`${canAccessClaims ? 'lg:col-span-4' : 'lg:col-span-12'} space-y-4`}>
               <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
+              <AuthorizationHoldsPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
             </div>
             {canAccessClaims && (
             <div className="lg:col-span-8">

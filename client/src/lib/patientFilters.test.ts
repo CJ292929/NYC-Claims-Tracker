@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { historicalInsurerNames, isStaleInsurerSelection, matchesPatientFilters } from './patientFilters';
+import { historicalInsurerNames, isStaleInsurerSelection, matchesPatientFilters, searchInsuranceOptions } from './patientFilters';
 
 const patient = (id: string, insurance: string) => ({ id, insurance });
 
@@ -110,5 +110,17 @@ describe('historicalInsurerNames (P4-P22)', () => {
     expect(isStaleInsurerSelection(historical, after, patients)).toBe(false);
     const scope = { selectedInsurance: historical, selectedClaimsFilter: 'all', patientIdsByStatus: {} };
     expect(patients.filter(p => matchesPatientFilters(p, scope)).map(p => p.id)).toEqual(['p1']);
+  });
+});
+
+describe("searchInsuranceOptions", () => {
+  it("empty query returns every option in order", () => {
+    expect(searchInsuranceOptions(["B", "A"], "  ")).toEqual(["B", "A"]);
+  });
+  it("matches name or alias, case/whitespace-insensitive, and always keeps the selection", () => {
+    const aliases = { "UHC Advantage": ["United  Healthcare Medicare"] };
+    expect(searchInsuranceOptions(["Aetna", "UHC Advantage"], "healthcare medicare", aliases)).toEqual(["UHC Advantage"]);
+    expect(searchInsuranceOptions(["Aetna", "UHC Advantage"], "AET")).toEqual(["Aetna"]);
+    expect(searchInsuranceOptions(["Aetna", "UHC Advantage"], "zzz", aliases, "UHC Advantage")).toEqual(["UHC Advantage"]);
   });
 });

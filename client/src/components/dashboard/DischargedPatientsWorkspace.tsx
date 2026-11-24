@@ -30,6 +30,7 @@ export function DischargedPatientsWorkspace({
   onSearchQueryChange,
   insuranceList,
   historicalInsuranceList,
+  insuranceAliases,
   insuranceCounts,
   selectedInsurance,
   onSelectInsurance,
@@ -55,6 +56,7 @@ export function DischargedPatientsWorkspace({
   onSearchQueryChange: (value: string) => void;
   insuranceList: string[];
   historicalInsuranceList?: string[];
+  insuranceAliases?: Record<string, string[]>;
   insuranceCounts: Record<string, number>;
   selectedInsurance: string;
   onSelectInsurance: (insurance: string) => void;
@@ -131,6 +133,7 @@ export function DischargedPatientsWorkspace({
                         <PatientFilters
                           insuranceList={insuranceList}
                           historicalInsuranceList={historicalInsuranceList}
+      insuranceAliases={insuranceAliases}
                           insuranceCounts={insuranceCounts}
                           selectedInsurance={selectedInsurance}
                           onSelectInsurance={onSelectInsurance}

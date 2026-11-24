@@ -1,3 +1,4 @@
+import { isHoldEffective } from '@shared/authRequestHold';
 import { useMemo, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -71,6 +72,11 @@ function UrgencyBadge({ urgency }: { urgency: string }) {
  *  period only (from trpc.visits.authAlerts, the same query the Needs
  *  Attention queue uses). Full period-by-period history stays on /visits;
  *  this never fetches per-patient visit data. */
+/** Shown beside the urgency: the request is on hold for this period (shared/authRequestHold.ts). */
+function OnHoldBadge() {
+  return <span className="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-semibold whitespace-nowrap bg-amber-100 text-amber-900">On Hold</span>;
+}
+
 export function AuthorizationRecordsWorkspace({ onViewVisits }: { onViewVisits: (patientId: string) => void }) {
   const { data: alerts = [], isLoading, error } = trpc.visits.authAlerts.useQuery();
 
@@ -262,7 +268,10 @@ export function AuthorizationRecordsWorkspace({ onViewVisits }: { onViewVisits: 
                     <div key={r.patientId} className="p-4 space-y-3">
                       <div className="flex items-start justify-between gap-2">
                         <p className="font-semibold text-sm text-brand-blue">{r.patientName}</p>
-                        <UrgencyBadge urgency={r.urgency} />
+                        <span className="flex flex-wrap justify-end gap-1">
+                          <UrgencyBadge urgency={r.urgency} />
+                          {isHoldEffective(r) && <OnHoldBadge />}
+                        </span>
                       </div>
                       <p className="text-xs text-muted-foreground">{r.insurance || '—'}</p>
                       <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
@@ -356,7 +365,7 @@ export function AuthorizationRecordsWorkspace({ onViewVisits }: { onViewVisits: 
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap"><StatusBadge status={r.authStatus} /></td>
                           <td className="px-4 py-2.5 text-sm text-muted-foreground whitespace-nowrap">{formatDate(r.authValidUntil)}</td>
                           <td className="px-4 py-2.5 text-sm text-muted-foreground whitespace-nowrap">{formatDate(r.dateAshSubmitted)}</td>
-                          <td className="px-4 py-2.5 text-sm whitespace-nowrap"><UrgencyBadge urgency={r.urgency} /></td>
+                          <td className="px-4 py-2.5 text-sm whitespace-nowrap"><UrgencyBadge urgency={r.urgency} />{isHoldEffective(r) && <> <OnHoldBadge /></>}</td>
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             <Button size="sm" variant="outline" onClick={() => onViewVisits(r.patientId)}>
                               View Visits

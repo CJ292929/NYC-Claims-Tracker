@@ -1,4 +1,4 @@
-import { AlertCircle, AlertTriangle, ArrowRight, Ban, CalendarClock, CalendarX, Clock, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react';
+import { AlertCircle, AlertTriangle, ArrowRight, Ban, CalendarClock, CalendarX, Clock, PauseCircle, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { MetricCard } from '@/components/dashboard/MetricCard';
@@ -80,13 +80,20 @@ export function AuthorizationOverview({ onNavigate }: { onNavigate: (route: stri
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard
           icon={<AlertTriangle className="w-4 h-4 text-destructive" />}
           label="Needs Attention"
           value={metrics.needsAttention}
           sub={`of ${metrics.totalRecords} patients`}
           tone="destructive"
+        />
+        <MetricCard
+          icon={<PauseCircle className="w-4 h-4 text-amber-600" />}
+          label="On Hold"
+          value={metrics.onHold}
+          sub="Requests on hold"
+          tone="gold"
         />
         <MetricCard
           icon={<Clock className="w-4 h-4 text-brand-blue" />}

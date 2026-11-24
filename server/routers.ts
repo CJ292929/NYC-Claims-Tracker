@@ -65,7 +65,10 @@ import {
   listActivityLog,
   listHistoryForEntity,
   ClaimImportRuleError,
+  holdAuthorizationRequest,
+  releaseAuthorizationRequestHold,
 } from "./db";
+import { classifyAuthorizationAlert, HOLD_REASON_MAX } from "@shared/authRequestHold";
 import { commitClaimImport, importCommitInput, importPreviewInput, previewClaimImport } from "./claimImport";
 import { commitClaimCsvImport, csvImportCommitInput, csvImportPreviewInput, CsvTemplateError, previewClaimCsvImport } from "./claimCsvImport";
 import { applyPendingEob, dismissPendingEob, listPendingEob, pendingEobApplyInput, pendingEobDismissInput } from "./pendingEob";
@@ -1070,6 +1073,65 @@ export const appRouter = router({
           dateAshSubmitted: todayMidnight,
         }, actor, { action: "AUTHORIZATION_MARKED_REQUESTED", patientId: input.patientId });
         return { success: true, visitId, date: todayMidnight.toISOString().split("T")[0] };
+      }),
+
+    // Hold Request for Authorization: a temporary, manual pause of ONE
+    // patient's authorization request for the period the alert is about.
+    // Same gate as markAsRequested / approveAuthorization. Atomic + audited
+    // in hold_authorization_request_with_audit; never touches visit rows,
+    // status, expiry, sessions or claims. Refused when the period the caller
+    // saw is no longer the patient's target period (stale screen / approval
+    // in between). A retry of the same hold is a no-op (no second audit row).
+    holdAuthorizationRequest: normalProtectedProcedure
+      .input(z.object({
+        patientId: z.string().uuid(),
+        authPeriod: z.number().int().min(1).nullable(),
+        reason: z.string().trim().min(1, "A reason is required to hold an authorization request").max(HOLD_REASON_MAX),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const [summary] = await getAuthAlertSummaries(input.patientId);
+        if (!summary) throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
+        if (summary.authPeriod !== input.authPeriod) {
+          throw new TRPCError({ code: "CONFLICT", message: "This patient's authorization changed since you loaded it. Reload and try again." });
+        }
+        try {
+          const result = await holdAuthorizationRequest(
+            input.patientId, summary.authPeriod, summary.latestAuthPeriod, input.reason, getActorContext(ctx.user),
+          );
+          return { success: true, ...result };
+        } catch (err: unknown) {
+          const code = (err as { code?: string })?.code;
+          if (code === "P0020") throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
+          if (code === "P0050") throw new TRPCError({ code: "CONFLICT", message: "This patient's authorization changed since you loaded it. Reload and try again." });
+          if (code === "P0051") throw new TRPCError({ code: "CONFLICT", message: "This patient already has a hold on an earlier authorization period. Remove that hold first." });
+          if (code === "22023") throw new TRPCError({ code: "BAD_REQUEST", message: "A reason (500 characters or fewer) is required to hold an authorization request." });
+          throw err;
+        }
+      }),
+
+    // Remove Hold / Resume. Releases the hold (audited; a retry or a
+    // concurrent resume is a no-op), then re-derives the patient's category
+    // from current data — the patient goes back to Authorization Alerts only
+    // if they still need attention.
+    releaseAuthorizationRequestHold: normalProtectedProcedure
+      .input(z.object({ patientId: z.string().uuid(), holdId: z.string().uuid() }))
+      .mutation(async ({ input, ctx }) => {
+        let changed: boolean;
+        try {
+          changed = await releaseAuthorizationRequestHold(input.patientId, input.holdId, getActorContext(ctx.user));
+        } catch (err: unknown) {
+          const code = (err as { code?: string })?.code;
+          if (code === "P0020") throw new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
+          if (code === "P0052") throw new TRPCError({ code: "NOT_FOUND", message: "Hold not found for this patient" });
+          throw err;
+        }
+        const [summary] = await getAuthAlertSummaries(input.patientId);
+        return {
+          success: true,
+          changed,
+          category: summary ? classifyAuthorizationAlert(summary) : ("ok" as const),
+          urgency: summary?.urgency ?? null,
+        };
       }),
 
     // P4-P31: manually mark one authorization period Expired, or restore it
