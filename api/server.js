@@ -361,7 +361,7 @@ async function getUserByOpenId(openId) {
   return data ? toUser(data) : void 0;
 }
 async function getAllPatients() {
-  const { data, error } = await supabase.from("patients").select("*").order("name", { ascending: true });
+  const { data, error } = await selectAllRows((from, to) => supabase.from("patients").select("*").order("name", { ascending: true }).order("id", { ascending: true }).range(from, to));
   if (error) {
     console.error("[Supabase] getAllPatients:", error);
     return [];
@@ -6238,6 +6238,7 @@ function isHoldEffective(alert) {
 }
 function classifyAuthorizationAlert(alert) {
   if (isHoldEffective(alert)) return "on_hold";
+  if (alert.isActive === false) return "inactive";
   return alert.urgency !== "ok" ? "attention" : "ok";
 }
 var HOLD_REASON_MAX = 500;
