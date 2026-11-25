@@ -30,7 +30,7 @@ import { SignJWT } from "jose";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { AuthenticatedUser } from "./_core/sdk";
 import type { TrpcContext } from "./_core/context";
-import { classifyAuthorizationAlert } from "../shared/authRequestHold";
+import { classifyAuthorizationAlert, heldAuthorizationAlerts } from "../shared/authRequestHold";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..");
 const MIGRATIONS_DIR = path.join(REPO_ROOT, "supabase", "migrations");
@@ -348,24 +348,88 @@ describeDb("Hold Request for Authorization through the real app + PostgREST (max
     expect(classifyAuthorizationAlert(reactivated)).toBe("attention");
   });
 
-  it("a held patient stays held and findable through discharge and reactivation", async () => {
+  // Requirement change 2026-11-25: a discharged patient leaves the On Hold
+  // card/count/list too, but the hold row, reason and audit stay stored.
+  // Activity comes from patients.is_active, never from the hold reason text.
+  it("discharge removes a held patient from On Hold but keeps the hold; reactivation re-derives it", async () => {
     const p = await seedPatient("Synthetic Held Discharged", [{ auth: 4, used: 3, pending: true }]);
-    const { holdId } = await api().holdAuthorizationRequest({ patientId: p, authPeriod: 1, reason: "Waiting on referral" });
+    const { holdId } = await api().holdAuthorizationRequest({ patientId: p, authPeriod: 1, reason: "Discharged soon? waiting on referral" });
+    const auditsBefore = await heldAudits(p);
+    expect(classifyAuthorizationAlert(await alertFor(p))).toBe("on_hold"); // "Discharged" in the reason ≠ discharged
 
     await caller().patients.setActive({ id: p, isActive: false });
     const row = await alertFor(p);
-    expect(row).toMatchObject({ isActive: false, hold: { holdId, reason: "Waiting on referral" } });
-    expect(classifyAuthorizationAlert(row)).toBe("on_hold");
-    expect(await activeHolds(p)).toEqual([{ id: holdId, auth_period: 1, reason: "Waiting on referral" }]);
+    expect(row).toMatchObject({ isActive: false, hold: { holdId, reason: "Discharged soon? waiting on referral" } });
+    expect(classifyAuthorizationAlert(row)).toBe("inactive");
+    expect(heldAuthorizationAlerts(await api().authAlerts()).map(a => a.patientId)).not.toContain(p);
+    expect(await activeHolds(p)).toEqual([{ id: holdId, auth_period: 1, reason: "Discharged soon? waiting on referral" }]);
+    expect(await heldAudits(p)).toEqual(auditsBefore);
 
     await caller().patients.setActive({ id: p, isActive: true, dischargeDate: null, dischargeReason: null });
     expect(await activeHolds(p)).toHaveLength(1); // reactivation doesn't resume it either
-    expect(classifyAuthorizationAlert(await alertFor(p))).toBe("on_hold");
+    expect(classifyAuthorizationAlert(await alertFor(p))).toBe("on_hold"); // same period → On Hold again
 
     // Resuming while discharged reports the discharged category, not an alert.
     await caller().patients.setActive({ id: p, isActive: false });
     const out = await api().releaseAuthorizationRequestHold({ patientId: p, holdId });
     expect(out).toMatchObject({ changed: true, category: "inactive" });
+  });
+
+  it("reactivation never revives a hold from an older authorization period", async () => {
+    const p = await seedPatient("Synthetic Old Hold", [{ auth: 4, used: 3, pending: true }]);
+    await api().holdAuthorizationRequest({ patientId: p, authPeriod: 1, reason: "Waiting on referral" });
+    await caller().patients.setActive({ id: p, isActive: false });
+    // While discharged, period 1 is used up and a newer period 2 appears.
+    await q(`UPDATE visit_records SET date_of_service = '2026-01-04', auth_status = 'approved'
+             WHERE patient_id = $1 AND auth_period = 1 AND session_number = 4`, [p]);
+    for (let s = 1; s <= 4; s++) {
+      await q(`INSERT INTO visit_records (patient_id, sessions_authorized, session_number, auth_period, date_of_service, auth_status)
+               VALUES ($1, 4, $2, 2, $3, $4)`, [p, s, s <= 3 ? `2026-03-0${s}` : null, s === 4 ? "pending" : "approved"]);
+    }
+    await caller().patients.setActive({ id: p, isActive: true, dischargeDate: null, dischargeReason: null });
+    const row = await alertFor(p);
+    expect(row.authPeriod).toBe(2);
+    expect(row.hold).toMatchObject({ authPeriod: 1 }); // still stored, superseded
+    expect(classifyAuthorizationAlert(row)).not.toBe("on_hold");
+    expect(classifyAuthorizationAlert(row)).toBe(row.urgency === "ok" ? "ok" : "attention");
+  });
+
+  // Regression: getFollowUpClaims / getStatusCounts were single unpaginated
+  // reads, silently capped at PostgREST's 1000 rows (Claims Follow-Up list
+  // AND its KPI count were short). 1,500 qualifying claims over 3 insurers,
+  // plus resolved and paid rows that must stay out.
+  it("Claims Follow-Up returns every qualifying claim past the 1000-row cap, across insurers, no duplicates", async () => {
+    await q(`INSERT INTO patients (name, insurance, is_active)
+             SELECT 'Claims ' || lpad(g::text, 3, '0'), (ARRAY['Aetna','Meritain','BCBS'])[1 + g % 3], g % 5 <> 0
+             FROM generate_series(1, 150) g`);
+    await q(`INSERT INTO claims_records (patient_id, auth_period, date_of_service, cpt_codes, charge_amount, claim_status)
+             SELECT p.id, 1, '2026-02-01'::date + s, '97110', 100, 'denied'
+             FROM patients p CROSS JOIN generate_series(1, 10) s WHERE p.name LIKE 'Claims %'`);
+    await q(`INSERT INTO claims_records (patient_id, auth_period, date_of_service, cpt_codes, charge_amount, claim_status, is_resolved)
+             SELECT p.id, 1, '2026-03-01', '97110', 100, 'denied', true FROM patients p WHERE p.name LIKE 'Claims %'`);
+    await q(`INSERT INTO claims_records (patient_id, auth_period, date_of_service, cpt_codes, charge_amount, insurance_reimbursement, claim_status)
+             SELECT p.id, 1, '2026-03-02', '97110', 100, 80, 'approved' FROM patients p WHERE p.name LIKE 'Claims %'`);
+
+    const all = await caller(CLINIC_ADMIN).claims.getFollowUpClaims({});
+    expect(all).toHaveLength(1500);
+    expect(new Set(all.map((c: { id: string }) => c.id)).size).toBe(1500);
+    const byIns = (rows: Array<{ insurance: string }>) => rows.reduce<Record<string, number>>((m, c) => ({ ...m, [c.insurance]: (m[c.insurance] ?? 0) + 1 }), {});
+    expect(byIns(all)).toEqual({ Aetna: 500, Meritain: 500, BCBS: 500 });
+    // Discharged patients' unpaid claims stay in financial follow-up.
+    const discharged = await q<{ id: string }>(`SELECT id FROM patients WHERE name LIKE 'Claims %' AND is_active = false`);
+    expect(discharged).toHaveLength(30);
+    const ids = new Set(all.map((c: { patientId: string }) => c.patientId));
+    for (const d of discharged) expect(ids.has(d.id)).toBe(true);
+
+    const meritain = await caller(CLINIC_ADMIN).claims.getFollowUpClaims({ insurance: "Meritain" });
+    expect(meritain).toHaveLength(500);
+    expect(meritain.every((c: { insurance: string }) => c.insurance === "Meritain")).toBe(true);
+
+    const counts = await caller(CLINIC_ADMIN).claims.getStatusCounts({});
+    expect(counts.counts).toMatchObject({ all: 1800, denied: 1650, approved: 150 });
+
+    await expect(caller().claims.getFollowUpClaims({})).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(caller().claims.getStatusCounts({})).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 
   it("patients.list is complete past the 1000-row cap", async () => {

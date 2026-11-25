@@ -113,11 +113,28 @@ describe("discharged patients are never actionable", () => {
     expect(classifyAuthorizationAlert({ urgency: "critical", authPeriod: 1, isActive: true })).toBe("attention");
   });
 
-  it("an effective hold wins (still On Hold and counted); a superseded hold on a discharged row is inactive", () => {
-    expect(classifyAuthorizationAlert({ urgency: "critical", authPeriod: 2, hold: hold(2), isActive: false })).toBe("on_hold");
+  // Requirement change 2026-11-25: discharged patients also leave the On Hold
+  // card/count/list. The hold itself stays stored (only the classification moves).
+  it("a discharged row is inactive even with an effective hold, and is not listed On Hold", () => {
+    expect(classifyAuthorizationAlert({ urgency: "critical", authPeriod: 2, hold: hold(2), isActive: false })).toBe("inactive");
     expect(classifyAuthorizationAlert({ urgency: "critical", authPeriod: 3, hold: hold(2), isActive: false })).toBe("inactive");
-    // Still listed under Authorization Requests on Hold.
-    expect(heldAuthorizationAlerts([{ urgency: "ok" as const, authPeriod: 3, hold: hold(2), isActive: false }])).toHaveLength(1);
+    expect(heldAuthorizationAlerts([
+      { urgency: "ok" as const, authPeriod: 3, hold: hold(2), isActive: false },
+      { urgency: "ok" as const, authPeriod: 2, hold: hold(2), isActive: false },
+    ])).toHaveLength(0);
+    // Active rows are unchanged: effective and superseded holds both listed.
+    expect(heldAuthorizationAlerts([
+      { urgency: "ok" as const, authPeriod: 3, hold: hold(2), isActive: true },
+      { urgency: "ok" as const, authPeriod: 2, hold: hold(2) },
+    ])).toHaveLength(2);
+  });
+
+  it("reactivation: same-period hold is On Hold again; an older-period hold is not revived", () => {
+    const sameRow = { urgency: "critical" as const, authPeriod: 2, hold: hold(2), isActive: false };
+    const oldRow = { urgency: "critical" as const, authPeriod: 3, hold: hold(2), isActive: false };
+    expect(classifyAuthorizationAlert({ ...sameRow, isActive: true })).toBe("on_hold");
+    expect(classifyAuthorizationAlert({ ...oldRow, isActive: true })).toBe("attention");
+    expect(classifyAuthorizationAlert({ ...oldRow, urgency: "ok", isActive: true })).toBe("ok");
   });
 
   it("counts, list and KPI exclude discharged rows; reactivation restores only eligible ones", () => {
@@ -129,10 +146,10 @@ describe("discharged patients are never actionable", () => {
       row("Discharged On Track", { urgency: "ok", isActive: false }),
     ];
     const m = deriveAuthorizationOverviewMetrics(rows);
-    expect(m).toMatchObject({ needsAttention: 1, onHold: 1, critical: 1, denied: 0, pending: 0, totalRecords: 1, discharged: 4 });
+    expect(m).toMatchObject({ needsAttention: 1, onHold: 0, critical: 1, denied: 0, pending: 0, totalRecords: 1, discharged: 4 });
     expect(getTopAuthorizationAttention(rows, 10).map(r => r.patientName)).toEqual(["Active Critical"]);
     const kpis = deriveDashboardKpis({ activePatientCount: 1, authAlerts: rows, followUpClaimCount: 3, completedPatientCount: 0 });
-    expect(kpis).toMatchObject({ authorizationAttention: 1, pendingAuthorizationRequest: 1, claimsFollowUp: 3 });
+    expect(kpis).toMatchObject({ authorizationAttention: 1, pendingAuthorizationRequest: 0, claimsFollowUp: 3 });
 
     const reactivated = rows.map(r => ({ ...r, isActive: true }));
     expect(getTopAuthorizationAttention(reactivated, 10).map(r => r.patientName).sort())

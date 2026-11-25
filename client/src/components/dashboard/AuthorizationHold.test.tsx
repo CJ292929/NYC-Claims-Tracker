@@ -103,10 +103,12 @@ describe("HoldAuthorizationRequestDialog", () => {
 });
 
 describe("AuthorizationHoldsPanel", () => {
-  it("lists every held patient once with insurer, reason, date and actor; flags a superseded hold", () => {
+  it("lists every active held patient once with insurer, reason, date and actor; flags a superseded hold; omits discharged", () => {
     h.alerts = [
       { patientId: P1, patientName: "Held Pending", insurance: "Synthetic Ins", urgency: "pending", authStatus: "pending", authPeriod: 2, isActive: true, hold: hold(2) },
-      { patientId: "p2", patientName: "Old Hold", insurance: "Other Ins", urgency: "critical", authStatus: "approved", authPeriod: 3, isActive: false, hold: hold(2) },
+      { patientId: "p2", patientName: "Old Hold", insurance: "Other Ins", urgency: "critical", authStatus: "approved", authPeriod: 3, isActive: true, hold: hold(2) },
+      // Discharged patients leave the On Hold list (hold kept in patient history).
+      { patientId: "p4", patientName: "Discharged Held", insurance: "Other Ins", urgency: "pending", authStatus: "pending", authPeriod: 2, isActive: false, hold: hold(2) },
       { patientId: "p3", patientName: "Not Held", insurance: "X", urgency: "critical", authStatus: "approved", authPeriod: 1, isActive: true, hold: null },
     ];
     render(<AuthorizationHoldsPanel onSelectPatient={() => {}} />);
@@ -122,7 +124,7 @@ describe("AuthorizationHoldsPanel", () => {
     expect(first.getByText(/by Synthetic Staff/)).toBeTruthy();
     expect(first.queryByText(/Superseded/)).toBeNull();
     const second = within(items[1]);
-    expect(second.getByText(/Discharged/)).toBeTruthy(); // still findable after discharge
+    expect(screen.queryByText("Discharged Held")).toBeNull();
     expect(second.getByText(/Superseded/)).toBeTruthy();
   });
 

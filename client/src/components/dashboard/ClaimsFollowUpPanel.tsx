@@ -11,7 +11,17 @@ import {
   formatDateOrDash,
 } from './claimsFollowUpViewState';
 
-export function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?: string; onSelectPatient: (id: string) => void }) {
+/**
+ * previewLimit: show only the first N (most urgent) rows, labelled
+ * "Showing X of Y" with a View All action. The full list (no limit) lives on
+ * /claims/follow-up. Rows and count come from one query, so they always agree.
+ */
+export function ClaimsFollowUpPanel({ insurance, onSelectPatient, previewLimit, onViewAll }: {
+  insurance?: string;
+  onSelectPatient: (id: string) => void;
+  previewLimit?: number;
+  onViewAll?: () => void;
+}) {
   const utils = trpc.useUtils();
   // Scoped by the same insurance filter as the Claims Status counts and the
   // Patients list, so this panel can never disagree with them on screen.
@@ -41,6 +51,8 @@ export function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?
   });
 
   const viewState = getClaimsFollowUpViewState({ isLoading, isError, data: followUpClaims });
+  const visibleClaims = previewLimit != null ? followUpClaims.slice(0, previewLimit) : followUpClaims;
+  const isPreview = visibleClaims.length < followUpClaims.length;
 
   const handleResolve = (e: React.MouseEvent, claimId: string) => {
     e.stopPropagation();
@@ -48,8 +60,8 @@ export function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?
   };
 
   return (
-    <Card className="border-border shadow-sm rounded-xl h-full flex flex-col py-0 gap-0 overflow-hidden">
-      <CardHeader className="flex-row items-center justify-between gap-2 border-b border-border px-4 py-3 shrink-0 [.border-b]:pb-3">
+    <Card className="border-border shadow-sm rounded-xl flex flex-col py-0 gap-0 overflow-hidden">
+      <CardHeader className="flex flex-row items-center justify-between gap-2 border-b border-border px-4 py-3 shrink-0 [.border-b]:pb-3">
         <CardTitle className="flex items-center gap-2 text-sm font-semibold text-brand-blue">
           <AlertCircle className="w-4 h-4 text-amber-500" />
           Claims Follow-Up Needed
@@ -63,7 +75,17 @@ export function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?
           </span>
         )}
       </CardHeader>
-      <CardContent className="p-0 flex-1 min-h-0 overflow-y-auto max-h-[350px]">
+      {viewState === 'data' && (isPreview || onViewAll) && (
+        <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-1.5 text-xs text-muted-foreground border-b border-border">
+          <span data-testid="follow-up-showing">Showing {visibleClaims.length} of {followUpClaims.length}</span>
+          {onViewAll && (
+            <Button variant="link" size="sm" className="h-auto p-0 text-xs text-brand-blue" onClick={onViewAll}>
+              View all claims follow-up →
+            </Button>
+          )}
+        </div>
+      )}
+      <CardContent className={`p-0 overflow-y-auto ${previewLimit != null ? 'max-h-[420px]' : 'max-h-[70vh]'}`}>
         {viewState === 'loading' ? (
           <div className="p-4 text-sm text-muted-foreground">Loading claims…</div>
         ) : viewState === 'error' ? (
@@ -81,7 +103,7 @@ export function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?
             {/* Narrow/tablet: stacked cards. The panel only gets ~650-780px at lg
                 (8/12 of the content grid), too tight for a 9-column table. */}
             <div className="xl:hidden divide-y divide-border">
-              {followUpClaims.map((claim) => {
+              {visibleClaims.map((claim) => {
                 const status = claim.claimStatus ?? 'submitted';
                 const s = getFollowUpRowStyle(status);
                 return (
@@ -159,11 +181,11 @@ export function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?
                     <th className="px-3 py-2 text-right">Charged</th>
                     <th className="px-3 py-2 text-right">Reimbursed</th>
                     <th className="px-3 py-2">Status</th>
-                    <th className="px-3 py-2 text-right">Action</th>
+                    <th className="px-3 py-2 text-right sticky right-0 bg-brand-cream">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {followUpClaims.map((claim) => {
+                  {visibleClaims.map((claim) => {
                     const status = claim.claimStatus ?? 'submitted';
                     const s = getFollowUpRowStyle(status);
                     return (
@@ -175,7 +197,7 @@ export function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?
                         <td className="px-3 py-2 font-medium text-brand-blue whitespace-nowrap max-w-[160px] truncate">
                           {claim.patientName}
                           {claim.followUpReason && (
-                            <span className="block text-[10px] font-semibold uppercase tracking-wide text-amber-600">
+                            <span title={claim.followUpReason} className="block truncate text-[10px] font-semibold uppercase tracking-wide text-amber-600">
                               {claim.followUpReason}
                             </span>
                           )}
@@ -197,7 +219,7 @@ export function ClaimsFollowUpPanel({ insurance, onSelectPatient }: { insurance?
                         <td className="px-3 py-2 whitespace-nowrap">
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold capitalize ${s.badge}`}>{status}</span>
                         </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-right">
+                        <td className="px-3 py-2 whitespace-nowrap text-right sticky right-0 bg-white/95 shadow-[-6px_0_6px_-6px_rgba(0,0,0,0.15)]">
                           <Button
                             size="sm"
                             variant="outline"

@@ -104,6 +104,9 @@ interface DbVisit {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/** Rows the Dashboard's Claims Follow-Up preview shows (most urgent first); View All opens /claims/follow-up. */
+const DASHBOARD_FOLLOW_UP_PREVIEW = 8;
+
 const CLAIM_STATUS_FILTERS = [
   { value: 'all', label: 'All Claims', color: 'bg-gray-100 text-gray-800' },
   { value: 'submitted', label: 'Submitted', color: 'bg-blue-100 text-blue-800' },
@@ -3846,16 +3849,23 @@ export default function Dashboard() {
         {/* ─── Needs Attention ────────────────────────────────────────────── */}
         <section>
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground mb-3">Needs Attention</h2>
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 xl:gap-6">
+          {/* items-start: each column keeps its own height — stretching the
+              shorter column to the taller one left a large empty card body. */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 xl:gap-6 lg:items-start">
             <div className={`${canAccessClaims ? 'lg:col-span-4' : 'lg:col-span-12'} space-y-4`}>
               <AuthAlertPanel onSelectPatient={(id) => selectPatient(id, '/visits')} insurance={authAlertInsurance} onInsuranceChange={setAuthAlertInsurance} />
               <AuthorizationHoldsPanel onSelectPatient={(id) => selectPatient(id, '/visits')} />
             </div>
             {canAccessClaims && (
             <div className="lg:col-span-8">
+              {/* Clinic-wide (no insurance scope), the same rows the Claims
+                  Follow-Up KPI counts. It used to take selectedInsurance — the
+                  Patient Records filter, which defaults to "Aetna" and follows
+                  the last opened patient — so only one insurer's claims showed. */}
               <ClaimsFollowUpPanel
-                insurance={selectedInsurance}
                 onSelectPatient={(id) => selectPatient(id, '/claims')}
+                previewLimit={DASHBOARD_FOLLOW_UP_PREVIEW}
+                onViewAll={() => navigate('/claims/follow-up')}
               />
             </div>
             )}

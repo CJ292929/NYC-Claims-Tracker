@@ -113,8 +113,8 @@ export function AuthAlertPanel({
   const filtered = selected !== '';
 
   return (
-    <Card className="border-border shadow-sm rounded-xl h-full flex flex-col py-0 gap-0 overflow-hidden">
-      <CardHeader className="flex-row items-center justify-between gap-2 border-b border-border px-4 py-3 shrink-0 [.border-b]:pb-3">
+    <Card className="border-border shadow-sm rounded-xl flex flex-col py-0 gap-0 overflow-hidden">
+      <CardHeader className="flex flex-row items-center justify-between gap-2 border-b border-border px-4 py-3 shrink-0 [.border-b]:pb-3">
         <CardTitle className="flex items-center gap-2 text-sm font-semibold text-brand-blue">
           <BellRing className="w-4 h-4 text-brand-gold" />
           Authorization Alerts
@@ -145,7 +145,7 @@ export function AuthAlertPanel({
           </p>
         </div>
       )}
-      <CardContent className="p-0 flex-1 min-h-0 overflow-y-auto max-h-[350px]">
+      <CardContent className="p-0 overflow-y-auto max-h-[350px]">
         {error ? (
           <div className="flex items-start gap-2.5 p-4 text-sm">
             <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />

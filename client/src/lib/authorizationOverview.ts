@@ -75,8 +75,8 @@ export function deriveAuthorizationOverviewMetrics(
     const category = classifyAuthorizationAlert(record);
     if (category === 'on_hold') onHold++;
     // A discharged patient's authorization isn't actionable — keep them out
-    // of every urgency/status count (an effective hold is still counted
-    // above, so the On Hold count matches its list).
+    // of every urgency/status count. Their category is "inactive", so they
+    // are not in onHold either (matching the On Hold list).
     if (record.isActive === false) { discharged++; continue; }
     urgencyDistribution[record.urgency]++;
     if ((AUTH_STATUS_VALUES as readonly string[]).includes(record.authStatus)) {

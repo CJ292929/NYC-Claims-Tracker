@@ -642,7 +642,7 @@ export async function bulkCreateVisitRecords(
  *  empty page, so the result is complete whatever the server's cap is. The
  *  caller's query must have a total order (end with a unique column). */
 const BULK_PAGE_SIZE = 1000;
-async function selectAllRows<T>(
+export async function selectAllRows<T>(
   page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>,
 ): Promise<{ data: T[]; error: unknown }> {
   const rows: T[] = [];
