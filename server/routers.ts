@@ -43,6 +43,7 @@ import {
   classifyClaimFollowUp,
   sortByFollowUpUrgency,
   aggregateClaimStatusCounts,
+  selectAllRows,
   listClinicUsers,
   createClinicUser,
   updateClinicUserProfile,
@@ -1489,8 +1490,13 @@ export const appRouter = router({
         // Scoped by the selected insurance filter (when provided) so this panel
         // can never disagree with the Claims Status counts or the Patients list,
         // which are scoped the same way — see getStatusCounts below.
+        //
+        // Paged (selectAllRows, stable id order): one unpaginated read is
+        // silently capped at PostgREST's max-rows (1000), which dropped
+        // qualifying claims from the panel AND the Dashboard KPI count.
         const { supabase } = await import('./supabase');
-        let query = supabase
+        const { data, error } = await selectAllRows<any>((from, to) => {
+          let query = supabase
           .from('claims_records')
           .select(`
             id,
@@ -1507,12 +1513,13 @@ export const appRouter = router({
           `)
           .in('claim_status', ['denied', 'rejected', 'pended', 'resubmitted', 'pending', 'submitted', 'approved'])
           .neq('is_resolved', true);
-        if (input?.insurance) {
-          query = query.eq('patients.insurance', input.insurance);
-        }
-        const { data, error } = await query;
+          if (input?.insurance) {
+            query = query.eq('patients.insurance', input.insurance);
+          }
+          return query.order('id', { ascending: true }).range(from, to);
+        });
 
-        if (error) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: error.message });
+        if (error) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: (error as { message?: string }).message ?? 'Failed to load follow-up claims' });
 
         const classified = (data ?? []).flatMap((row: any) => {
           const result = classifyClaimFollowUp({
@@ -1551,16 +1558,19 @@ export const appRouter = router({
         // every count previously read 0. Scoped by insurance the same way as
         // getFollowUpClaims above, so the two panels can never contradict
         // each other on screen.
+        // Paged like getFollowUpClaims — an unpaginated read caps at 1000 rows.
         const { supabase } = await import('./supabase');
-        let query = supabase
-          .from('claims_records')
-          .select('claim_status, patient_id, patients!inner(insurance)');
-        if (input?.insurance) {
-          query = query.eq('patients.insurance', input.insurance);
-        }
-        const { data, error } = await query;
+        const { data, error } = await selectAllRows<any>((from, to) => {
+          let query = supabase
+            .from('claims_records')
+            .select('id, claim_status, patient_id, patients!inner(insurance)');
+          if (input?.insurance) {
+            query = query.eq('patients.insurance', input.insurance);
+          }
+          return query.order('id', { ascending: true }).range(from, to);
+        });
 
-        if (error) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: error.message });
+        if (error) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: (error as { message?: string }).message ?? 'Failed to load claim status counts' });
 
         return aggregateClaimStatusCounts(
           (data ?? []).map((row: any) => ({

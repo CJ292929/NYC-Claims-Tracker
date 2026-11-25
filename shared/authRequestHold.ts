@@ -11,13 +11,16 @@
 // "superseded": it stops suppressing anything, and the row is classified
 // from its current data exactly as if there were no hold.
 //
-// A discharged patient (isActive === false) is never actionable: their row is
-// "inactive" — out of Authorization Alerts and every attention count — while
-// all period/session/history data is untouched. An effective hold still wins
-// (the row stays "on_hold"), so a held patient remains findable and counted
-// on the On Hold page whatever their activity; discharge never creates,
-// resumes or deletes a hold. Reactivating simply re-derives the category
-// from current data. Claims are not classified here and are unaffected.
+// A discharged patient (stored isActive === false — never inferred from hold
+// or note text) is never operational: their row is "inactive" — out of
+// Authorization Alerts, every attention count AND the On Hold card/count/list
+// (client requirement 2026-11-25, superseding "a held patient stays on the On
+// Hold page"). Discharge never creates, resumes or deletes a hold: the hold
+// row, its reason and its audit trail stay stored and visible in the
+// patient's own detail/history. Reactivating re-derives the category from
+// current data: a hold placed on the current period is effective again
+// ("on_hold"); a hold from an older period stays superseded and suppresses
+// nothing. Claims are not classified here and are unaffected.
 import type { AuthUrgency } from "./authUrgency";
 
 export interface AuthorizationRequestHoldInfo {
@@ -52,15 +55,16 @@ export function isHoldSuperseded(alert: ClassifiableAlert): boolean {
 }
 
 export function classifyAuthorizationAlert(alert: ClassifiableAlert): AuthorizationAlertCategory {
-  if (isHoldEffective(alert)) return "on_hold";
   if (alert.isActive === false) return "inactive";
+  if (isHoldEffective(alert)) return "on_hold";
   return alert.urgency !== "ok" ? "attention" : "ok";
 }
 
-/** Rows to list under "Authorization Requests on Hold": every active hold,
- *  effective or superseded, so a held patient is always findable. */
+/** Rows to list under "Authorization Requests on Hold": every active hold of
+ *  an active (not discharged) patient, effective or superseded. Discharged
+ *  patients' holds are kept but shown only in their patient history. */
 export function heldAuthorizationAlerts<T extends ClassifiableAlert>(alerts: T[]): T[] {
-  return alerts.filter(a => !!a.hold);
+  return alerts.filter(a => !!a.hold && a.isActive !== false);
 }
 
 export const HOLD_REASON_MAX = 500;

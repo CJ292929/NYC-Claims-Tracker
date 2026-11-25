@@ -196,7 +196,7 @@ export function AuthorizationHoldsPanel({ onSelectPatient }: { onSelectPatient: 
 
   return (
     <Card className="border-border shadow-sm rounded-xl flex flex-col py-0 gap-0 overflow-hidden">
-      <CardHeader className="flex-row items-center justify-between gap-2 border-b border-border px-4 py-3 [.border-b]:pb-3">
+      <CardHeader className="flex flex-row items-center justify-between gap-2 border-b border-border px-4 py-3 [.border-b]:pb-3">
         <CardTitle className="flex items-center gap-2 text-sm font-semibold text-brand-blue">
           <PauseCircle className="w-4 h-4 text-amber-600" />
           Authorization Requests on Hold
@@ -229,7 +229,6 @@ export function AuthorizationHoldsPanel({ onSelectPatient }: { onSelectPatient: 
                       <p className="font-semibold text-sm text-brand-blue truncate">{a.patientName}</p>
                       <p className="text-xs text-muted-foreground truncate">
                         {a.insurance || '—'} · {hold.authPeriod === null ? 'Initial request' : `Period ${hold.authPeriod}`}
-                        {' · '}{a.isActive ? 'Active' : <span className="font-semibold text-red-700">Discharged</span>}
                       </p>
                     </button>
                     <Button

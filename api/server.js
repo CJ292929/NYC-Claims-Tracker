@@ -239,6 +239,7 @@ __export(db_exports, {
   reactivateInsurerCatalogEntry: () => reactivateInsurerCatalogEntry,
   releaseAuthorizationRequestHold: () => releaseAuthorizationRequestHold,
   reopenDismissedEobLine: () => reopenDismissedEobLine,
+  selectAllRows: () => selectAllRows,
   setAuthPeriodExpired: () => setAuthPeriodExpired,
   setPatientActive: () => setPatientActive,
   sortByFollowUpUrgency: () => sortByFollowUpUrgency,
@@ -6237,8 +6238,8 @@ function isHoldEffective(alert) {
   return !!alert.hold && alert.hold.authPeriod === alert.authPeriod;
 }
 function classifyAuthorizationAlert(alert) {
-  if (isHoldEffective(alert)) return "on_hold";
   if (alert.isActive === false) return "inactive";
+  if (isHoldEffective(alert)) return "on_hold";
   return alert.urgency !== "ok" ? "attention" : "ok";
 }
 var HOLD_REASON_MAX = 500;
@@ -9380,7 +9381,8 @@ var appRouter = router({
     }),
     getFollowUpClaims: claimsAccessProcedure.input(z7.object({ insurance: z7.string().optional() }).optional()).query(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
-      let query = supabase2.from("claims_records").select(`
+      const { data, error } = await selectAllRows((from, to) => {
+        let query = supabase2.from("claims_records").select(`
             id,
             patient_id,
             auth_period,
@@ -9393,11 +9395,12 @@ var appRouter = router({
             expire_bcbs_claim_number,
             patients!inner(id, name, insurance)
           `).in("claim_status", ["denied", "rejected", "pended", "resubmitted", "pending", "submitted", "approved"]).neq("is_resolved", true);
-      if (input?.insurance) {
-        query = query.eq("patients.insurance", input.insurance);
-      }
-      const { data, error } = await query;
-      if (error) throw new TRPCError3({ code: "INTERNAL_SERVER_ERROR", message: error.message });
+        if (input?.insurance) {
+          query = query.eq("patients.insurance", input.insurance);
+        }
+        return query.order("id", { ascending: true }).range(from, to);
+      });
+      if (error) throw new TRPCError3({ code: "INTERNAL_SERVER_ERROR", message: error.message ?? "Failed to load follow-up claims" });
       const classified = (data ?? []).flatMap((row) => {
         const result = classifyClaimFollowUp({
           claimStatus: row.claim_status,
@@ -9426,12 +9429,14 @@ var appRouter = router({
     }),
     getStatusCounts: claimsAccessProcedure.input(z7.object({ insurance: z7.string().optional() }).optional()).query(async ({ input }) => {
       const { supabase: supabase2 } = await Promise.resolve().then(() => (init_supabase(), supabase_exports));
-      let query = supabase2.from("claims_records").select("claim_status, patient_id, patients!inner(insurance)");
-      if (input?.insurance) {
-        query = query.eq("patients.insurance", input.insurance);
-      }
-      const { data, error } = await query;
-      if (error) throw new TRPCError3({ code: "INTERNAL_SERVER_ERROR", message: error.message });
+      const { data, error } = await selectAllRows((from, to) => {
+        let query = supabase2.from("claims_records").select("id, claim_status, patient_id, patients!inner(insurance)");
+        if (input?.insurance) {
+          query = query.eq("patients.insurance", input.insurance);
+        }
+        return query.order("id", { ascending: true }).range(from, to);
+      });
+      if (error) throw new TRPCError3({ code: "INTERNAL_SERVER_ERROR", message: error.message ?? "Failed to load claim status counts" });
       return aggregateClaimStatusCounts(
         (data ?? []).map((row) => ({
           claimStatus: row.claim_status,
