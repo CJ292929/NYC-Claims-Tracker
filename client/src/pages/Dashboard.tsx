@@ -60,6 +60,7 @@ import { PatientBulkUploadDialog } from '@/components/dashboard/PatientBulkUploa
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { sumKnownMoney } from '@shared/claimImport';
 import { formatCalendarDate } from '@/lib/date';
+import { addedAfterLaterVisitIds, orderPeriodVisitsForDisplay } from '@/lib/periodDisplayOrder';
 import type { AuthUrgency } from '@shared/authUrgency';
 
 /**
@@ -1880,6 +1881,10 @@ export default function Dashboard() {
                   const periodInsurance = periodVisits.find(v => v.insuranceCompany)?.insuranceCompany ?? null;
                   const isActive = period === activePeriod;
                   const periodMetrics = getPeriodMetrics(periodVisits, period);
+                  // Display only: dated rows in Date of Service order (a backfilled
+                  // visit can hold a higher Session #); stored values are unchanged.
+                  const displayVisits = orderPeriodVisitsForDisplay(periodVisits);
+                  const addedLaterIds = addedAfterLaterVisitIds(periodVisits);
                   // P4-P23: the session table no longer shows the three
                   // financial totals (or their Claims-derived auto-fill and
                   // period Totals footer) for any role — those values stay
@@ -1976,7 +1981,7 @@ export default function Dashboard() {
                       <CardContent className="p-0">
                         {/* Mobile Visit Cards — below md */}
                         <div className="md:hidden divide-y divide-gray-100 bg-white">
-                          {periodVisits.map((visit) => {
+                          {displayVisits.map((visit) => {
                             return (
                             <div key={visit.id} className="p-4 space-y-3">
                               <div className="flex items-center justify-between gap-2">
@@ -1996,6 +2001,11 @@ export default function Dashboard() {
                                         return saveVisitField(visit.id, { sessionNumber: parsed }, 'Session # saved');
                                       }}
                                     />
+                                    {addedLaterIds.has(visit.id) && (
+                                      <span className="block mt-0.5 text-[10px] font-normal text-gray-500 normal-case" title="Recorded after a later visit. Session # and # Remaining are as recorded at entry.">
+                                        Added later · # Remaining as recorded
+                                      </span>
+                                    )}
                                   </span>
                                 </div>
                                 <VisitAuthStatusSelect
@@ -2142,7 +2152,7 @@ export default function Dashboard() {
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-100">
-                      {periodVisits.map((visit) => {
+                      {displayVisits.map((visit) => {
                         return (
                         <tr key={visit.id} className="hover:bg-brand-cream/30 transition-colors">
                           {/* Authorize Session Date (label only renamed, P4-P23 — same underlying date) */}
@@ -2201,6 +2211,11 @@ export default function Dashboard() {
                                   return saveVisitField(visit.id, { sessionNumber: parsed }, 'Session # saved');
                                 }}
                               />
+                              {addedLaterIds.has(visit.id) && (
+                                <span className="block mt-0.5 text-[10px] font-normal text-gray-500 normal-case" title="Recorded after a later visit. Session # and # Remaining are as recorded at entry.">
+                                  Added later · # Remaining as recorded
+                                </span>
+                              )}
                             </div>
                           </td>
                           {/* Date of Service — EDITABLE */}
