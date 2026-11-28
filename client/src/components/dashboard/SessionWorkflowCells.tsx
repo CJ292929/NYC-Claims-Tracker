@@ -5,7 +5,8 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { trpc } from '@/lib/trpc';
-import { createRequestGuard } from '@/lib/concurrencyGuards';
+import { createRequestGuard, createSingleFlightGuard } from '@/lib/concurrencyGuards';
+import { inlineKeyIntent, MOD_ENTER_HINT } from '@/lib/keyboardEntry';
 import {
   mergeSavedSessionField,
   normalizeRemarksDraft,
@@ -132,6 +133,24 @@ export function RemarksCell({ patientId, visit }: { patientId: string; visit: Se
   const { value, state, save } = useSessionFieldSave(patientId, visit, 'remarks');
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  // Ctrl/Cmd+Enter and the Save click share one in-flight save.
+  const flight = useRef(createSingleFlightGuard());
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const hintId = `remarks-hint-${visit.id}`;
+
+  const close = () => {
+    setEditing(false);
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+  const commit = async () => {
+    if (draft.length > SESSION_REMARKS_MAX_LENGTH || !flight.current.tryEnter()) return;
+    try {
+      // On failure the editor stays open with the typed remarks.
+      if (await save(normalizeRemarksDraft(draft))) close();
+    } finally {
+      flight.current.exit();
+    }
+  };
 
   if (editing) {
     const tooLong = draft.length > SESSION_REMARKS_MAX_LENGTH;
@@ -140,19 +159,24 @@ export function RemarksCell({ patientId, visit }: { patientId: string; visit: Se
         <Textarea
           value={draft}
           onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => {
+            // Enter types a newline; Ctrl/Cmd+Enter saves; Escape cancels.
+            const intent = inlineKeyIntent(e, { multiline: true });
+            if (intent === 'save') { e.preventDefault(); void commit(); }
+            else if (intent === 'cancel' && !flight.current.isBusy) { e.preventDefault(); close(); }
+          }}
           autoFocus
           rows={3}
           aria-label="Remarks"
           aria-invalid={tooLong}
+          aria-describedby={hintId}
           className="text-sm min-h-[72px]"
         />
         <div className="flex items-center gap-2 flex-wrap">
           <Button
             size="sm"
             disabled={state === 'saving' || tooLong}
-            onClick={async () => {
-              if (await save(normalizeRemarksDraft(draft))) setEditing(false);
-            }}
+            onClick={() => void commit()}
             className="h-auto min-h-[32px] text-green-600 hover:text-green-800 font-bold text-xs px-2 py-1 bg-green-50 hover:bg-green-100"
           >
             {state === 'saving' ? '…' : 'Save'}
@@ -160,7 +184,7 @@ export function RemarksCell({ patientId, visit }: { patientId: string; visit: Se
           <Button
             size="sm"
             variant="secondary"
-            onClick={() => setEditing(false)}
+            onClick={close}
             className="h-auto min-h-[32px] text-gray-500 hover:text-gray-700 font-bold text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200"
           >
             Cancel
@@ -168,6 +192,7 @@ export function RemarksCell({ patientId, visit }: { patientId: string; visit: Se
           <span className={`text-[11px] ${tooLong ? 'text-destructive font-semibold' : 'text-muted-foreground'}`}>
             {draft.length}/{SESSION_REMARKS_MAX_LENGTH}
           </span>
+          <span id={hintId} className="text-[11px] text-muted-foreground">{MOD_ENTER_HINT} · Esc to cancel</span>
         </div>
       </div>
     );
@@ -176,6 +201,8 @@ export function RemarksCell({ patientId, visit }: { patientId: string; visit: Se
   return (
     <div className="flex items-start gap-1.5">
       <button
+        ref={triggerRef}
+        type="button"
         onClick={() => { setDraft(value ?? ''); setEditing(true); }}
         className="hover:underline cursor-pointer text-left text-sm text-gray-700 whitespace-pre-wrap break-words max-w-[260px] line-clamp-3"
         title={value ?? undefined}

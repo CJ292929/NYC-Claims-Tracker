@@ -8,6 +8,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 
+// Inside a <form>, Radix Checkbox renders a hidden native input sized with
+// ResizeObserver, which jsdom lacks (every real browser has it).
+globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver;
+
 const h = vi.hoisted(() => {
   const invalidations: Array<[string, unknown]> = [];
   const inv = (name: string) => (arg?: unknown) => { invalidations.push([name, arg]); };

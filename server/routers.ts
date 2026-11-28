@@ -32,6 +32,7 @@ import {
   createInitialAuthorization,
   correctAuthPeriodSessions,
   setAuthPeriodExpired,
+  addMissingSession,
   getCompletedPatients,
   getClaimsByPatientAndPeriod,
   listPatientClaimPeriods,
@@ -110,7 +111,7 @@ export function toPeriodCorrectionError(err: unknown, authPeriod: number): unkno
     case "P0034": return new TRPCError({ code: "NOT_FOUND", message: `Authorization Period ${authPeriod} was not found for this patient.` });
     case "P0033": return new TRPCError({ code: "BAD_REQUEST", message: "Sessions authorized must be between 1 and 200." });
     case "22023": return new TRPCError({ code: "BAD_REQUEST", message: "The reason must be 500 characters or fewer." });
-    case "P0040": return new TRPCError({ code: "CONFLICT", message: `Authorization Period ${authPeriod} is marked Expired, so its count can't be corrected. Restore the period first (only possible while no newer period exists).` });
+    case "P0040": return new TRPCError({ code: "CONFLICT", message: `Authorization Period ${authPeriod} is marked Expired, so its count can't be corrected. Restore the period first (only possible while no newer period exists). To record a visit that already happened in this period, use Add Missing Session instead; it doesn't need a restore.` });
     case "P0041": {
       const completed = e.message?.match(/below the (\d+) completed/)?.[1];
       return new TRPCError({ code: "BAD_REQUEST", message: `Sessions authorized can't be lower than the ${completed ?? "already"} completed session(s) in Period ${authPeriod}. Nothing was changed.` });
@@ -130,6 +131,32 @@ export function holdScopeConflict(seen: number | null, current: number | null, l
   else if (latest !== null && (seen === null || latest > seen) && current === latest) what = `A newer authorization period (Period ${latest}) was approved for this patient after you opened this alert.`;
   else what = `This patient's current authorization period is now ${current === null ? "none" : `Period ${current}`}, not ${seenLabel}.`;
   return new TRPCError({ code: "CONFLICT", message: `${what} The hold was not applied to ${seenLabel} or any other period. Your reason is kept — close this dialog to review the current alert.` });
+}
+
+/** A strict YYYY-MM-DD string naming a real calendar date. */
+export function isCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+}
+
+/** Maps add_missing_session_with_audit's refusals. Exported for unit tests. */
+export function toAddMissingSessionError(e: unknown, authPeriod: number): unknown {
+  const err = e as { code?: string; details?: string | null };
+  switch (err?.code) {
+    case "P0020": return new TRPCError({ code: "NOT_FOUND", message: "Patient not found" });
+    case "P0034": return new TRPCError({ code: "NOT_FOUND", message: `Authorization Period ${authPeriod} was not found for this patient.` });
+    case "P0036": return new TRPCError({ code: "CONFLICT", message: `That date is after Authorization Period ${authPeriod} expired, so it can't be recorded in this period. Nothing was changed.` });
+    case "P0060": return new TRPCError({ code: "BAD_REQUEST", message: "That date is in the future. Add Missing Session is only for visits that already happened. Nothing was changed." });
+    case "P0061": {
+      const [p, s] = (err.details ?? "").split(":");
+      const where = p ? ` as Period ${p}${s ? `, Session ${s}` : ""}` : "";
+      return new TRPCError({ code: "CONFLICT", message: `That date of service is already recorded${where}. If its CMS-1500 is missing, add the claim to that session instead of a new session. Nothing was changed.` });
+    }
+    case "P0062": return new TRPCError({ code: "CONFLICT", message: `All ${err.details ?? ""} authorized sessions of Period ${authPeriod} already have a date of service, so another visit can't be added without exceeding the authorization. Nothing was changed.` });
+    case "22023": return new TRPCError({ code: "BAD_REQUEST", message: "Enter a complete, valid date of service." });
+    default: return e;
+  }
 }
 
 /** Maps hold_authorization_request_with_audit's refusals (other than a revalidated P0050). */
@@ -1197,6 +1224,27 @@ export const appRouter = router({
           if (code === "P0037") throw new TRPCError({ code: "CONFLICT", message: "This period can't be restored: a newer authorization period already exists." });
           if (code === "22023") throw new TRPCError({ code: "BAD_REQUEST", message: "A reason (500 characters or fewer) is required to restore an expired period." });
           throw err;
+        }
+      }),
+
+    // Historical correction, not restoration: records a visit that already
+    // happened into the period the user explicitly selected (often an
+    // Expired / completed one while a newer period is current). Same gate as
+    // visits.update. The period is required — never defaulted to the newest.
+    // Only that period's first unused session row gets the date; the period
+    // stays Expired/completed, the newer period is untouched, no row is
+    // created or renumbered, and claims/money are not touched.
+    addMissingSession: normalProtectedProcedure
+      .input(z.object({
+        patientId: z.string().uuid(),
+        authPeriod: z.number().int().min(1),
+        dateOfService: z.string().refine(isCalendarDate, "Enter a complete, valid date of service."),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        try {
+          return await addMissingSession(input.patientId, input.authPeriod, input.dateOfService, getActorContext(ctx.user));
+        } catch (err: unknown) {
+          throw toAddMissingSessionError(err, input.authPeriod);
         }
       }),
 

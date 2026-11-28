@@ -86,6 +86,7 @@ export function LogSessionDialog({ patientId, patientName, remaining, activePeri
 
   const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    e.stopPropagation();
     if (remaining <= 0) {
       toast.error('No sessions remaining for this patient');
       return;
