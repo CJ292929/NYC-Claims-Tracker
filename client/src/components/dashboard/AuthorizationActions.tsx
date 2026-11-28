@@ -27,6 +27,7 @@ import {
 import { CalendarX, CheckCircle2, Loader2, Pencil, RotateCcw, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import { trpc } from '@/lib/trpc';
+import { guardFormEnter, MOD_ENTER_HINT, onFormSubmit, submitFormOnModEnter } from '@/lib/keyboardEntry';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
 
 export interface ApproveTarget {
@@ -224,6 +225,8 @@ export function ApproveAuthorizationDialog({ target, onClose }: { target: Approv
             )}
           </DialogDescription>
         </DialogHeader>
+        {/* Enter in any field submits through handleApproveSubmit (validated, guarded). */}
+        <form noValidate onKeyDown={guardFormEnter} onSubmit={onFormSubmit(handleApproveSubmit)}>
         <div className="space-y-4 py-2">
           <div className="space-y-1.5">
             <Label htmlFor="new-sessions" className="text-brand-blue font-semibold">
@@ -301,12 +304,12 @@ export function ApproveAuthorizationDialog({ target, onClose }: { target: Approv
           )}
         </div>
         <div className="flex gap-3 pt-2">
-          <Button variant="outline" className="flex-1" onClick={onClose} disabled={approveAuthorization.isPending}>
+          <Button type="button" variant="outline" className="flex-1" onClick={onClose} disabled={approveAuthorization.isPending}>
             Cancel
           </Button>
           <Button
+            type="submit"
             className="flex-1 bg-green-600 hover:bg-green-700 text-white"
-            onClick={handleApproveSubmit}
             disabled={!canSubmit}
           >
             {approveAuthorization.isPending ? (
@@ -316,6 +319,7 @@ export function ApproveAuthorizationDialog({ target, onClose }: { target: Approv
             )}
           </Button>
         </div>
+        </form>
       </DialogContent>
     </Dialog>
   );
@@ -602,6 +606,7 @@ export function CorrectPeriodCountControl({
               Authorization Period {period} for <strong>{patientName}</strong>. Only this period changes.
             </DialogDescription>
           </DialogHeader>
+          <form noValidate onKeyDown={guardFormEnter} onSubmit={onFormSubmit(confirm)}>
           <div className="space-y-4 py-1">
             <dl className="grid grid-cols-3 gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-center text-sm">
               <div><dt className="text-xs text-slate-500">Current</dt><dd className="font-semibold text-brand-blue">{authorized}</dd></div>
@@ -612,6 +617,8 @@ export function CorrectPeriodCountControl({
               <p role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                 Period {period} is marked Expired, so its count can&apos;t be corrected here. Restore the period first
                 (only possible while no newer period exists). Correcting a count never reactivates an expired period.
+                To record a visit that already happened in this period, use <strong>Add Missing Session</strong> on the
+                period instead. It doesn&apos;t need a restore.
               </p>
             ) : (
               <>
@@ -638,9 +645,12 @@ export function CorrectPeriodCountControl({
                     value={reason}
                     maxLength={500}
                     onChange={(e) => setReason(e.target.value)}
+                    onKeyDown={submitFormOnModEnter}
+                    aria-describedby={`correct-reason-hint-${period}`}
                     placeholder="e.g. Payer approval letter lists 20 sessions, not 16"
                     disabled={mutation.isPending}
                   />
+                  <p id={`correct-reason-hint-${period}`} className="text-xs text-slate-500">Enter adds a new line. {MOD_ENTER_HINT}.</p>
                 </div>
                 <p className="text-xs text-slate-500">
                   Completed sessions, dates of service, statuses, workflow fields and payment amounts are kept.
@@ -652,16 +662,17 @@ export function CorrectPeriodCountControl({
             )}
           </div>
           <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row">
-            <Button variant="outline" className="flex-1" onClick={() => setOpen(false)} disabled={mutation.isPending}>
+            <Button type="button" variant="outline" className="flex-1" onClick={() => setOpen(false)} disabled={mutation.isPending}>
               {expired ? 'Close' : 'Cancel'}
             </Button>
             {!expired && (
-              <Button className="flex-1 bg-brand-blue hover:bg-brand-blue/90 text-white" onClick={confirm} disabled={!canConfirm}>
+              <Button type="submit" className="flex-1 bg-brand-blue hover:bg-brand-blue/90 text-white" disabled={!canConfirm}>
                 {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin mr-1" />}
                 Save Correction
               </Button>
             )}
           </div>
+          </form>
         </DialogContent>
       </Dialog>
     </>

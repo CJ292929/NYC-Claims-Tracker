@@ -14,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { guardFormEnter, MOD_ENTER_HINT, onFormSubmit, submitFormOnModEnter } from '@/lib/keyboardEntry';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Loader2, PauseCircle, PlayCircle } from 'lucide-react';
 import { toast } from 'sonner';
@@ -98,6 +99,7 @@ export function HoldAuthorizationRequestDialog({ target, onClose }: { target: Ho
             The request leaves Authorization Alerts until you remove the hold. Nothing else changes: status, sessions, expiry and claims stay as they are.
           </DialogDescription>
         </DialogHeader>
+        <form noValidate className="space-y-4" onKeyDown={guardFormEnter} onSubmit={onFormSubmit(submit)}>
         <div className="space-y-1.5">
           <Label htmlFor="hold-reason">Reason (required)</Label>
           <Textarea
@@ -105,23 +107,25 @@ export function HoldAuthorizationRequestDialog({ target, onClose }: { target: Ho
             value={reason}
             maxLength={HOLD_REASON_MAX}
             onChange={(e) => setReason(e.target.value)}
+            onKeyDown={submitFormOnModEnter}
             placeholder="e.g. Waiting for updated referral from physician"
             aria-invalid={reason.length > 0 && !normalized}
             aria-describedby="hold-reason-help"
           />
           <p id="hold-reason-help" className="text-xs text-muted-foreground">
-            {reason.length > 0 && !normalized ? 'Enter a reason, not just spaces.' : `${reason.trim().length}/${HOLD_REASON_MAX}`}
+            {reason.length > 0 && !normalized ? 'Enter a reason, not just spaces.' : `${reason.trim().length}/${HOLD_REASON_MAX} · ${MOD_ENTER_HINT}`}
           </p>
           {failure && (
             <p role="alert" className="text-xs font-medium text-red-700 bg-red-50 rounded px-2 py-1.5">{failure}</p>
           )}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={hold.isPending}>Cancel</Button>
-          <Button onClick={submit} disabled={!normalized || hold.isPending} className="bg-brand-blue text-white hover:bg-brand-blue-dark">
+          <Button type="button" variant="outline" onClick={onClose} disabled={hold.isPending}>Cancel</Button>
+          <Button type="submit" disabled={!normalized || hold.isPending} className="bg-brand-blue text-white hover:bg-brand-blue-dark">
             {hold.isPending && <Loader2 className="w-4 h-4 animate-spin" />} Hold Request
           </Button>
         </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );

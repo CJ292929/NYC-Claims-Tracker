@@ -1058,6 +1058,48 @@ export async function setAuthPeriodExpired(
   return typeof data === "number" ? data : 0;
 }
 
+export interface AddMissingSessionResult {
+  visitId: string;
+  authPeriod: number;
+  sessionNumber: number | null;
+  sessionsAuthorized: number;
+  completed: number;
+}
+
+/**
+ * Records a visit that already happened into the EXPLICITLY given period
+ * (add_missing_session_with_audit): fills that period's first unused session
+ * row, never restores or extends the period, never touches another period.
+ * The period is required — there is no default to the newest one.
+ */
+export async function addMissingSession(
+  patientId: string,
+  authPeriod: number,
+  dateOfService: string,
+  actor: ActorContext,
+): Promise<AddMissingSessionResult> {
+  const { data, error } = await supabase.rpc("add_missing_session_with_audit", {
+    p_patient_id: patientId,
+    p_auth_period: authPeriod,
+    p_date_of_service: dateOfService,
+    p_actor_id: actor.actorId,
+    p_actor_type: actor.actorType,
+    p_actor_display: actor.actorDisplay,
+  });
+  if (error) {
+    console.error("[Supabase] addMissingSession:", error);
+    throw error;
+  }
+  const out = data as { visit_id: string; auth_period: number; session_number: number | null; sessions_authorized: number; completed: number };
+  return {
+    visitId: out.visit_id,
+    authPeriod: out.auth_period,
+    sessionNumber: out.session_number,
+    sessionsAuthorized: out.sessions_authorized,
+    completed: out.completed,
+  };
+}
+
 export async function getCompletedPatients(): Promise<string[]> {
   const { data: allPatients, error: pErr } = await selectAllRows<{ id: string }>((from, to) => supabase
     .from("patients")

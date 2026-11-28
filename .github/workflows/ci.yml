@@ -83,3 +83,12 @@ jobs:
         env:
           REQUIRE_PG_INTEGRATION: "1"
         run: npx vitest run server/authRequestHold.pg.integration.test.ts
+
+      # Add Missing Session (historical correction of a previous period), end
+      # to end through the real router, PostgREST and Postgres. Synthetic data.
+      - name: Historical session backfill suite (PostgREST + Postgres)
+        env:
+          REQUIRE_PG_INTEGRATION: "1"
+        run: |
+          docker pull public.ecr.aws/supabase/postgrest:v14.5
+          npx vitest run server/historicalSessionBackfill.postgrest.integration.test.ts

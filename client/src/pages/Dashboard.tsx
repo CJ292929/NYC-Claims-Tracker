@@ -50,8 +50,11 @@ import { AuthorizationSessionsSection } from '@/components/dashboard/Authorizati
 import { getPeriodMetrics } from '@shared/authPeriodMetrics';
 import { deriveDashboardKpis } from '@/lib/dashboardOverview';
 import { createSingleFlightGuard } from '@/lib/concurrencyGuards';
+import { guardFormEnter, inlineKeyIntent, onFormSubmit } from '@/lib/keyboardEntry';
 import { ClaimImportDialog } from '@/components/claims/ClaimImportDialog';
 import { ClaimBulkUploadPanel } from '@/components/claims/ClaimBulkUploadPanel';
+import { AddMissingSessionDialog } from '@/components/dashboard/AddMissingSessionDialog';
+import { EditableCell } from '@/components/dashboard/EditableCell';
 import { LogSessionDialog } from '@/components/dashboard/LogSessionDialog';
 import { PatientBulkUploadDialog } from '@/components/dashboard/PatientBulkUploadDialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -190,82 +193,7 @@ function authBannerMessage(
   }
 }
 
-/** Generic click-to-edit cell for a single date/number field on a visit row.
- *  Manages its own open/closed state so every correctable field (session #,
- *  date of service, # authorized, # remaining, date auth submitted) can share
- *  one implementation instead of a bespoke editingXId/editingXValue pair each.
- *  `onSave` returns `false` to keep the field open (e.g. failed validation or
- *  a rejected mutation) — anything else closes it back to display mode. */
-function EditableCell({
-  type,
-  value,
-  display,
-  onSave,
-  isSaving,
-  min,
-  step,
-  emptyLabel = 'Click to set',
-  extraActions,
-}: {
-  type: 'date' | 'number';
-  value: string;
-  display: React.ReactNode;
-  onSave: (value: string) => Promise<boolean | void> | boolean | void;
-  isSaving: boolean;
-  min?: number;
-  step?: number;
-  emptyLabel?: string;
-  /** Extra buttons shown beside Save / Cancel while editing. */
-  extraActions?: React.ReactNode;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(value);
-
-  if (editing) {
-    return (
-      <div className="flex items-center gap-2 flex-wrap">
-        <input
-          type={type}
-          min={min}
-          step={step}
-          value={draft}
-          onChange={e => setDraft(e.target.value)}
-          autoFocus
-          className="border border-brand-gold rounded-md px-2 py-1.5 text-sm text-brand-blue focus:outline-none focus:ring-2 focus:ring-brand-gold/30 min-h-[36px] w-full sm:w-auto"
-        />
-        <Button
-          size="sm"
-          disabled={isSaving}
-          onClick={async () => {
-            const result = await onSave(draft);
-            if (result !== false) setEditing(false);
-          }}
-          className="h-auto min-h-[32px] text-green-600 hover:text-green-800 font-bold text-xs px-2 py-1 bg-green-50 hover:bg-green-100"
-        >
-          {isSaving ? '…' : 'Save'}
-        </Button>
-        <Button
-          size="sm"
-          variant="secondary"
-          onClick={() => setEditing(false)}
-          className="h-auto min-h-[32px] text-gray-500 hover:text-gray-700 font-bold text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200"
-        >
-          Cancel
-        </Button>
-        {extraActions}
-      </div>
-    );
-  }
-
-  return (
-    <button
-      onClick={() => { setDraft(value); setEditing(true); }}
-      className="hover:underline cursor-pointer text-left"
-    >
-      {display ?? <span className="text-gray-300 italic font-normal">{emptyLabel}</span>}
-    </button>
-  );
-}
+// EditableCell moved to components/dashboard/EditableCell.tsx (Enter saves, Escape cancels).
 
 /** Inline Date of Service editor for one session row, with an explicit,
  *  confirmed "Clear date" (ClearDateOfServiceDialog). Saving an emptied date
@@ -295,6 +223,7 @@ function DateOfServiceEditor({
   return (
     <>
       <EditableCell
+        label="Date of Service"
         key={resetKey}
         type="date"
         value={toInputDate(stored)}
@@ -505,6 +434,18 @@ export default function Dashboard() {
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   // Inline cell editing state for Claims Tracker
   const [editingCell, setEditingCell] = useState<{ claimId: string; field: string } | null>(null);
+  // One commit per claim-cell edit: Enter, then the blur that follows (or a
+  // second Enter while the save is pending), must not write twice, and the
+  // blur after Escape must not save what Escape cancelled. Reset when a new
+  // edit starts, and on failure so the kept input can be retried.
+  const claimEditDoneRef = useRef(false);
+  // Synchronous guards: Enter submits these forms, and isPending only disables
+  // the button after a re-render.
+  const addPatientGuardRef = useRef(createSingleFlightGuard());
+  const addClaimGuardRef = useRef(createSingleFlightGuard());
+  const addInsuranceGuardRef = useRef(createSingleFlightGuard());
+  const editPatientGuardRef = useRef(createSingleFlightGuard());
+  const cancelClaimEdit = () => { claimEditDoneRef.current = true; setEditingCell(null); };
   const [editingValue, setEditingValue] = useState<string>('');
   // Column visibility for Claims Tracker — persisted in localStorage
   // Default visible set is the 18 core claim fields; Place of Service and LMN
@@ -769,7 +710,8 @@ export default function Dashboard() {
       toast.error('Insurance company name is required');
       return;
     }
-    createInsurer.mutate({ name: newInsuranceName });
+    if (!addInsuranceGuardRef.current.tryEnter()) return;
+    createInsurer.mutate({ name: newInsuranceName }, { onSettled: () => addInsuranceGuardRef.current.exit() });
   };
 
   // Soft delete ("Deactivate") — see insurance.delete in server/routers.ts.
@@ -935,7 +877,10 @@ export default function Dashboard() {
       utils.claims.getStatusCounts.invalidate();
       setEditingCell(null);
     },
-    onError: (e) => toast.error(`Failed to update claim: ${e.message}`),
+    onError: (e) => {
+      claimEditDoneRef.current = false; // the input stays open with its value; Enter retries
+      toast.error(`Failed to update claim: ${e.message}`);
+    },
   });
 
   const deleteClaim = trpc.claims.delete.useMutation({
@@ -1470,6 +1415,29 @@ export default function Dashboard() {
               Correct any patient detail — every field here can be fixed if a mistake was made.
             </DialogDescription>
           </DialogHeader>
+          <form noValidate onKeyDown={guardFormEnter} onSubmit={onFormSubmit(() => {
+            if (!editPatientName.trim() || !editPatientGuardRef.current.tryEnter()) return;
+            void (async () => {
+                if (!selectedPatient) return;
+                try {
+                  await updatePatient.mutateAsync({
+                    id: selectedPatient.id,
+                    name: editPatientName.trim(),
+                    insurance: editPatientInsurance,
+                    authDate: editPatientAuthDate || null,
+                    authValidUntil: editPatientAuthValidUntil
+                      ? new Date(editPatientAuthValidUntil + 'T00:00:00Z').getTime()
+                      : null,
+                    ...(canAccessClaims
+                      ? { claimsStatus: (editPatientClaimsStatus || 'none') as 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | 'none' }
+                      : {}),
+                  });
+                  setIsEditPatientOpen(false);
+                } catch {
+                  // onError on the mutation already surfaces a toast
+                }
+              })().finally(() => editPatientGuardRef.current.exit());
+          })}>
           <div className="space-y-4 py-2 max-h-[60vh] overflow-y-auto pr-1">
             <div>
               <Label htmlFor="edit-patient-name" className="text-brand-blue font-semibold">Patient Name</Label>
@@ -1546,6 +1514,7 @@ export default function Dashboard() {
           </div>
           <DialogFooter className="flex gap-3 pt-2 sm:justify-start">
             <Button
+              type="button"
               variant="outline"
               className="flex-1"
               onClick={() => setIsEditPatientOpen(false)}
@@ -1553,33 +1522,15 @@ export default function Dashboard() {
               Cancel
             </Button>
             <Button
+              type="submit"
               className="flex-1 bg-brand-blue hover:bg-brand-blue/90 text-white font-semibold"
               disabled={updatePatient.isPending || !editPatientName.trim()}
-              onClick={async () => {
-                if (!selectedPatient) return;
-                try {
-                  await updatePatient.mutateAsync({
-                    id: selectedPatient.id,
-                    name: editPatientName.trim(),
-                    insurance: editPatientInsurance,
-                    authDate: editPatientAuthDate || null,
-                    authValidUntil: editPatientAuthValidUntil
-                      ? new Date(editPatientAuthValidUntil + 'T00:00:00Z').getTime()
-                      : null,
-                    ...(canAccessClaims
-                      ? { claimsStatus: (editPatientClaimsStatus || 'none') as 'submitted' | 'approved' | 'pending' | 'denied' | 'pended' | 'rejected' | 'resubmitted' | 'none' }
-                      : {}),
-                  });
-                  setIsEditPatientOpen(false);
-                } catch {
-                  // onError on the mutation already surfaces a toast
-                }
-              }}
             >
               {updatePatient.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
               Save Changes
             </Button>
           </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
 
@@ -1996,6 +1947,20 @@ export default function Dashboard() {
                             View Claims
                           </Button>
                           )}
+                          {/* Historical correction for a previous period: records a visit that
+                              already happened into THIS period without restoring it. */}
+                          {!isActive && periodVisits.length > 0 && (
+                          <AddMissingSessionDialog
+                            patientId={activePatient.id}
+                            patientName={activePatient.name}
+                            period={period}
+                            authorized={periodMetrics.authorized}
+                            completed={periodMetrics.completed}
+                            unusedRows={periodVisits.filter(v => !v.dateOfService).length}
+                            expired={periodMetrics.expired}
+                            periodExpiredAt={periodVisits.find(v => v.periodExpiredAt != null)?.periodExpiredAt}
+                          />
+                          )}
                           {/* Log Session button only on active period (oldest with remaining sessions) */}
                           {isActive && (
                           <LogSessionDialog
@@ -2019,6 +1984,7 @@ export default function Dashboard() {
                                   <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Session</span>
                                   <span className="font-semibold text-gray-700 text-base">
                                     <EditableCell
+                                      label="Session #"
                                       type="number"
                                       min={1}
                                       value={visit.sessionNumber != null ? String(visit.sessionNumber) : ''}
@@ -2064,6 +2030,7 @@ export default function Dashboard() {
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide"># Authorized</p>
                                   <div className="font-semibold text-brand-blue text-base">
                                     <EditableCell
+                                      label="# Authorized"
                                       type="number"
                                       min={0}
                                       value={visit.sessionsAuthorized != null ? String(visit.sessionsAuthorized) : ''}
@@ -2081,6 +2048,7 @@ export default function Dashboard() {
                                   <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide"># Remaining</p>
                                   <div className="font-bold text-brand-gold text-base">
                                     <EditableCell
+                                      label="# Remaining"
                                       type="number"
                                       min={0}
                                       value={visit.sessionsRemaining != null ? String(visit.sessionsRemaining) : ''}
@@ -2103,6 +2071,7 @@ export default function Dashboard() {
                                 <div className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue transition-colors min-h-[40px]">
                                   <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
                                   <EditableCell
+                                    label="Date Authorization Submitted"
                                     type="date"
                                     value={toInputDate(visit.dateAshSubmitted)}
                                     display={visit.dateAshSubmitted ? <span className="text-brand-blue text-sm">{formatDate(visit.dateAshSubmitted)}</span> : null}
@@ -2184,6 +2153,7 @@ export default function Dashboard() {
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             <div className="font-semibold text-brand-blue text-base">
                               <EditableCell
+                                label="# Authorized"
                                 type="number"
                                 min={0}
                                 value={visit.sessionsAuthorized != null ? String(visit.sessionsAuthorized) : ''}
@@ -2201,6 +2171,7 @@ export default function Dashboard() {
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             <div className="font-bold text-brand-gold text-base">
                               <EditableCell
+                                label="# Remaining"
                                 type="number"
                                 min={0}
                                 value={visit.sessionsRemaining != null ? String(visit.sessionsRemaining) : ''}
@@ -2218,6 +2189,7 @@ export default function Dashboard() {
                           <td className="px-4 py-2.5 text-sm whitespace-nowrap">
                             <div className="font-medium text-gray-700 text-base">
                               <EditableCell
+                                label="Session #"
                                 type="number"
                                 min={1}
                                 value={visit.sessionNumber != null ? String(visit.sessionNumber) : ''}
@@ -2248,6 +2220,7 @@ export default function Dashboard() {
                             <div className="flex items-center gap-2 group text-gray-400 hover:text-brand-blue transition-colors">
                               <Calendar className="w-4 h-4 text-brand-gold group-hover:scale-110 transition-transform shrink-0" />
                               <EditableCell
+                                label="Date Authorization Submitted"
                                 type="date"
                                 value={toInputDate(visit.dateAshSubmitted)}
                                 display={visit.dateAshSubmitted ? <span className="text-brand-blue text-sm">{formatDate(visit.dateAshSubmitted)}</span> : null}
@@ -2463,12 +2436,15 @@ export default function Dashboard() {
                             editingCell?.claimId === claimId && editingCell?.field === field;
 
                           const startEditField = (claimId: string, field: string, rawValue: string) => {
+                            claimEditDoneRef.current = false;
                             setEditingCell({ claimId, field });
                             setEditingValue(rawValue);
                           };
 
                           const commitEditField = (claimId: string, field: string, isNumeric = false, isDate = false) => {
-                            if (!editingCell) return;
+                            if (!editingCell || editingCell.claimId !== claimId || editingCell.field !== field) return;
+                            if (claimEditDoneRef.current) return;
+                            claimEditDoneRef.current = true;
                             const payload: Record<string, any> = { id: claimId };
                             payload[field] = isNumeric
                               ? (editingValue.trim() ? parseFloat(editingValue) : null)
@@ -2606,8 +2582,9 @@ export default function Dashboard() {
                                     onChange={e => setEditingValue(e.target.value)}
                                     onBlur={() => commitEditField(claimId, field, type === 'number', type === 'date')}
                                     onKeyDown={e => {
-                                      if (e.key === 'Enter') commitEditField(claimId, field, type === 'number', type === 'date');
-                                      if (e.key === 'Escape') setEditingCell(null);
+                                      const intent = inlineKeyIntent(e);
+                                      if (intent === 'save') { e.preventDefault(); commitEditField(claimId, field, type === 'number', type === 'date'); }
+                                      else if (intent === 'cancel') cancelClaimEdit();
                                     }}
                                     onClick={e => e.stopPropagation()}
                                   />
@@ -2766,7 +2743,7 @@ export default function Dashboard() {
                                                 value={editingValue}
                                                 onChange={e => setEditingValue(e.target.value)}
                                                 onBlur={() => commitEditField(claim.id, 'expireBcbsClaimNumber')}
-                                                onKeyDown={e => { if (e.key === 'Enter') commitEditField(claim.id, 'expireBcbsClaimNumber'); if (e.key === 'Escape') setEditingCell(null); }}
+                                                onKeyDown={e => { const intent = inlineKeyIntent(e); if (intent === 'save') { e.preventDefault(); commitEditField(claim.id, 'expireBcbsClaimNumber'); } else if (intent === 'cancel') cancelClaimEdit(); }}
                                                 onClick={e => e.stopPropagation()}
                                               />
                                             ) : (
@@ -2828,7 +2805,7 @@ export default function Dashboard() {
                                             value={editingValue}
                                             onChange={e => setEditingValue(e.target.value)}
                                             onBlur={() => commitEdit(field)}
-                                            onKeyDown={e => { if (e.key === 'Enter') commitEdit(field); if (e.key === 'Escape') setEditingCell(null); }}
+                                            onKeyDown={e => { const intent = inlineKeyIntent(e); if (intent === 'save') { e.preventDefault(); commitEdit(field); } else if (intent === 'cancel') cancelClaimEdit(); }}
                                           />
                                         ) : (
                                           <span className="block truncate max-w-[100px]">{value || <span className="text-gray-300">—</span>}</span>
@@ -2849,7 +2826,7 @@ export default function Dashboard() {
                                               value={editingValue}
                                               onChange={e => setEditingValue(e.target.value)}
                                               onBlur={() => commitEdit(field, true)}
-                                              onKeyDown={e => { if (e.key === 'Enter') commitEdit(field, true); if (e.key === 'Escape') setEditingCell(null); }}
+                                              onKeyDown={e => { const intent = inlineKeyIntent(e); if (intent === 'save') { e.preventDefault(); commitEdit(field, true); } else if (intent === 'cancel') cancelClaimEdit(); }}
                                             />
                                           ) : (
                                             <span>{numVal != null && !isNaN(numVal) ? `${prefix}${numVal.toFixed(decimals)}` : <span className="text-gray-300">—</span>}</span>
@@ -2871,7 +2848,7 @@ export default function Dashboard() {
                                               value={editingValue}
                                               onChange={e => setEditingValue(e.target.value)}
                                               onBlur={() => commitEdit(field, false, true)}
-                                              onKeyDown={e => { if (e.key === 'Enter') commitEdit(field, false, true); if (e.key === 'Escape') setEditingCell(null); }}
+                                              onKeyDown={e => { const intent = inlineKeyIntent(e); if (intent === 'save') { e.preventDefault(); commitEdit(field, false, true); } else if (intent === 'cancel') cancelClaimEdit(); }}
                                             />
                                           ) : (
                                             <span>{displayDate || <span className="text-gray-300">—</span>}</span>
@@ -2910,7 +2887,7 @@ export default function Dashboard() {
                                                 value={editingValue}
                                                 onChange={e => setEditingValue(e.target.value)}
                                                 onBlur={() => commitEdit('expireBcbsClaimNumber')}
-                                                onKeyDown={e => { if (e.key === 'Enter') commitEdit('expireBcbsClaimNumber'); if (e.key === 'Escape') setEditingCell(null); }}
+                                                onKeyDown={e => { const intent = inlineKeyIntent(e); if (intent === 'save') { e.preventDefault(); commitEdit('expireBcbsClaimNumber'); } else if (intent === 'cancel') cancelClaimEdit(); }}
                                               />
                                             ) : (
                                               <span className="block truncate max-w-[100px]">
@@ -3022,6 +2999,36 @@ export default function Dashboard() {
               Period {addClaimPeriod} for {activePatient?.name}
             </DialogDescription>
           </DialogHeader>
+          <form noValidate onKeyDown={guardFormEnter} onSubmit={onFormSubmit(() => {
+                if (!activePatient || addClaimPeriod === null || !addClaimGuardRef.current.tryEnter()) return;
+                setIsSavingClaim(true);
+                createClaim.mutate({
+                  patientId: activePatient.id,
+                  authPeriod: addClaimPeriod,
+                  placeOfService: claimFormData.placeOfService || null,
+                  dateOfService: claimFormData.dateOfService || null,
+                  visitNumber: claimFormData.visitNumber !== '' ? parseInt(claimFormData.visitNumber, 10) : null,
+                  cptCodes: claimFormData.cptCodes || null,
+                  unitsBilled: claimFormData.unitsBilled ? parseInt(claimFormData.unitsBilled) : null,
+                  diagnosisCodes: claimFormData.diagnosisCodes || null,
+                  modifier: claimFormData.modifier || null,
+                  chargeAmount: claimFormData.chargeAmount ? parseFloat(claimFormData.chargeAmount) : null,
+                  insuranceReimbursement: claimFormData.insuranceReimbursement ? parseFloat(claimFormData.insuranceReimbursement) : null,
+                  patientAmountPaid: claimFormData.patientAmountPaid !== '' ? parseFloat(claimFormData.patientAmountPaid) : null,
+                  patientAmountDue: claimFormData.patientAmountDue !== '' ? parseFloat(claimFormData.patientAmountDue) : null,
+                  insuranceBilled: claimFormData.insuranceBilled || null,
+                  oaClaimNumber: claimFormData.oaClaimNumber || null,
+                  claimSubmittedDate: claimFormData.claimSubmittedDate || null,
+                  expireBcbsClaimNumber: claimFormData.expireBcbsClaimNumber || null,
+                  claimStatus: (claimFormData.claimStatus as 'submitted' | 'approved' | 'pending' | 'denied') || 'submitted',
+                  paymentReceived: claimFormData.paymentReceived ? parseFloat(claimFormData.paymentReceived) : null,
+                  checkDate: claimFormData.checkDate || null,
+                  checkNumberVirtualCard: claimFormData.checkNumberVirtualCard || null,
+                  dateReceived: claimFormData.dateReceived || null,
+                  dateOfAppeal: claimFormData.dateOfAppeal || null,
+                  referenceNo: claimFormData.referenceNo || null,
+                }, { onSettled: () => addClaimGuardRef.current.exit() });
+          })}>
           <div className="space-y-5">
             <div className="space-y-3">
               <h4 className="text-xs font-semibold uppercase tracking-wide text-brand-blue">Claim Information</h4>
@@ -3147,44 +3154,16 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex gap-3 justify-end mt-6">
-            <Button variant="outline" onClick={() => setShowAddClaimDialog(false)}>Cancel</Button>
+            <Button type="button" variant="outline" onClick={() => setShowAddClaimDialog(false)}>Cancel</Button>
             <Button
+              type="submit"
               disabled={isSavingClaim || !activePatient}
-              onClick={() => {
-                if (!activePatient || addClaimPeriod === null) return;
-                setIsSavingClaim(true);
-                createClaim.mutate({
-                  patientId: activePatient.id,
-                  authPeriod: addClaimPeriod,
-                  placeOfService: claimFormData.placeOfService || null,
-                  dateOfService: claimFormData.dateOfService || null,
-                  visitNumber: claimFormData.visitNumber !== '' ? parseInt(claimFormData.visitNumber, 10) : null,
-                  cptCodes: claimFormData.cptCodes || null,
-                  unitsBilled: claimFormData.unitsBilled ? parseInt(claimFormData.unitsBilled) : null,
-                  diagnosisCodes: claimFormData.diagnosisCodes || null,
-                  modifier: claimFormData.modifier || null,
-                  chargeAmount: claimFormData.chargeAmount ? parseFloat(claimFormData.chargeAmount) : null,
-                  insuranceReimbursement: claimFormData.insuranceReimbursement ? parseFloat(claimFormData.insuranceReimbursement) : null,
-                  patientAmountPaid: claimFormData.patientAmountPaid !== '' ? parseFloat(claimFormData.patientAmountPaid) : null,
-                  patientAmountDue: claimFormData.patientAmountDue !== '' ? parseFloat(claimFormData.patientAmountDue) : null,
-                  insuranceBilled: claimFormData.insuranceBilled || null,
-                  oaClaimNumber: claimFormData.oaClaimNumber || null,
-                  claimSubmittedDate: claimFormData.claimSubmittedDate || null,
-                  expireBcbsClaimNumber: claimFormData.expireBcbsClaimNumber || null,
-                  claimStatus: (claimFormData.claimStatus as 'submitted' | 'approved' | 'pending' | 'denied') || 'submitted',
-                  paymentReceived: claimFormData.paymentReceived ? parseFloat(claimFormData.paymentReceived) : null,
-                  checkDate: claimFormData.checkDate || null,
-                  checkNumberVirtualCard: claimFormData.checkNumberVirtualCard || null,
-                  dateReceived: claimFormData.dateReceived || null,
-                  dateOfAppeal: claimFormData.dateOfAppeal || null,
-                  referenceNo: claimFormData.referenceNo || null,
-                });
-              }}
               className="bg-brand-blue hover:bg-brand-blue-dark text-white"
             >
               {isSavingClaim ? 'Saving...' : 'Save Claim Record'}
             </Button>
           </div>
+          </form>
         </DialogContent>
       </Dialog>
 
@@ -3234,7 +3213,10 @@ export default function Dashboard() {
           <DialogTitle className="text-brand-blue">Add New Patient</DialogTitle>
           <DialogDescription>Enter patient details to add them to the clinic dashboard</DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
+        <form noValidate className="space-y-4" onKeyDown={guardFormEnter} onSubmit={onFormSubmit(() => {
+          if (!addPatientGuardRef.current.tryEnter()) return;
+          void handleAddPatient().finally(() => addPatientGuardRef.current.exit());
+        })}>
           <div className="space-y-1.5">
             <Label htmlFor="patient-name" className="text-brand-blue font-semibold">Patient Name</Label>
             <Input id="patient-name" placeholder="Enter patient name" value={newPatientName} onChange={e => setNewPatientName(e.target.value)} className="border-brand-cream-dark" />
@@ -3263,11 +3245,11 @@ export default function Dashboard() {
             <p className="text-xs text-gray-500">Staff will be alerted 1 week before this date to request a new authorization.</p>
             <Input id="auth-valid-until" type="date" value={newPatientAuthValidUntil} onChange={e => setNewPatientAuthValidUntil(e.target.value)} className="border-brand-cream-dark" />
           </div>
-          <Button onClick={handleAddPatient} disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
+          <Button type="submit" disabled={createPatient.isPending || bulkCreateVisits.isPending} className="w-full bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
             {(createPatient.isPending || bulkCreateVisits.isPending) ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
             Add Patient
           </Button>
-        </div>
+        </form>
       </DialogContent>
     </Dialog>
   );
@@ -3291,7 +3273,7 @@ export default function Dashboard() {
           <DialogTitle className="text-brand-blue">Add Insurance Company</DialogTitle>
           <DialogDescription>Add a new insurance company to the shared list used across patient forms and filters</DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
+        <form noValidate className="space-y-4" onKeyDown={guardFormEnter} onSubmit={onFormSubmit(handleAddInsurance)}>
           <div className="space-y-1.5">
             <Label htmlFor="new-insurance-name" className="text-brand-blue font-semibold">Insurance Company Name</Label>
             <Input
@@ -3299,20 +3281,19 @@ export default function Dashboard() {
               placeholder="Enter insurance company name"
               value={newInsuranceName}
               onChange={e => setNewInsuranceName(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleAddInsurance(); }}
               className="border-brand-cream-dark"
             />
           </div>
           <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setShowAddInsurance(false)} disabled={createInsurer.isPending}>
+            <Button type="button" variant="outline" onClick={() => setShowAddInsurance(false)} disabled={createInsurer.isPending}>
               Cancel
             </Button>
-            <Button onClick={handleAddInsurance} disabled={createInsurer.isPending} className="bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
+            <Button type="submit" disabled={createInsurer.isPending} className="bg-brand-blue hover:bg-brand-blue-dark text-white font-semibold">
               {createInsurer.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
               Add Insurance Company
             </Button>
           </div>
-        </div>
+        </form>
       </DialogContent>
     </Dialog>
   );
